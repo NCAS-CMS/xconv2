@@ -1,3 +1,0 @@
-PySide6
-cf-python
-cf-plot

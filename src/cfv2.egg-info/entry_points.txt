@@ -1,5 +1,0 @@
-[console_scripts]
-cf-worker = cf_view.worker:main
-
-[gui_scripts]
-cfview2 = cf_view.gui:main
