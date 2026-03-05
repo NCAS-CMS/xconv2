@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from cf_view.gui import CFVMainWindow
+from cf_view.gui import CFVMain
 
 
 @dataclass
@@ -29,7 +29,7 @@ def test_load_selected_file_builds_worker_task() -> None:
     window = _DummyWindow()
     file_path = "/tmp/mock-data.nc"
 
-    CFVMainWindow._load_selected_file(window, file_path)
+    CFVMain._load_selected_file(window, file_path)
 
     assert window.status.messages[-1] == f"Loading file: {file_path}"
     assert len(window.sent_tasks) == 1
@@ -47,7 +47,7 @@ def test_load_selected_file_task_executes_with_mock_cf_example_fields() -> None:
 
     window = _DummyWindow()
     file_path = "/tmp/mock-data.nc"
-    CFVMainWindow._load_selected_file(window, file_path)
+    CFVMain._load_selected_file(window, file_path)
     code = window.sent_tasks[0]
 
     messages: list[tuple[str, object]] = []
