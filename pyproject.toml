@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cfv2"
+version = "1.0beta"
+description = "High-performance data viewer and simple data converter"
+requires-python = ">=3.12"
+dependencies = [
+    "PySide6",
+    "cf-python",
+    "cf-plot",
+]
+
+[project.gui-scripts]
+# This creates a 'cfview2' command that launches your GUI
+cfview2 = "cf_view.gui:main"
+
+[project.scripts]
+# This creates a 'cf-worker' command for the backend process
+cf-worker = "cf_view.worker:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+cf_view = ["assets/*.svg", "assets/*.png"]

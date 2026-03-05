@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: cfcview
+Version: 1.0b0
+Summary: High-performance data viewer and simple data converter
+Requires-Python: >=3.12
+Requires-Dist: PySide6
+Requires-Dist: cf-python
+Requires-Dist: cf-plot
