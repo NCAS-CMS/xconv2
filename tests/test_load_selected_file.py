@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass, field
 
 import pytest
@@ -80,7 +81,13 @@ def test_load_selected_file_task_executes_with_mock_cf_example_fields() -> None:
     assert prefix == "METADATA"
     assert isinstance(payload, list)
     assert len(payload) == 8
-    assert isinstance(payload[0], tuple)
-    assert len(payload[0]) == 2
-    assert payload[0][0].startswith("specific_humidity")
-    assert "specific_humidity" in payload[0][1]
+    assert all(isinstance(item, str) for item in payload)
+
+    parts = payload[0].split("\x1f", 2)
+    assert len(parts) == 3
+    assert parts[0].startswith("specific_humidity")
+    assert "specific_humidity" in parts[1]
+
+    properties = ast.literal_eval(parts[2])
+    assert isinstance(properties, dict)
+ 
