@@ -9,6 +9,7 @@ description = "High-performance data viewer and simple data converter"
 requires-python = ">=3.12"
 dependencies = [
     "PySide6",
+    "superqt",
     "cf-python",
     "cf-plot",
 ]

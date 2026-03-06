@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from cf_view.cf_templates import coordinate_list
 from cf_view.gui import CFVMain
 
 
@@ -90,4 +91,27 @@ def test_load_selected_file_task_executes_with_mock_cf_example_fields() -> None:
 
     properties = ast.literal_eval(parts[2])
     assert isinstance(properties, dict)
+
+
+def test_coordinate_list_emits_coordinates_for_example_field() -> None:
+    """Coordinate template should emit a non-empty coordinate payload for a sample field."""
+    cf = pytest.importorskip("cf")
+
+    messages: list[tuple[str, object]] = []
+    namespace = {
+        "cf": cf,
+        "send_to_gui": lambda prefix, payload: messages.append((prefix, payload)),
+    }
+
+    code = "f = cf.example_fields(0, 1, 2, 3, 4, 5, 6, 7)\n" + coordinate_list(0)
+    exec(code, namespace)
+
+    prefix, payload = messages[-1]
+    assert prefix == "COORD"
+    assert isinstance(payload, list)
+    assert payload
+    assert isinstance(payload[0], tuple)
+    assert len(payload[0]) == 2
+    assert payload[0][0].startswith("latitude")
+    assert isinstance(payload[0][1], list)      
  

@@ -14,8 +14,9 @@ import pickle
 
 from PySide6.QtCore import QProcess
 from PySide6.QtGui import QCloseEvent
+from PySide6.QtWidgets import QListWidgetItem
 
-from .cf_templates import field_list
+from .cf_templates import coordinate_list, field_list
 from .core_window import CFVCore
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,16 @@ class CFVMain(CFVCore):
     def on_file_selected(self, file_path: str) -> None:
         """Handle file selection by requesting worker metadata."""
         self._load_selected_file(file_path)
+
+    def on_field_clicked(self, item: QListWidgetItem) -> None:
+        """Show selection details and request slider coordinates for the field."""
+        super().on_field_clicked(item)
+
+        field_index = self.field_list_widget.row(item)
+        if field_index < 0:
+            return
+
+        self._request_coordinates_for_field(field_index)
 
     def handle_worker_output(self) -> None:
         """Process worker stdout messages and route updates to UI."""
@@ -67,6 +78,16 @@ class CFVMain(CFVCore):
             elif line.startswith("IMG_READY:"):
                 self.status.showMessage("Plot Updated.")
 
+            elif line.startswith("COORD:"):
+                raw_payload = line.split(":", 1)[1]
+                coords = pickle.loads(base64.b64decode(raw_payload))
+                metadata = self._normalize_coordinate_metadata(coords)
+                if metadata:
+                    logger.info("Received coordinate metadata for %d sliders", len(metadata))
+                    self.build_dynamic_sliders(metadata)
+                else:
+                    logger.warning("Received empty coordinate metadata payload")
+
     def handle_worker_error(self) -> None:
         """Log worker stderr output for troubleshooting."""
         stderr_output = self.worker.readAllStandardError().data().decode(errors="replace").strip()
@@ -89,6 +110,46 @@ class CFVMain(CFVCore):
         code = f"f = cf.read({file_path!r})\n" + field_list + "send_to_gui('METADATA', fields)"
         self._send_worker_task(code)
 
+    def _request_coordinates_for_field(self, index: int) -> None:
+        """Request coordinate arrays for a selected field index."""
+        self.status.showMessage(f"Loading coordinates for field index {index}...")
+        self._send_worker_task(coordinate_list(index))
+
+    def _normalize_coordinate_metadata(self, payload: object) -> dict[str, list[object]]:
+        """Normalize worker coordinate payload into slider metadata mapping."""
+        metadata: dict[str, list[object]] = {}
+        name_counts: dict[str, int] = {}
+        if not isinstance(payload, list):
+            return metadata
+
+        for entry in payload:
+            if not (isinstance(entry, (tuple, list)) and len(entry) >= 2):
+                continue
+
+            name = str(entry[0])
+            values = entry[1]
+            if values is None:
+                continue
+
+            if isinstance(values, list):
+                normalized_values = values
+            else:
+                normalized_values = list(values)
+
+            if len(normalized_values) <= 1:
+                continue
+
+            if name in metadata:
+                name_counts[name] = name_counts.get(name, 1) + 1
+                unique_name = f"{name}_{name_counts[name]}"
+            else:
+                name_counts[name] = 1
+                unique_name = name
+
+            metadata[unique_name] = normalized_values
+
+        return metadata
+
     def _request_plot_update(self) -> None:
         """Request a new plot from worker for the current slider subspace."""
         if not self.controls:
@@ -96,7 +157,19 @@ class CFVMain(CFVCore):
             return
 
         cmd = "f_slice = f.subspace("
-        slices = [f"{n}={self.controls[n][1][self.controls[n][0].value()]!r}" for n in self.controls]
+        slices: list[str] = []
+        for name, control in self.controls.items():
+            values = control["values"]
+            start_idx, end_idx = control["range_slider"].value()
+
+            lo = values[min(start_idx, end_idx)]
+            hi = values[max(start_idx, end_idx)]
+
+            if start_idx == end_idx:
+                slices.append(f"{name}={lo!r}")
+            else:
+                slices.append(f"{name}=({lo!r}, {hi!r})")
+
         cmd += ", ".join(slices) + ")\ncfp.con(f_slice)\n"
         logger.debug("Requesting plot update with %d slider constraints", len(slices))
         self._send_worker_task(cmd)

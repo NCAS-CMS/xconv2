@@ -21,10 +21,12 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QCloseEvent, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QDialog,
     QFileDialog,
     QHeaderView,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -33,7 +35,6 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
-    QSlider,
     QStatusBar,
     QStyle,
     QSystemTrayIcon,
@@ -42,6 +43,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from superqt import QRangeSlider
+
+from .cf_templates import collapse_methods
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -65,8 +69,10 @@ class CFVCore(QMainWindow):
         if not self.app_icon.isNull():
             self.setWindowIcon(self.app_icon)
 
-        # Stores {coord_name: (QSlider, values_list)} for preview requests.
+        # Per-coordinate widget state used by worker-backed window subclasses.
         self.controls = {}
+        self.selected_counts: dict[str, int] = {}
+        self.selected_collapse_methods: dict[str, str] = {}
 
         self.setup_ui()
         self._setup_tray_icon()
@@ -562,8 +568,10 @@ class CFVCore(QMainWindow):
         logger.info("Field selected: %s", selected_field)
 
     def build_dynamic_sliders(self, metadata: dict[str, list[object]]) -> None:
-        """Build sliders from coordinate metadata."""
+        """Build compact dual-handle range sliders from coordinate metadata."""
         self.controls.clear()
+        self.selected_counts.clear()
+        self.selected_collapse_methods.clear()
 
         for i in reversed(range(self.sidebar.count())):
             widget = self.sidebar.itemAt(i).widget()
@@ -571,22 +579,145 @@ class CFVCore(QMainWindow):
                 widget.setParent(None)
 
         for name, values in metadata.items():
+            if not values:
+                continue
+
             container = QWidget()
             row = QVBoxLayout(container)
+            row.setContentsMargins(0, 0, 0, 0)
 
-            label = QLabel(f"{name.upper()}: {values[0]}")
-            slider = QSlider(Qt.Horizontal)
-            slider.setRange(0, len(values) - 1)
-            slider.valueChanged.connect(
-                lambda v, n=name, vals=values, lbl=label: self.on_slider_moved(n, vals[v], lbl)
+            header_row = QHBoxLayout()
+            name_label = QLabel(f"{name.upper()}:")
+            collapse_label = QLabel("collapse")
+            collapse_checkbox = QCheckBox("")
+            collapse_checkbox.setToolTip("Select a collapse method")
+            collapse_checkbox.toggled.connect(
+                lambda checked, n=name: self.on_collapse_toggled(n, checked)
             )
 
-            row.addWidget(label)
-            row.addWidget(slider)
+            header_row.addWidget(name_label)
+            header_row.addStretch(1)
+            header_row.addWidget(collapse_label)
+            header_row.addWidget(collapse_checkbox)
+
+            selection_label = QLabel()
+            selection_label.setWordWrap(True)
+
+            # Show the fixed coordinate bounds around the slider track.
+            bounds_start_label = QLabel(str(values[0]))
+            bounds_end_label = QLabel(str(values[-1]))
+            bounds_start_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            bounds_end_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+            slider = QRangeSlider(Qt.Horizontal)
+            slider.setRange(0, len(values) - 1)
+            slider.setValue((0, len(values) - 1))
+            slider.valueChanged.connect(
+                lambda _value, n=name: self.on_range_slider_moved(n)
+            )
+
+            slider_row = QHBoxLayout()
+            slider_row.addWidget(bounds_start_label)
+            slider_row.addWidget(slider, 1)
+            slider_row.addWidget(bounds_end_label)
+
+            row.addLayout(header_row)
+            row.addWidget(selection_label)
+            row.addLayout(slider_row)
             self.sidebar.addWidget(container)
-            self.controls[name] = (slider, values)
+            self.controls[name] = {
+                "range_slider": slider,
+                "name_label": name_label,
+                "selection_label": selection_label,
+                "bounds_start_label": bounds_start_label,
+                "bounds_end_label": bounds_end_label,
+                "collapse_checkbox": collapse_checkbox,
+                "values": values,
+            }
+
+            self._update_range_labels(name)
 
         logger.info("Built %d dynamic sliders", len(self.controls))
+
+    def on_range_slider_moved(self, name: str) -> None:
+        """Handle dual-handle range slider movement."""
+        control = self.controls.get(name)
+        if control is None:
+            return
+
+        slider = control["range_slider"]
+        start_idx, end_idx = slider.value()
+
+        self._update_range_labels(name)
+        logger.debug("Range slider moved: %s start=%d end=%d", name, start_idx, end_idx)
+        self._request_plot_update()
+
+    def on_collapse_toggled(self, name: str, checked: bool) -> None:
+        """Choose and persist a collapse method for the coordinate."""
+        control = self.controls.get(name)
+        if control is None:
+            return
+
+        collapse_checkbox = control["collapse_checkbox"]
+        if checked:
+            if not collapse_methods:
+                collapse_checkbox.blockSignals(True)
+                collapse_checkbox.setChecked(False)
+                collapse_checkbox.blockSignals(False)
+                self.selected_collapse_methods.pop(name, None)
+                collapse_checkbox.setText("")
+                self.status.showMessage("No collapse methods configured.")
+                return
+
+            current_method = self.selected_collapse_methods.get(name, collapse_methods[0])
+            current_index = (
+                collapse_methods.index(current_method)
+                if current_method in collapse_methods
+                else 0
+            )
+            method, ok = QInputDialog.getItem(
+                self,
+                "Collapse Method",
+                f"Select collapse method for {name}:",
+                collapse_methods,
+                current_index,
+                False,
+            )
+            if ok and method:
+                self.selected_collapse_methods[name] = method
+                collapse_checkbox.setText(f"({method})")
+            else:
+                collapse_checkbox.blockSignals(True)
+                collapse_checkbox.setChecked(False)
+                collapse_checkbox.blockSignals(False)
+                self.selected_collapse_methods.pop(name, None)
+                collapse_checkbox.setText("")
+                return
+        else:
+            self.selected_collapse_methods.pop(name, None)
+            collapse_checkbox.setText("")
+
+        self._update_range_labels(name)
+        self._request_plot_update()
+
+    def _update_range_labels(self, name: str) -> None:
+        """Refresh compact summary line for current range selection."""
+        control = self.controls.get(name)
+        if control is None:
+            return
+
+        values = control["values"]
+        start_idx, end_idx = control["range_slider"].value()
+        lo_idx = min(start_idx, end_idx)
+        hi_idx = max(start_idx, end_idx)
+        selected_count = (hi_idx - lo_idx) + 1
+        self.selected_counts[name] = selected_count
+
+        control["bounds_start_label"].setText(str(values[0]))
+        control["bounds_end_label"].setText(str(values[-1]))
+        control["selection_label"].setText(
+            f"selected: {values[lo_idx]}..{values[hi_idx]} ({selected_count})"
+        )
 
     def on_slider_moved(self, name: str, val: object, label: QLabel) -> None:
         """Handle slider movement events."""
