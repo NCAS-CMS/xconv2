@@ -11,12 +11,13 @@ from __future__ import annotations
 import base64
 import logging
 import pickle
+from pathlib import Path
 
 from PySide6.QtCore import QProcess
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QListWidgetItem
 
-from .cf_templates import coordinate_list, field_list
+from .cf_templates import coordinate_list, field_list, plot_from_selection
 from .core_window import CFVCore
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,15 @@ class CFVMain(CFVCore):
                     logger.warning("Unexpected metadata payload type: %s", type(metadata).__name__)
 
             elif line.startswith("IMG_READY:"):
+                raw_payload = line.split(":", 1)[1]
+                payload = pickle.loads(base64.b64decode(raw_payload))
+                if isinstance(payload, bytes):
+                    self.set_plot_image(payload)
+                    self.status.showMessage("Plot Updated.")
+                else:
+                    logger.warning("Unexpected IMG_READY payload type: %s", type(payload).__name__)
+
+            elif line == "IMG_READY":
                 self.status.showMessage("Plot Updated.")
 
             elif line.startswith("COORD:"):
@@ -107,7 +117,13 @@ class CFVMain(CFVCore):
         self.status.showMessage(f"Loading file: {file_path}")
         logger.info("Loading file in worker: %s", file_path)
 
-        code = f"f = cf.read({file_path!r})\n" + field_list + "send_to_gui('METADATA', fields)"
+        code = (
+            f"_cfview_file_path = {file_path!r}\n"
+            "_cfview_field_index = None\n"
+            f"f = cf.read({file_path!r})\n"
+            + field_list
+            + "send_to_gui('METADATA', fields)"
+        )
         self._send_worker_task(code)
 
     def _request_coordinates_for_field(self, index: int) -> None:
@@ -151,35 +167,85 @@ class CFVMain(CFVCore):
         return metadata
 
     def _request_plot_update(self) -> None:
-        """Request a new plot from worker for the current slider subspace."""
+        """Request a new plot using current slider and collapse selections."""
+        self._request_plot_task(save_code_path=None)
+
+    def _request_plot_code_save(self, file_path: str) -> None:
+        """Request plotting and ask the worker to save the generated code to a file."""
+        self._request_plot_task(save_code_path=file_path)
+
+    def _request_plot_task(self, save_code_path: str | None) -> None:
+        """Build and send a plot task, optionally saving the worker code to disk."""
         if not self.controls:
             logger.debug("Skipped plot update request because no controls are available")
             return
 
-        cmd = "f_slice = f.subspace("
-        slices: list[str] = []
+        selections: dict[str, tuple[object, object]] = {}
+        collapse_by_coord: dict[str, str] = {}
+        dims: list[int] = []
+
         for name, control in self.controls.items():
             values = control["values"]
             start_idx, end_idx = control["range_slider"].value()
 
             lo = values[min(start_idx, end_idx)]
             hi = values[max(start_idx, end_idx)]
+            selections[name] = (lo, hi)
 
-            if start_idx == end_idx:
-                slices.append(f"{name}={lo!r}")
+            collapse_method = self.selected_collapse_methods.get(name)
+            if collapse_method:
+                collapse_by_coord[name] = collapse_method
+                dims.append(1)
             else:
-                slices.append(f"{name}=({lo!r}, {hi!r})")
+                dims.append(1 if start_idx == end_idx else 2)
 
-        cmd += ", ".join(slices) + ")\ncfp.con(f_slice)\n"
-        logger.debug("Requesting plot update with %d slider constraints", len(slices))
-        self._send_worker_task(cmd)
+        varying_dims = sum(1 for dim in dims if dim != 1)
+        if varying_dims == 1:
+            plot_kind = "lineplot"
+        elif varying_dims == 2:
+            plot_kind = "contour"
+        elif varying_dims == 0:
+            plot_kind = "collapsed"
+        else:
+            plot_kind = "unsupported"
 
-    def _send_worker_task(self, code: str) -> None:
+        if plot_kind in {"collapsed", "unsupported"}:
+            logger.debug("Skipped plot request due to unsupported dimensionality: %s", dims)
+            return
+
+        try:
+            cmd = plot_from_selection(selections, collapse_by_coord, plot_kind)
+        except (ValueError, NotImplementedError) as exc:
+            self.status.showMessage(f"Plot request unavailable: {exc}")
+            logger.warning("Plot template unavailable for kind=%s: %s", plot_kind, exc)
+            return
+
+        save_target = None
+        if save_code_path:
+            save_target = str(Path(save_code_path).expanduser())
+
+        logger.debug(
+            "Requesting plot update kind=%s coords=%d collapses=%d save=%s",
+            plot_kind,
+            len(selections),
+            len(collapse_by_coord),
+            bool(save_target),
+        )
+        self._send_worker_task(cmd, save_code_path=save_target)
+
+    def _send_worker_task(self, code: str, save_code_path: str | None = None) -> None:
         """Send a code block to the worker process with task terminator."""
         if not code.endswith("\n"):
             code += "\n"
+
+        header = ""
+        if save_code_path:
+            encoded_path = base64.b64encode(save_code_path.encode("utf-8")).decode("ascii")
+            header = f"#SAVE_TASK_CODE_PATH_B64:{encoded_path}\n"
+
+        payload = header + code + "#END_TASK\n"
         logger.debug("Sending worker task (%d chars)", len(code))
-        self.worker.write((code + "#END_TASK\n").encode())
+        self.worker.write(payload.encode())
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Ensure worker process is shut down cleanly when GUI exits."""

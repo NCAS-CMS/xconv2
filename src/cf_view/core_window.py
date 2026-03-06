@@ -18,7 +18,7 @@ import logging
 from typing import Sequence
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QCloseEvent, QIcon, QKeySequence
+from PySide6.QtGui import QAction, QCloseEvent, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QStatusBar,
     QStyle,
     QSystemTrayIcon,
@@ -73,6 +74,7 @@ class CFVCore(QMainWindow):
         self.controls = {}
         self.selected_counts: dict[str, int] = {}
         self.selected_collapse_methods: dict[str, str] = {}
+        self._plot_pixmap_original: QPixmap | None = None
 
         self.setup_ui()
         self._setup_tray_icon()
@@ -511,12 +513,127 @@ class CFVCore(QMainWindow):
         scroll.setFixedWidth(300)
         return scroll
 
-    def _create_plot_area(self) -> QLabel:
-        """Create the right-side placeholder plot area."""
-        plot_area = QLabel("Waiting for data...")
-        plot_area.setAlignment(Qt.AlignCenter)
-        plot_area.setStyleSheet("background-color: #222; color: #888; border: 1px solid #444;")
-        return plot_area
+    def _create_plot_area(self) -> QWidget:
+        """Create right-side plot frame plus plot-type summary and button."""
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.plot_frame = QLabel("Waiting for data...")
+        self.plot_frame.setAlignment(Qt.AlignCenter)
+        # Ignore pixmap size hints so large rendered plots do not force window growth.
+        self.plot_frame.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        self.plot_frame.setMinimumSize(120, 120)
+        self.plot_frame.setStyleSheet("background-color: #222; color: #888; border: 1px solid #444;")
+
+        summary_row = QHBoxLayout()
+        self.plot_summary_label = QLabel("Open a field to inspect plot options.")
+        self.plot_button = QPushButton("Plot")
+        self.plot_button.setEnabled(False)
+        self.plot_button.clicked.connect(self._on_plot_button_clicked)
+        self.options_button = QPushButton("Options")
+        self.options_button.setEnabled(False)
+        self.save_code_button = QPushButton("Save Code...")
+        self.save_code_button.setEnabled(False)
+        self.save_code_button.clicked.connect(self._on_save_code_button_clicked)
+
+        summary_row.addWidget(self.plot_summary_label, 1)
+        summary_row.addWidget(self.plot_button)
+        summary_row.addWidget(self.options_button)
+        summary_row.addWidget(self.save_code_button)
+
+        layout.addWidget(self.plot_frame, 1)
+        layout.addLayout(summary_row)
+        return container
+
+    def _on_plot_button_clicked(self) -> None:
+        """Request a plot refresh when the current selection is plottable."""
+        if not getattr(self, "plot_button", None) or not self.plot_button.isEnabled():
+            return
+        self._request_plot_update()
+
+    def set_plot_image(self, png_bytes: bytes) -> None:
+        """Render PNG bytes from worker output into the plot frame."""
+        if not png_bytes:
+            return
+
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(png_bytes, "PNG"):
+            logger.warning("Failed to decode plot PNG payload")
+            return
+
+        self._plot_pixmap_original = pixmap
+        self._fit_window_to_plot_aspect()
+        self._refresh_plot_pixmap()
+
+    def _fit_window_to_plot_aspect(self) -> None:
+        """Nudge window height to match plot aspect ratio without exceeding screen bounds."""
+        if self._plot_pixmap_original is None:
+            return
+
+        plot_height = self._plot_pixmap_original.height()
+        plot_width = self._plot_pixmap_original.width()
+        if plot_height <= 0 or plot_width <= 0:
+            return
+
+        aspect_ratio = plot_width / plot_height
+        current_plot_width = max(self.plot_frame.width(), 1)
+        desired_plot_height = max(1, int(current_plot_width / aspect_ratio))
+        current_plot_height = max(self.plot_frame.height(), 1)
+        height_delta = desired_plot_height - current_plot_height
+
+        # Avoid jitter from tiny adjustments.
+        if abs(height_delta) < 12:
+            return
+
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            return
+
+        available_height = screen.availableGeometry().height()
+        min_height = max(self.minimumHeight(), 420)
+        max_height = max(min_height, int(available_height * 0.9))
+        target_height = max(min_height, min(self.height() + height_delta, max_height))
+
+        if target_height != self.height():
+            self.resize(self.width(), target_height)
+
+    def _refresh_plot_pixmap(self) -> None:
+        """Scale current plot pixmap to fit the visible plot frame."""
+        if self._plot_pixmap_original is None:
+            return
+
+        target_size = self.plot_frame.size()
+        if target_size.width() <= 0 or target_size.height() <= 0:
+            return
+
+        scaled = self._plot_pixmap_original.scaled(
+            target_size,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self.plot_frame.setPixmap(scaled)
+        self.plot_frame.setText("")
+
+    def _on_save_code_button_clicked(self) -> None:
+        """Prompt for destination file and request worker-side plot code save."""
+        if not getattr(self, "save_code_button", None) or not self.save_code_button.isEnabled():
+            return
+
+        default_path = str(Path.home() / "cfview_plot_code.py")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Plot Code",
+            default_path,
+            "Python files (*.py);;Text files (*.txt);;All files (*)",
+        )
+        if not file_path:
+            return
+
+        if not Path(file_path).suffix:
+            file_path += ".py"
+
+        self._request_plot_code_save(file_path)
 
     def _setup_status_bar(self) -> None:
         """Create and initialize the status bar."""
@@ -637,6 +754,7 @@ class CFVCore(QMainWindow):
 
             self._update_range_labels(name)
 
+        self._refresh_plot_summary()
         logger.info("Built %d dynamic sliders", len(self.controls))
 
     def on_range_slider_moved(self, name: str) -> None:
@@ -649,8 +767,8 @@ class CFVCore(QMainWindow):
         start_idx, end_idx = slider.value()
 
         self._update_range_labels(name)
+        self._refresh_plot_summary()
         logger.debug("Range slider moved: %s start=%d end=%d", name, start_idx, end_idx)
-        self._request_plot_update()
 
     def on_collapse_toggled(self, name: str, checked: bool) -> None:
         """Choose and persist a collapse method for the coordinate."""
@@ -698,7 +816,7 @@ class CFVCore(QMainWindow):
             collapse_checkbox.setText("")
 
         self._update_range_labels(name)
-        self._request_plot_update()
+        self._refresh_plot_summary()
 
     def _update_range_labels(self, name: str) -> None:
         """Refresh compact summary line for current range selection."""
@@ -710,7 +828,7 @@ class CFVCore(QMainWindow):
         start_idx, end_idx = control["range_slider"].value()
         lo_idx = min(start_idx, end_idx)
         hi_idx = max(start_idx, end_idx)
-        selected_count = (hi_idx - lo_idx) + 1
+        selected_count = hi_idx - lo_idx
         self.selected_counts[name] = selected_count
 
         control["bounds_start_label"].setText(str(values[0]))
@@ -718,6 +836,50 @@ class CFVCore(QMainWindow):
         control["selection_label"].setText(
             f"selected: {values[lo_idx]}..{values[hi_idx]} ({selected_count})"
         )
+
+    def _refresh_plot_summary(self) -> None:
+        """Update plot summary text and plot button availability."""
+        if not self.controls:
+            self.plot_summary_label.setText("Open a field to inspect plot options.")
+            self.plot_button.setEnabled(False)
+            self.options_button.setEnabled(False)
+            self.save_code_button.setEnabled(False)
+            return
+
+        dims: list[int] = []
+        for name, control in self.controls.items():
+            if name in self.selected_collapse_methods:
+                dims.append(1)
+                continue
+
+            start_idx, end_idx = control["range_slider"].value()
+            dims.append(1 if start_idx == end_idx else 2)
+
+        varying_dims = sum(1 for dim in dims if dim != 1)
+        dims_text = f"Selection dimensions = {dims}"
+
+        if varying_dims == 0:
+            self.plot_summary_label.setText(f"{dims_text} Total collapse, plot not possible")
+            self.plot_button.setEnabled(False)
+            self.options_button.setEnabled(False)
+            self.save_code_button.setEnabled(False)
+        elif varying_dims == 1:
+            self.plot_summary_label.setText(f"{dims_text} Lineplot possible")
+            self.plot_button.setEnabled(True)
+            self.options_button.setEnabled(True)
+            self.save_code_button.setEnabled(True)
+        elif varying_dims == 2:
+            self.plot_summary_label.setText(f"{dims_text} Contour possible")
+            self.plot_button.setEnabled(True)
+            self.options_button.setEnabled(True)
+            self.save_code_button.setEnabled(True)
+        else:
+            self.plot_summary_label.setText(
+                f"{dims_text} Need to reduce to 1 or 2 dimensions before plotting"
+            )
+            self.plot_button.setEnabled(False)
+            self.options_button.setEnabled(False)
+            self.save_code_button.setEnabled(False)
 
     def on_slider_moved(self, name: str, val: object, label: QLabel) -> None:
         """Handle slider movement events."""
@@ -752,6 +914,10 @@ class CFVCore(QMainWindow):
     def _request_plot_update(self) -> None:
         """Hook for worker-backed implementations."""
 
+    def _request_plot_code_save(self, file_path: str) -> None:
+        """Hook for worker-backed implementations to save generated plot code."""
+        logger.debug("Requested plot code save to: %s", file_path)
+
     def _quit_application(self) -> None:
         """Quit the whole application, even when modal dialogs are open."""
         logger.info("Quit requested from UI")
@@ -768,3 +934,8 @@ class CFVCore(QMainWindow):
         if getattr(self, "tray_icon", None) is not None:
             self.tray_icon.hide()
         super().closeEvent(event)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        """Keep rendered plot image scaled when the window is resized."""
+        super().resizeEvent(event)
+        self._refresh_plot_pixmap()
