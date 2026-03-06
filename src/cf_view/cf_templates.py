@@ -159,6 +159,8 @@ def _pfld_from_selection_code(
 def contour(options: dict[str, object] | None) -> str:
     filename = options.get("filename") if options else None
     title = options.get("title") if options else None
+    annotation_display = options.get("annotation_display", False) if options else False
+    annotation_properties = options.get("annotation_properties", []) if options else []
     cscale = options.get("cscale") if options else None
     fill = options.get("fill", True) if options else True
     lines_enabled = options.get("lines", True) if options else True
@@ -224,6 +226,9 @@ def contour(options: dict[str, object] | None) -> str:
         _blockfill_fast = {blockfill_fast!r}
         if _blockfill_fast is not None:
             contour_kwargs['blockfill_fast'] = bool(_blockfill_fast)
+
+        _annotation_display = bool({annotation_display!r})
+        _annotation_properties = {annotation_properties!r}
         """
     ).lstrip()
     lines.append(contour_options_code)
@@ -238,6 +243,13 @@ def contour(options: dict[str, object] | None) -> str:
             cfp.levs()
 
         cfp.con(pfld, **contour_kwargs)
+
+        if _annotation_display and _annotation_properties:
+            _annotation_items = [f"{key}: {value}" for key, value in _annotation_properties[:4]]
+            _line_one = " | ".join(_annotation_items[:2])
+            _line_two = " | ".join(_annotation_items[2:4])
+            _annotation_text = "\\n".join([x for x in (_line_one, _line_two) if x])
+            plt.gcf().text(0.5, 0.02, _annotation_text, ha='center', va='bottom', fontsize=8)
         """
     ).strip()
     lines.append(contour_code)

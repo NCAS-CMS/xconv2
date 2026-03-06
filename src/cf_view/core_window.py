@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMenu,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QRadioButton,
@@ -981,6 +982,14 @@ class CFVCore(QMainWindow):
 
         annotations_group = QGroupBox("Annotations")
         annotations_layout = QVBoxLayout(annotations_group)
+
+        selected_annotation_props: list[tuple[str, str]] = []
+        existing_props = existing.get("annotation_properties", [])
+        if isinstance(existing_props, list):
+            for entry in existing_props:
+                if isinstance(entry, (tuple, list)) and len(entry) >= 2:
+                    selected_annotation_props.append((str(entry[0]), str(entry[1])))
+
         title_row = QHBoxLayout()
         title_label = QLabel("title")
         title_edit = QLineEdit(str(default_title))
@@ -988,6 +997,50 @@ class CFVCore(QMainWindow):
         title_row.addWidget(title_label)
         title_row.addWidget(title_edit, 1)
         annotations_layout.addLayout(title_row)
+
+        annotation_row = QHBoxLayout()
+        choose_annotations_button = QPushButton("Choose annotation properties")
+        annotation_display_checkbox = QCheckBox("display")
+        annotation_display_checkbox.setChecked(bool(existing.get("annotation_display", False)))
+
+        annotation_preview = QLabel()
+        annotation_preview.setWordWrap(True)
+        annotation_preview.setStyleSheet("color: #444;")
+
+        def _refresh_annotation_preview() -> None:
+            if not selected_annotation_props:
+                annotation_preview.setText("No annotation properties selected")
+                return
+            annotation_preview.setText(
+                "\n".join(f"{key}: {value}" for key, value in selected_annotation_props)
+            )
+
+        def _choose_annotation_properties() -> None:
+            selected_item = self.field_list_widget.currentItem()
+            if selected_item is None:
+                self.status.showMessage("Select a field before choosing annotation properties")
+                return
+
+            raw_properties = selected_item.data(Qt.UserRole + 1)
+            properties = self._parse_properties_dict(raw_properties)
+            if not properties:
+                self.status.showMessage("No properties available for annotation")
+                return
+
+            chosen = self._show_annotation_properties_chooser(properties, selected_annotation_props)
+            if chosen is not None:
+                selected_annotation_props.clear()
+                selected_annotation_props.extend(chosen)
+                _refresh_annotation_preview()
+
+        choose_annotations_button.clicked.connect(_choose_annotation_properties)
+        _refresh_annotation_preview()
+
+        annotation_row.addWidget(choose_annotations_button)
+        annotation_row.addStretch(1)
+        annotation_row.addWidget(annotation_display_checkbox)
+        annotations_layout.addLayout(annotation_row)
+        annotations_layout.addWidget(annotation_preview)
 
         levels_group = QGroupBox("Contour levels")
         levels_layout = QVBoxLayout(levels_group)
@@ -1193,12 +1246,85 @@ class CFVCore(QMainWindow):
         title_text = title_edit.text().strip()
         if title_text:
             options["title"] = title_text
+        options["annotation_display"] = bool(annotation_display_checkbox.isChecked())
+        if selected_annotation_props:
+            options["annotation_properties"] = selected_annotation_props[:4]
         if selected_cscale.get("value"):
             options["cscale"] = selected_cscale["value"]
 
         self.plot_options_by_kind["contour"] = options
         self.status.showMessage("Updated contour options")
         self._request_plot_update()
+
+    def _show_annotation_properties_chooser(
+        self,
+        properties: dict[object, object],
+        current_selected: list[tuple[str, str]],
+    ) -> list[tuple[str, str]] | None:
+        """Show a chooser for up to 4 annotation properties."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Choose annotation properties")
+        dialog.resize(640, 420)
+
+        layout = QVBoxLayout(dialog)
+        hint = QLabel("Select up to 4 properties to annotate on plots")
+        layout.addWidget(hint)
+
+        table = QTableWidget(len(properties), 2, dialog)
+        table.setHorizontalHeaderLabels(["Property", "Value"])
+        table.verticalHeader().setVisible(False)
+        table.setAlternatingRowColors(True)
+        table.setWordWrap(False)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.setSelectionMode(QTableWidget.NoSelection)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+
+        selected_set = {(str(k), str(v)) for k, v in current_selected}
+
+        for row, (key, value) in enumerate(sorted(properties.items(), key=lambda kv: str(kv[0]).lower())):
+            key_text = str(key)
+            value_text = str(value)
+
+            key_item = QTableWidgetItem(key_text)
+            key_item.setFlags(key_item.flags() | Qt.ItemIsUserCheckable)
+            key_item.setCheckState(
+                Qt.Checked if (key_text, value_text) in selected_set else Qt.Unchecked
+            )
+            value_item = QTableWidgetItem(value_text)
+            value_item.setToolTip(value_text)
+
+            table.setItem(row, 0, key_item)
+            table.setItem(row, 1, value_item)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+
+        layout.addWidget(table)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return None
+
+        selected: list[tuple[str, str]] = []
+        for row in range(table.rowCount()):
+            key_item = table.item(row, 0)
+            value_item = table.item(row, 1)
+            if key_item is None or value_item is None:
+                continue
+            if key_item.checkState() == Qt.Checked:
+                selected.append((key_item.text(), value_item.text()))
+
+        if len(selected) > 4:
+            QMessageBox.warning(
+                self,
+                "Too many properties",
+                "Please select at most 4 annotation properties.",
+            )
+            return None
+
+        return selected
 
     def _show_colour_scale_chooser(self, current_scale: str | None) -> str | None:
         """Show colour scale chooser with preview bars and return selected name."""

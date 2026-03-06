@@ -55,14 +55,38 @@ class _FakeCFPlot:
         self.gclose_calls += 1
 
 
+@dataclass
+class _FakeFigure:
+    text_calls: list[tuple[tuple[object, ...], dict[str, object]]] = field(default_factory=list)
 
-def _run_generated(code: str, fld: _FakeField, cfp: _FakeCFPlot) -> list[tuple[str, object]]:
+    def text(self, *args: object, **kwargs: object) -> None:
+        self.text_calls.append((args, kwargs))
+
+
+@dataclass
+class _FakePlt:
+    figure: _FakeFigure = field(default_factory=_FakeFigure)
+
+    def gcf(self) -> _FakeFigure:
+        return self.figure
+
+
+
+def _run_generated(
+    code: str,
+    fld: _FakeField,
+    cfp: _FakeCFPlot,
+    plt_obj: _FakePlt | None = None,
+) -> list[tuple[str, object]]:
     messages: list[tuple[str, object]] = []
+    if plt_obj is None:
+        plt_obj = _FakePlt()
     namespace = {
         "fld": fld,
         "cf": _FakeCF,
         "cfp": cfp,
         "np": np,
+        "plt": plt_obj,
         "send_to_gui": lambda prefix, payload=None: messages.append((prefix, payload)),
     }
     exec(code, namespace)
@@ -132,6 +156,32 @@ def test_plot_from_selection_contour_explicit_levels_and_save_file() -> None:
     assert cfp.cscale_calls == [{}]
     assert cfp.con_calls
     assert ("STATUS:Saved plot to /tmp/mock-contour.png", None) in messages
+
+
+def test_plot_from_selection_contour_annotations_are_rendered_when_enabled() -> None:
+    code = plot_from_selection(
+        selections={"latitude": ("-90", "90"), "longitude": ("0", "359")},
+        collapse_by_coord={},
+        plot_kind="contour",
+        plot_options={
+            "mode": "default",
+            "annotation_display": True,
+            "annotation_properties": [
+                ("long_name", "air_temperature"),
+                ("units", "K"),
+            ],
+        },
+    )
+
+    fld = _FakeField()
+    cfp = _FakeCFPlot()
+    fake_plt = _FakePlt()
+    _run_generated(code, fld, cfp, plt_obj=fake_plt)
+
+    assert fake_plt.figure.text_calls
+    args, _kwargs = fake_plt.figure.text_calls[-1]
+    assert "long_name: air_temperature" in str(args[2])
+    assert "units: K" in str(args[2])
 
 
 
