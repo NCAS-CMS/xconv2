@@ -14,6 +14,11 @@ dependencies = [
     "cf-plot",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest",
+]
+
 [project.gui-scripts]
 # This creates a 'cfview2' command that launches your GUI
 cfview2 = "cf_view.gui:main"
@@ -27,3 +32,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 cf_view = ["assets/*.svg", "assets/*.png"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
