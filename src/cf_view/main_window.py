@@ -168,14 +168,18 @@ class CFVMain(CFVCore):
 
     def _request_plot_update(self) -> None:
         """Request a new plot using current slider and collapse selections."""
-        self._request_plot_task(save_code_path=None)
+        self._request_plot_task(save_code_path=None, save_plot_path=None)
 
     def _request_plot_code_save(self, file_path: str) -> None:
         """Request plotting and ask the worker to save the generated code to a file."""
-        self._request_plot_task(save_code_path=file_path)
+        self._request_plot_task(save_code_path=file_path, save_plot_path=None)
 
-    def _request_plot_task(self, save_code_path: str | None) -> None:
-        """Build and send a plot task, optionally saving the worker code to disk."""
+    def _request_plot_save(self, file_path: str) -> None:
+        """Request plotting directly to a file output path."""
+        self._request_plot_task(save_code_path=None, save_plot_path=file_path)
+
+    def _request_plot_task(self, save_code_path: str | None, save_plot_path: str | None) -> None:
+        """Build and send a plot task with optional code-save and plot-save paths."""
         if not self.controls:
             logger.debug("Skipped plot update request because no controls are available")
             return
@@ -213,8 +217,12 @@ class CFVMain(CFVCore):
             logger.debug("Skipped plot request due to unsupported dimensionality: %s", dims)
             return
 
+        plot_options = None
+        if save_plot_path:
+            plot_options = {"filename": str(Path(save_plot_path).expanduser())}
+
         try:
-            cmd = plot_from_selection(selections, collapse_by_coord, plot_kind)
+            cmd = plot_from_selection(selections, collapse_by_coord, plot_kind, plot_options)
         except (ValueError, NotImplementedError) as exc:
             self.status.showMessage(f"Plot request unavailable: {exc}")
             logger.warning("Plot template unavailable for kind=%s: %s", plot_kind, exc)
@@ -224,26 +232,40 @@ class CFVMain(CFVCore):
         if save_code_path:
             save_target = str(Path(save_code_path).expanduser())
 
+        emit_image = save_plot_path is None
+
         logger.debug(
-            "Requesting plot update kind=%s coords=%d collapses=%d save=%s",
+            "Requesting plot update kind=%s coords=%d collapses=%d save_code=%s save_plot=%s",
             plot_kind,
             len(selections),
             len(collapse_by_coord),
             bool(save_target),
+            bool(plot_options),
         )
-        self._send_worker_task(cmd, save_code_path=save_target)
+        self._send_worker_task(cmd, save_code_path=save_target, emit_image=emit_image)
 
-    def _send_worker_task(self, code: str, save_code_path: str | None = None) -> None:
+    def _send_worker_task(
+        self,
+        code: str,
+        save_code_path: str | None = None,
+        emit_image: bool = True,
+    ) -> None:
         """Send a code block to the worker process with task terminator."""
         if not code.endswith("\n"):
             code += "\n"
 
-        header = ""
+        headers: list[str] = []
         if save_code_path:
             encoded_path = base64.b64encode(save_code_path.encode("utf-8")).decode("ascii")
-            header = f"#SAVE_TASK_CODE_PATH_B64:{encoded_path}\n"
+            headers.append(f"#SAVE_TASK_CODE_PATH_B64:{encoded_path}")
+        if not emit_image:
+            headers.append("#EMIT_IMAGE:0")
 
-        payload = header + code + "#END_TASK\n"
+        header_block = ""
+        if headers:
+            header_block = "\n".join(headers) + "\n"
+
+        payload = header_block + code + "#END_TASK\n"
         logger.debug("Sending worker task (%d chars)", len(code))
         self.worker.write(payload.encode())
 

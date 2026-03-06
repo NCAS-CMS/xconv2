@@ -5,6 +5,13 @@ import traceback
 import logging
 from io import BytesIO
 from pathlib import Path
+
+import matplotlib
+
+# Worker renders to bytes/files only, so force a headless backend and
+# avoid spawning a separate matplotlib GUI app/window (e.g. extra dock icon).
+matplotlib.use("Agg", force=True)
+
 import cf
 import cfplot as cfp
 from matplotlib import pyplot as plt
@@ -12,6 +19,7 @@ from matplotlib import pyplot as plt
 
 logger = logging.getLogger(__name__)
 SAVE_TASK_HEADER = "#SAVE_TASK_CODE_PATH_B64:"
+EMIT_IMAGE_HEADER = "#EMIT_IMAGE:"
 
 # This dictionary persists data (like 'f') between GUI commands
 worker_globals = {
@@ -31,26 +39,35 @@ def send_to_gui(prefix, data=None):
         logger.debug("Sent message to GUI: %s", prefix)
 
 
-def _extract_save_target_and_code(code: str) -> tuple[str | None, str]:
-    """Extract optional save path header and return clean executable code."""
-    if not code.startswith(SAVE_TASK_HEADER):
-        return None, code
+def _extract_task_headers(code: str) -> tuple[str | None, bool, str]:
+    """Extract optional task headers and return save path, emit flag, and code."""
+    save_path: str | None = None
+    emit_image = True
+    payload = code
 
-    first_newline = code.find("\n")
-    if first_newline < 0:
-        return None, code
+    while payload.startswith("#"):
+        first_newline = payload.find("\n")
+        if first_newline < 0:
+            break
 
-    header = code[:first_newline].strip()
-    payload = code[first_newline + 1 :]
-    encoded = header[len(SAVE_TASK_HEADER) :]
+        header = payload[:first_newline].strip()
+        payload = payload[first_newline + 1 :]
 
-    try:
-        save_path = base64.b64decode(encoded.encode("ascii")).decode("utf-8")
-    except Exception:
-        logger.exception("Invalid save-code header in worker task")
-        return None, payload
+        if header.startswith(SAVE_TASK_HEADER):
+            encoded = header[len(SAVE_TASK_HEADER) :]
+            try:
+                save_path = base64.b64decode(encoded.encode("ascii")).decode("utf-8")
+            except Exception:
+                logger.exception("Invalid save-code header in worker task")
+                save_path = None
+        elif header.startswith(EMIT_IMAGE_HEADER):
+            emit_image = header[len(EMIT_IMAGE_HEADER) :] != "0"
+        else:
+            # Unknown preamble line; stop parsing and preserve remaining payload.
+            payload = header + "\n" + payload
+            break
 
-    return save_path, payload
+    return save_path, emit_image, payload
 
 
 def _build_saved_plot_script(exec_code: str) -> str:
@@ -117,7 +134,7 @@ def main():
             
         if line.strip() == "#END_TASK":
             code = "".join(current_block)
-            save_path, exec_code = _extract_save_target_and_code(code)
+            save_path, emit_image, exec_code = _extract_task_headers(code)
             logger.info("Executing task block (%d lines, %d chars)", len(current_block), len(exec_code))
 
             if save_path:
@@ -135,7 +152,8 @@ def main():
             try:
                 # Execute the code block in our persistent global namespace
                 exec(exec_code, worker_globals)
-                _emit_latest_plot_image()
+                if emit_image:
+                    _emit_latest_plot_image()
                 send_to_gui("STATUS:Task Complete")
                 logger.info("Task complete")
             except Exception:

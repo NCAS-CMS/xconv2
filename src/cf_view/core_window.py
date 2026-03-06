@@ -536,11 +536,15 @@ class CFVCore(QMainWindow):
         self.save_code_button = QPushButton("Save Code...")
         self.save_code_button.setEnabled(False)
         self.save_code_button.clicked.connect(self._on_save_code_button_clicked)
+        self.save_plot_button = QPushButton("Save Plot...")
+        self.save_plot_button.setEnabled(False)
+        self.save_plot_button.clicked.connect(self._on_save_plot_button_clicked)
 
         summary_row.addWidget(self.plot_summary_label, 1)
         summary_row.addWidget(self.plot_button)
         summary_row.addWidget(self.options_button)
         summary_row.addWidget(self.save_code_button)
+        summary_row.addWidget(self.save_plot_button)
 
         layout.addWidget(self.plot_frame, 1)
         layout.addLayout(summary_row)
@@ -634,6 +638,26 @@ class CFVCore(QMainWindow):
             file_path += ".py"
 
         self._request_plot_code_save(file_path)
+
+    def _on_save_plot_button_clicked(self) -> None:
+        """Prompt for destination image file and request worker-side plot save."""
+        if not getattr(self, "save_plot_button", None) or not self.save_plot_button.isEnabled():
+            return
+
+        default_path = str(Path.home() / "cfview_plot.png")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Plot",
+            default_path,
+            "PNG files (*.png);;PDF files (*.pdf);;PostScript files (*.ps);;All files (*)",
+        )
+        if not file_path:
+            return
+
+        if not Path(file_path).suffix:
+            file_path += ".png"
+
+        self._request_plot_save(file_path)
 
     def _setup_status_bar(self) -> None:
         """Create and initialize the status bar."""
@@ -844,6 +868,7 @@ class CFVCore(QMainWindow):
             self.plot_button.setEnabled(False)
             self.options_button.setEnabled(False)
             self.save_code_button.setEnabled(False)
+            self.save_plot_button.setEnabled(False)
             return
 
         dims: list[int] = []
@@ -863,16 +888,19 @@ class CFVCore(QMainWindow):
             self.plot_button.setEnabled(False)
             self.options_button.setEnabled(False)
             self.save_code_button.setEnabled(False)
+            self.save_plot_button.setEnabled(False)
         elif varying_dims == 1:
             self.plot_summary_label.setText(f"{dims_text} Lineplot possible")
             self.plot_button.setEnabled(True)
             self.options_button.setEnabled(True)
             self.save_code_button.setEnabled(True)
+            self.save_plot_button.setEnabled(True)
         elif varying_dims == 2:
             self.plot_summary_label.setText(f"{dims_text} Contour possible")
             self.plot_button.setEnabled(True)
             self.options_button.setEnabled(True)
             self.save_code_button.setEnabled(True)
+            self.save_plot_button.setEnabled(True)
         else:
             self.plot_summary_label.setText(
                 f"{dims_text} Need to reduce to 1 or 2 dimensions before plotting"
@@ -880,6 +908,7 @@ class CFVCore(QMainWindow):
             self.plot_button.setEnabled(False)
             self.options_button.setEnabled(False)
             self.save_code_button.setEnabled(False)
+            self.save_plot_button.setEnabled(False)
 
     def on_slider_moved(self, name: str, val: object, label: QLabel) -> None:
         """Handle slider movement events."""
@@ -917,6 +946,10 @@ class CFVCore(QMainWindow):
     def _request_plot_code_save(self, file_path: str) -> None:
         """Hook for worker-backed implementations to save generated plot code."""
         logger.debug("Requested plot code save to: %s", file_path)
+
+    def _request_plot_save(self, file_path: str) -> None:
+        """Hook for worker-backed implementations to save rendered plot output."""
+        logger.debug("Requested plot save to: %s", file_path)
 
     def _quit_application(self) -> None:
         """Quit the whole application, even when modal dialogs are open."""

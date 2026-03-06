@@ -66,18 +66,6 @@ def test_load_selected_file_task_executes_with_mock_cf_example_fields() -> None:
 
     exec(code, namespace)
 
-    # expecting
-    # [
-    # ('METADATA', ['specific_humidity(latitude(5), longitude(8)) 1', 
-    # 'air_temperature(atmosphere_hybrid_height_coordinate(1), grid_latitude(10), grid_longitude(9)) K', 
-    # 'air_potential_temperature(time(36), latitude(5), longitude(8)) K', 
-    # 'precipitation_flux(cf_role=timeseries_id(4), ncdim%timeseries(9)) kg m-2 day-1', 
-    # 'air_temperature(cf_role=timeseries_id(3), ncdim%timeseries(26), ncdim%profile_1(4)) K', 
-    # 'air_potential_temperature(time(118), latitude(5), longitude(8)) K', 
-    # 'precipitation_amount(cf_role=timeseries_id(2), time(4))', 
-    # 'eastward_wind(time(3), air_pressure(1), grid_latitude(4), grid_longitude(5)) m s-1'])
-    #]
-
     prefix, payload = messages[-1]
     assert prefix == "METADATA"
     assert isinstance(payload, list)
@@ -86,8 +74,11 @@ def test_load_selected_file_task_executes_with_mock_cf_example_fields() -> None:
 
     parts = payload[0].split("\x1f", 2)
     assert len(parts) == 3
+    print('[[',parts[0],']]')
+    print(parts[1])
+    print(parts[2])
     assert parts[0].startswith("specific_humidity")
-    assert "specific_humidity" in parts[1]
+    assert "latitude" in parts[1]
 
     properties = ast.literal_eval(parts[2])
     assert isinstance(properties, dict)

@@ -6,7 +6,26 @@ import textwrap
 
 # Emit list[str] so GUI transport and tests use a stable, serializable contract.
 # FIXME: Expand this so it's more tutorial like and useful to readers of code
-field_list = "fields = [f\"{x.identity()}\\x1f{str(x)}\\x1f{x.properties()}\" for x in f]\n"
+field_list = textwrap.dedent(
+    """
+    fields = []
+    for x in f:
+        id_ = f"{x.identity().strip()}{x.shape}"
+        props = x.properties()
+        info = [str(v) for _, v in x.coordinates().items()]
+        info.append(str(x.cell_methods()))
+        cm = getattr(x, "cell_measures", None)
+        if callable(cm):
+            info.append(str(cm()))
+        elif cm is not None:
+            info.append(str(cm))
+        else:
+            cm_legacy = getattr(x, "cellmeasures", None)
+            info.append(str(cm_legacy) if cm_legacy is not None else "")
+        nl = "\\n"
+        fields.append(f"{id_}\x1f{nl.join(info)}\x1f{str(props)}")
+    """
+).lstrip()
 
 # Shared collapse options for GUI selection and future worker command expansion.
 collapse_methods = ["mean", "range", "max", "min"]
@@ -40,6 +59,7 @@ def plot_from_selection(
     selections: dict[str, tuple[object, object]],
     collapse_by_coord: dict[str, str],
     plot_kind: str,
+    plot_options: dict[str, object] | None = None,
 ) -> str:
     """Generate worker code for plotting based on GUI selections.
 
@@ -89,7 +109,7 @@ def plot_from_selection(
                     lo, hi = sorted((lo, hi))
                 subspace_kwargs[coord_name] = cf.wi(lo, hi)
 
-        fld = fld.subspace(**subspace_kwargs)
+        pfld = fld.subspace(**subspace_kwargs)
         """    ).lstrip()
 
     collapse_code  = textwrap.dedent(
@@ -97,26 +117,38 @@ def plot_from_selection(
         # Apply collapses based on GUI selections
         for axis, method in collapse_by_coord.items():
             if method == 'mean':
-                fld = fld.collapse("mean", axes=axis, weights=False)
+                pfld = pfld.collapse("mean", axes=axis, weights=False)
             else:
-                fld = fld.collapse(method, axes=axis)
+                pfld = pfld.collapse(method, axes=axis)
         """
         ).lstrip()
     
     if plot_kind == "lineplot":
-        plot_code = lineplot(options=None)
+        plot_code = lineplot(options=plot_options)
     elif plot_kind == "contour":
-        plot_code = contour(options=None)
+        plot_code = contour(options=plot_options)
       
     return "\n".join([payload_code, selection_code, collapse_code, plot_code])
 
 def contour(options: dict[str, object] | None) -> str:
-    
-    return textwrap.dedent(
+    filename = options.get("filename") if options else None
+    lines: list[str] = []
+
+    if filename is not None:
+        lines.append(f"cfp.gopen(file={filename!r})")
+        lines.append(f"send_to_gui('STATUS:Saved plot to {filename}')")
+
+    contour_code = textwrap.dedent(
         """
-        cfp.con(fld)
+        cfp.con(pfld)
         """
-    ).lstrip()
+    ).strip()
+    lines.append(contour_code)
+
+    if filename is not None:
+        lines.append("cfp.gclose()")
+
+    return "\n".join(lines) + "\n"
     
 
 def lineplot(options: dict[str, object] | None) -> str:
