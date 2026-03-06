@@ -3,10 +3,12 @@ import pickle
 import base64
 import traceback
 import logging
+import warnings
 from io import BytesIO
 from pathlib import Path
 
 import matplotlib
+import numpy as np
 
 # Worker renders to bytes/files only, so force a headless backend and
 # avoid spawning a separate matplotlib GUI app/window (e.g. extra dock icon).
@@ -15,6 +17,14 @@ matplotlib.use("Agg", force=True)
 import cf
 import cfplot as cfp
 from matplotlib import pyplot as plt
+
+# cf-plot may still call show(); in Agg mode this is non-interactive and noisy.
+plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
+warnings.filterwarnings(
+    "ignore",
+    message="FigureCanvasAgg is non-interactive, and thus cannot be shown",
+    category=UserWarning,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -25,7 +35,8 @@ EMIT_IMAGE_HEADER = "#EMIT_IMAGE:"
 worker_globals = {
     'cf': cf,
     'cfp': cfp,
-    'plt': plt
+    'plt': plt,
+    'np': np,
 }
 
 def send_to_gui(prefix, data=None):

@@ -17,7 +17,12 @@ from PySide6.QtCore import QProcess
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QListWidgetItem
 
-from .cf_templates import coordinate_list, field_list, plot_from_selection
+from .cf_templates import (
+    contour_range_from_selection,
+    coordinate_list,
+    field_list,
+    plot_from_selection,
+)
 from .core_window import CFVCore
 
 logger = logging.getLogger(__name__)
@@ -98,11 +103,40 @@ class CFVMain(CFVCore):
                 else:
                     logger.warning("Received empty coordinate metadata payload")
 
+            elif line.startswith("CONTOUR_RANGE:"):
+                raw_payload = line.split(":", 1)[1]
+                payload = pickle.loads(base64.b64decode(raw_payload))
+                if isinstance(payload, dict):
+                    try:
+                        range_min = float(payload["min"])
+                        range_max = float(payload["max"])
+                    except (KeyError, TypeError, ValueError):
+                        logger.warning("Malformed CONTOUR_RANGE payload: %r", payload)
+                        continue
+
+                    self._show_contour_options_dialog(range_min, range_max)
+                else:
+                    logger.warning("Unexpected CONTOUR_RANGE payload type: %s", type(payload).__name__)
+
     def handle_worker_error(self) -> None:
-        """Log worker stderr output for troubleshooting."""
+        """Log worker stderr output with best-effort severity mapping."""
         stderr_output = self.worker.readAllStandardError().data().decode(errors="replace").strip()
-        if stderr_output:
-            logger.error("Worker stderr: %s", stderr_output)
+        if not stderr_output:
+            return
+
+        for raw_line in stderr_output.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            if " ERROR " in line or line.startswith("ERROR") or line.startswith("Traceback"):
+                logger.error("Worker stderr: %s", line)
+            elif " WARNING " in line or line.startswith("WARNING"):
+                logger.warning("Worker stderr: %s", line)
+            elif " INFO " in line or line.startswith("INFO"):
+                logger.info("Worker: %s", line)
+            else:
+                logger.info("Worker stderr: %s", line)
 
     def handle_worker_process_error(self, process_error: QProcess.ProcessError) -> None:
         """Capture QProcess-level failures, such as start or crash issues."""
@@ -178,11 +212,25 @@ class CFVMain(CFVCore):
         """Request plotting directly to a file output path."""
         self._request_plot_task(save_code_path=None, save_plot_path=file_path)
 
-    def _request_plot_task(self, save_code_path: str | None, save_plot_path: str | None) -> None:
-        """Build and send a plot task with optional code-save and plot-save paths."""
-        if not self.controls:
-            logger.debug("Skipped plot update request because no controls are available")
+    def _request_plot_options(self) -> None:
+        """Fetch plot-type specific option context from worker."""
+        context = self._build_plot_context()
+        if context is None:
+            logger.debug("Skipped options request because no controls are available")
             return
+
+        selections, collapse_by_coord, plot_kind = context
+        if plot_kind != "contour":
+            self.status.showMessage(f"No options dialog available for plot type: {plot_kind}")
+            return
+
+        code = contour_range_from_selection(selections, collapse_by_coord)
+        self._send_worker_task(code, emit_image=False)
+
+    def _build_plot_context(self) -> tuple[dict[str, tuple[object, object]], dict[str, str], str] | None:
+        """Collect current selections/collapse state and infer plot type."""
+        if not self.controls:
+            return None
 
         selections: dict[str, tuple[object, object]] = {}
         collapse_by_coord: dict[str, str] = {}
@@ -213,13 +261,29 @@ class CFVMain(CFVCore):
         else:
             plot_kind = "unsupported"
 
+        return selections, collapse_by_coord, plot_kind
+
+    def _request_plot_task(self, save_code_path: str | None, save_plot_path: str | None) -> None:
+        """Build and send a plot task with optional code-save and plot-save paths."""
+        context = self._build_plot_context()
+        if context is None:
+            logger.debug("Skipped plot update request because no controls are available")
+            return
+        selections, collapse_by_coord, plot_kind = context
+
         if plot_kind in {"collapsed", "unsupported"}:
-            logger.debug("Skipped plot request due to unsupported dimensionality: %s", dims)
+            logger.debug("Skipped plot request due to unsupported dimensionality kind=%s", plot_kind)
             return
 
-        plot_options = None
+        plot_options = dict(self.plot_options_by_kind.get(plot_kind, {}))
+        if plot_kind == "contour" and not plot_options.get("title"):
+            current_file = getattr(self, "current_file_path", None)
+            if isinstance(current_file, str) and current_file:
+                plot_options["title"] = Path(current_file).name
         if save_plot_path:
-            plot_options = {"filename": str(Path(save_plot_path).expanduser())}
+            plot_options["filename"] = str(Path(save_plot_path).expanduser())
+        elif not plot_options:
+            plot_options = None
 
         try:
             cmd = plot_from_selection(selections, collapse_by_coord, plot_kind, plot_options)
