@@ -7,8 +7,6 @@ code snippets in ``cf_templates.py`` can call them directly.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
 import cf
 import cfplot as cfp
 from matplotlib import pyplot as plt
