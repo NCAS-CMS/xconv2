@@ -26,16 +26,14 @@ def field_info(fields: object) -> list[str]:
         id_ = f"{x.identity().strip()}{x.shape}"
         props = x.properties()
         info = [str(v) for _, v in x.coordinates().items()]
-        info.append(str(x.cell_methods()))
 
-        cm = getattr(x, "cell_measures", None)
-        if callable(cm):
-            info.append(str(cm()))
-        elif cm is not None:
-            info.append(str(cm))
-        else:
-            cm_legacy = getattr(x, "cellmeasures", None)
-            info.append(str(cm_legacy) if cm_legacy is not None else "")
+        cell_methods = x.cell_methods()
+        if cell_methods:
+            info.append(str(cell_methods))
+
+        cell_measures = x.cell_measures()
+        if cell_measures:
+            info.append(str(cell_measures))
 
         nl = "\n"
         rows.append(f"{id_}\x1f{nl.join(info)}\x1f{str(props)}")

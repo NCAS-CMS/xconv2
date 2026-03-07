@@ -34,6 +34,14 @@ class _FakeWorker:
         return self._lines.pop(0)
 
 
+class _FakeRangeSlider:
+    def __init__(self, bounds: tuple[int, int]) -> None:
+        self._bounds = bounds
+
+    def value(self) -> tuple[int, int]:
+        return self._bounds
+
+
 def test_normalize_coordinate_metadata_filters_and_coerces() -> None:
     payload = [
         ("time", ["1850-01-16", "1850-02-16"]),
@@ -68,3 +76,30 @@ def test_handle_worker_output_coord_routes_to_slider_builder() -> None:
         "time": ["1850-01-16", "1850-02-16"],
         "lat": ["-90", "0", "90"],
     }
+
+
+def test_build_plot_context_treats_adjacent_first_value_singletons_as_1d() -> None:
+    dummy = _DummyMain()
+    dummy.controls = {
+        "time": {
+            "values": ["t0", "t1", "t2"],
+            "range_slider": _FakeRangeSlider((0, 1)),
+        },
+        "lat": {
+            "values": ["-90", "0", "90"],
+            "range_slider": _FakeRangeSlider((0, 2)),
+        },
+        "lon": {
+            "values": ["0", "120", "240", "360"],
+            "range_slider": _FakeRangeSlider((1, 3)),
+        },
+    }
+    dummy.selected_collapse_methods = {}
+
+    context = CFVMain._build_plot_context(dummy)
+
+    assert context is not None
+    selections, collapse_by_coord, plot_kind = context
+    assert selections["time"] == ("t0", "t0")
+    assert collapse_by_coord == {}
+    assert plot_kind == "contour"

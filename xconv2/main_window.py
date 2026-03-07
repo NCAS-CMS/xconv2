@@ -239,9 +239,12 @@ class CFVMain(CFVCore):
         for name, control in self.controls.items():
             values = control["values"]
             start_idx, end_idx = control["range_slider"].value()
+            lo_idx = int(min(start_idx, end_idx))
+            hi_idx = int(max(start_idx, end_idx))
+            is_singleton = (hi_idx - lo_idx) <= 1
 
-            lo = values[min(start_idx, end_idx)]
-            hi = values[max(start_idx, end_idx)]
+            lo = values[lo_idx]
+            hi = values[lo_idx] if is_singleton else values[hi_idx]
             selections[name] = (lo, hi)
 
             collapse_method = self.selected_collapse_methods.get(name)
@@ -249,7 +252,7 @@ class CFVMain(CFVCore):
                 collapse_by_coord[name] = collapse_method
                 dims.append(1)
             else:
-                dims.append(1 if start_idx == end_idx else 2)
+                dims.append(1 if is_singleton else 2)
 
         varying_dims = sum(1 for dim in dims if dim != 1)
         if varying_dims == 1:

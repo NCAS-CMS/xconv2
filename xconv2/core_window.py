@@ -425,15 +425,60 @@ class CFVCore(QMainWindow):
         self.on_file_selected(file_path)
 
     def _create_left_panel(self) -> QWidget:
-        """Create the left panel containing controls, field list, and sliders."""
+        """Create the left panel with framed Fields and Selection sections."""
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
-        left_layout.addWidget(self._create_field_list_area())
-        left_layout.addWidget(self._create_slider_scroll_area())
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.addWidget(self._create_fields_frame())
+        left_layout.addWidget(self._create_selection_frame(), 1)
         return left_panel
 
+    def _create_fields_frame(self) -> QGroupBox:
+        """Create framed fields list section."""
+        frame = QGroupBox("Fields")
+        layout = QVBoxLayout(frame)
+
+        self.field_list_widget = QListWidget()
+        self.field_list_widget.itemClicked.connect(self.on_field_clicked)
+        self._set_field_list_visible_rows(5)
+        self._set_field_list_hint("Open a file to see fields")
+
+        layout.addWidget(self.field_list_widget)
+        return frame
+
+    def _create_selection_frame(self) -> QGroupBox:
+        """Create framed selection details and slider controls section."""
+        frame = QGroupBox("Selection")
+        layout = QVBoxLayout(frame)
+
+        self.selection_output = QPlainTextEdit()
+        self.selection_output.setReadOnly(True)
+        self.selection_output.setPlaceholderText("Click a field to see details...")
+        self.selection_output.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.selection_output.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        line_height = self.selection_output.fontMetrics().lineSpacing()
+        frame_width = self.selection_output.frameWidth() * 2
+        margin = 10
+        self.selection_output.setFixedHeight((line_height * 6) + frame_width + margin)
+
+        controls_row = QHBoxLayout()
+        properties_button = QPushButton("Properties")
+        properties_button.clicked.connect(self._show_selection_properties)
+        reset_button = QPushButton("Reset all sliders")
+        reset_button.setToolTip("Reset all range sliders to full coordinate extent")
+        reset_button.clicked.connect(self._reset_all_sliders)
+        controls_row.addWidget(properties_button)
+        controls_row.addWidget(reset_button)
+        controls_row.addStretch(1)
+
+        layout.addWidget(self.selection_output)
+        layout.addLayout(controls_row)
+        layout.addWidget(self._create_slider_scroll_area(), 1)
+        return frame
+
     def _create_field_list_area(self) -> QWidget:
-        """Create field list plus a six-line details output area."""
+        """Backward-compat shim kept for now; use framed builders above."""
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -471,6 +516,22 @@ class CFVCore(QMainWindow):
         layout.addLayout(selection_header)
         layout.addWidget(self.selection_output)
         return container
+
+    def _reset_all_sliders(self) -> None:
+        """Reset all slider ranges to full extent and refresh summary state."""
+        for name, control in self.controls.items():
+            slider = control.get("range_slider")
+            values = control.get("values", [])
+            if slider is None or not values:
+                continue
+
+            slider.blockSignals(True)
+            slider.setValue((0, len(values) - 1))
+            slider.blockSignals(False)
+
+            self._update_range_labels(name)
+
+        self._refresh_plot_summary()
 
     def _set_field_list_hint(self, text: str) -> None:
         """Show a non-selectable hint message in the fields list."""
@@ -670,12 +731,14 @@ class CFVCore(QMainWindow):
     def _create_slider_scroll_area(self) -> QScrollArea:
         """Create the scrollable container that hosts dynamic sliders."""
         self.sidebar = QVBoxLayout()
+        self.sidebar.setContentsMargins(6, 0, 6, 0)
+        self.sidebar.setSpacing(4)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         sidebar_container = QWidget()
         sidebar_container.setLayout(self.sidebar)
         scroll.setWidget(sidebar_container)
-        scroll.setFixedWidth(300)
+        scroll.setMinimumWidth(300)
         return scroll
 
     def _create_plot_area(self) -> QWidget:
@@ -898,8 +961,11 @@ class CFVCore(QMainWindow):
             container = QWidget()
             row = QVBoxLayout(container)
             row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(2)
 
             header_row = QHBoxLayout()
+            header_row.setContentsMargins(0, 0, 0, 0)
+            header_row.setSpacing(4)
             name_label = QLabel(f"{name.upper()}:")
             collapse_label = QLabel("collapse")
             collapse_checkbox = QCheckBox("")
@@ -915,6 +981,7 @@ class CFVCore(QMainWindow):
 
             selection_label = QLabel()
             selection_label.setWordWrap(True)
+            selection_label.setContentsMargins(0, 0, 0, 0)
 
             # Show the fixed coordinate bounds around the slider track.
             bounds_start_label = QLabel(str(values[0]))
@@ -930,6 +997,8 @@ class CFVCore(QMainWindow):
             )
 
             slider_row = QHBoxLayout()
+            slider_row.setContentsMargins(0, 0, 0, 0)
+            slider_row.setSpacing(4)
             slider_row.addWidget(bounds_start_label)
             slider_row.addWidget(slider, 1)
             slider_row.addWidget(bounds_end_label)
@@ -1022,8 +1091,8 @@ class CFVCore(QMainWindow):
 
         values = control["values"]
         start_idx, end_idx = control["range_slider"].value()
-        lo_idx = min(start_idx, end_idx)
-        hi_idx = max(start_idx, end_idx)
+        lo_idx = int(min(start_idx, end_idx))
+        hi_idx = int(max(start_idx, end_idx))
         selected_count = hi_idx - lo_idx
         self.selected_counts[name] = selected_count
 
@@ -1050,7 +1119,9 @@ class CFVCore(QMainWindow):
                 continue
 
             start_idx, end_idx = control["range_slider"].value()
-            dims.append(1 if start_idx == end_idx else 2)
+            lo_idx = int(min(start_idx, end_idx))
+            hi_idx = int(max(start_idx, end_idx))
+            dims.append(1 if (hi_idx - lo_idx) <= 1 else 2)
 
         varying_dims = sum(1 for dim in dims if dim != 1)
         dims_text = f"Selection dimensions = {dims}"
