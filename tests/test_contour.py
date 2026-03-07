@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from xconv2.cf_templates import contour_range_from_selection, plot_from_selection
+import xconv2.xconv_cf_interface as cf_interface
 from xconv2.xconv_cf_interface import get_data_for_plotting, run_contour_plot
 
 
@@ -82,17 +83,27 @@ def _run_generated(
     messages: list[tuple[str, object]] = []
     if plt_obj is None:
         plt_obj = _FakePlt()
+
+    # Keep helper tests deterministic by overriding module-level plotting deps.
+    prev_cfp = cf_interface.cfp
+    prev_plt = cf_interface.plt
+    cf_interface.cfp = cfp
+    cf_interface.plt = plt_obj
+
     namespace = {
         "fld": fld,
         "cf": _FakeCF,
-        "cfp": cfp,
         "np": np,
-        "plt": plt_obj,
         "get_data_for_plotting": get_data_for_plotting,
         "run_contour_plot": run_contour_plot,
         "send_to_gui": lambda prefix, payload=None: messages.append((prefix, payload)),
     }
-    exec(code, namespace)
+    try:
+        exec(code, namespace)
+    finally:
+        cf_interface.cfp = prev_cfp
+        cf_interface.plt = prev_plt
+
     return messages
 
 

@@ -4,6 +4,9 @@ import base64
 import traceback
 import logging
 import warnings
+import inspect
+import re
+import textwrap
 from io import BytesIO
 from pathlib import Path
 
@@ -33,6 +36,7 @@ logger = logging.getLogger(__name__)
 SAVE_TASK_HEADER = "#SAVE_TASK_CODE_PATH_B64:"
 EMIT_IMAGE_HEADER = "#EMIT_IMAGE:"
 INTERFACE_EXPORTS = tuple(getattr(xconv_cf_interface, "__all__", ()))
+OMIT4SAVE_TOKEN = "#omit4save"
 
 # This dictionary persists data (like 'f') between GUI commands
 worker_globals = {
@@ -94,17 +98,31 @@ def _extract_task_headers(code: str) -> tuple[str | None, bool, str]:
 
 def _build_saved_plot_script(exec_code: str) -> str:
     """Build a reproducible script with worker state preamble plus plot code."""
-    helper_import = ""
-    if INTERFACE_EXPORTS:
-        helper_import = f"from xconv2.xconv_cf_interface import {', '.join(INTERFACE_EXPORTS)}"
-
     lines: list[str] = [
+        "from __future__ import annotations",
         "import cf",
         "import cfplot as cfp",
         "from matplotlib import pyplot as plt",
-        helper_import,
+        "",
+        "# Inlined helpers from xconv2.xconv_cf_interface for standalone execution.",
         "",
     ]
+
+    needed_helpers = [
+        name for name in INTERFACE_EXPORTS if re.search(rf"\b{re.escape(name)}\b", exec_code)
+    ]
+
+    for name in needed_helpers:
+        obj = getattr(xconv_cf_interface, name, None)
+        if obj is None or not callable(obj):
+            continue
+        try:
+            lines.append(textwrap.dedent(inspect.getsource(obj)).rstrip())
+            lines.append("")
+        except (OSError, TypeError):
+            logger.exception("Unable to inline helper source for %s", name)
+            lines.append(f"# NOTE: helper source unavailable for {name}")
+            lines.append("")
 
     source_path = worker_globals.get("_cfview_file_path")
     if isinstance(source_path, str) and source_path:
@@ -118,8 +136,12 @@ def _build_saved_plot_script(exec_code: str) -> str:
     else:
         lines.append("# NOTE: field index unavailable; select a field before saving code")
 
+    # Drop GUI-only task lines from the saved standalone script.
+    save_exec_code = "\n".join(
+        line for line in exec_code.splitlines() if OMIT4SAVE_TOKEN not in line
+    ).rstrip()
     lines.append("")
-    lines.append(exec_code.rstrip())
+    lines.append(save_exec_code)
     lines.append("")
     return "\n".join(lines)
 

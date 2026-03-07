@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import csv
+import json
 from pathlib import Path
 import logging
 from typing import Sequence
@@ -63,7 +64,8 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 FIELD_METADATA_SEPARATOR = "\x1f"
-MAX_RECENT_FILES = 5
+DEFAULT_MAX_RECENT_FILES = 10
+SETTINGS_VERSION = 1
 
 
 class CFVCore(QMainWindow):
@@ -74,7 +76,9 @@ class CFVCore(QMainWindow):
 
         self.base_window_title = "xconv2"
         self.current_file_path: str | None = None
+        self.settings_path = Path.home() / ".config" / "cfview" / "settings.json"
         self.recent_log_path = Path.home() / ".cache" / "cfview" / "last_opened.log"
+        self._settings = self._load_settings()
         self.setWindowTitle(self.base_window_title)
         self.resize(1000, 700)
 
@@ -201,6 +205,12 @@ class CFVCore(QMainWindow):
 
         self.recent_menu = file_menu.addMenu("Recent")
         self._refresh_recent_menu()
+
+        file_menu.addSeparator()
+
+        settings_action = QAction("Settings...", self)
+        settings_action.triggered.connect(self._show_settings_dialog)
+        file_menu.addAction(settings_action)
 
         file_menu.addSeparator()
 
@@ -375,7 +385,56 @@ class CFVCore(QMainWindow):
             self.recent_menu.addAction(action)
 
     def _load_recent_files(self) -> list[str]:
-        """Load recent files from disk and return a sanitized list."""
+        """Load recent files from JSON settings and return a sanitized list."""
+        raw_recent = self._settings.get("recent_files", [])
+        if not isinstance(raw_recent, list):
+            return []
+
+        max_recent = self._max_recent_files()
+        recent_files: list[str] = []
+        for entry in raw_recent:
+            if not isinstance(entry, str):
+                continue
+            path = entry.strip()
+            if not path or path in recent_files:
+                continue
+            recent_files.append(path)
+            if len(recent_files) >= max_recent:
+                break
+        return recent_files
+
+    def _save_recent_files(self, recent_files: list[str]) -> None:
+        """Persist recent files list to JSON settings."""
+        self._settings["recent_files"] = recent_files[: self._max_recent_files()]
+        self._save_settings()
+
+    def _record_recent_file(self, file_path: str) -> None:
+        """Record a file open event and refresh the Recent submenu."""
+        normalized_path = str(Path(file_path).expanduser())
+        recent_files = [p for p in self._load_recent_files() if p != normalized_path]
+        recent_files.insert(0, normalized_path)
+        recent_files = recent_files[: self._max_recent_files()]
+
+        try:
+            self._save_recent_files(recent_files)
+        except OSError:
+            logger.exception("Failed to save recent files log: %s", self.recent_log_path)
+            return
+
+        self._refresh_recent_menu()
+
+    def _default_settings(self) -> dict[str, object]:
+        """Return default persisted settings schema."""
+        return {
+            "version": SETTINGS_VERSION,
+            "recent_files": [],
+            "max_recent_files": DEFAULT_MAX_RECENT_FILES,
+            "last_save_code_dir": str(Path.home()),
+            "last_save_plot_dir": str(Path.home()),
+        }
+
+    def _load_recent_files_legacy(self, settings: dict[str, object] | None = None) -> list[str]:
+        """Load old newline-based recent-file log for one-time settings migration."""
         if not self.recent_log_path.exists():
             return []
 
@@ -386,36 +445,182 @@ class CFVCore(QMainWindow):
             return []
 
         recent_files: list[str] = []
+        max_recent = self._max_recent_files(settings)
         for line in lines:
             path = line.strip()
             if not path or path in recent_files:
                 continue
             recent_files.append(path)
-            if len(recent_files) >= MAX_RECENT_FILES:
+            if len(recent_files) >= max_recent:
                 break
-
         return recent_files
 
-    def _save_recent_files(self, recent_files: list[str]) -> None:
-        """Persist recent files list to disk."""
-        self.recent_log_path.parent.mkdir(parents=True, exist_ok=True)
-        content = "\n".join(recent_files) + "\n"
-        self.recent_log_path.write_text(content, encoding="utf-8")
+    def _load_settings(self) -> dict[str, object]:
+        """Load JSON settings with sane defaults and legacy migration."""
+        settings = self._default_settings()
 
-    def _record_recent_file(self, file_path: str) -> None:
-        """Record a file open event and refresh the Recent submenu."""
-        normalized_path = str(Path(file_path).expanduser())
-        recent_files = [p for p in self._load_recent_files() if p != normalized_path]
-        recent_files.insert(0, normalized_path)
-        recent_files = recent_files[:MAX_RECENT_FILES]
+        if self.settings_path.exists():
+            try:
+                payload = json.loads(self.settings_path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    settings.update(payload)
+            except (OSError, json.JSONDecodeError):
+                logger.exception("Failed to read settings JSON: %s", self.settings_path)
+
+        recent_files = settings.get("recent_files")
+        if not isinstance(recent_files, list) or not recent_files:
+            migrated = self._load_recent_files_legacy(settings)
+            if migrated:
+                settings["recent_files"] = migrated
+
+        for key in ("last_save_code_dir", "last_save_plot_dir"):
+            value = settings.get(key)
+            if not isinstance(value, str) or not value.strip():
+                settings[key] = str(Path.home())
+
+        max_recent = settings.get("max_recent_files")
+        if not isinstance(max_recent, int) or max_recent < 1:
+            settings["max_recent_files"] = DEFAULT_MAX_RECENT_FILES
+
+        self._settings = settings
+        try:
+            self._save_settings()
+        except OSError:
+            logger.exception("Failed to persist settings JSON after load")
+
+        return settings
+
+    def _save_settings(self) -> None:
+        """Persist settings dictionary to disk as JSON."""
+        self.settings_path.parent.mkdir(parents=True, exist_ok=True)
+        self.settings_path.write_text(
+            json.dumps(self._settings, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    def _default_save_path(self, settings_key: str, filename: str) -> str:
+        """Build default save-file path from last-used directory setting."""
+        candidate = self._settings.get(settings_key, str(Path.home()))
+        if isinstance(candidate, str) and candidate.strip():
+            base_dir = Path(candidate).expanduser()
+        else:
+            base_dir = Path.home()
+
+        if not base_dir.is_dir():
+            base_dir = Path.home()
+
+        return str(base_dir / filename)
+
+    def _max_recent_files(self, settings: dict[str, object] | None = None) -> int:
+        """Return validated max recent-files value from settings."""
+        source = settings if settings is not None else getattr(self, "_settings", {})
+        raw = source.get("max_recent_files", DEFAULT_MAX_RECENT_FILES)
+        if isinstance(raw, int) and raw > 0:
+            return raw
+        return DEFAULT_MAX_RECENT_FILES
+
+    def _show_settings_dialog(self) -> None:
+        """Show basic settings editor for persisted app preferences."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Settings")
+        dialog.resize(640, 220)
+
+        layout = QVBoxLayout(dialog)
+
+        recent_row = QHBoxLayout()
+        recent_label = QLabel("How many recent files to keep")
+        recent_spin = QSpinBox()
+        recent_spin.setRange(1, 100)
+        recent_spin.setValue(self._max_recent_files())
+        recent_row.addWidget(recent_label)
+        recent_row.addStretch(1)
+        recent_row.addWidget(recent_spin)
+
+        code_dir_row = QHBoxLayout()
+        code_dir_label = QLabel("Default folder for Save Code")
+        code_dir_edit = QLineEdit(str(self._settings.get("last_save_code_dir", str(Path.home()))))
+        code_dir_browse = QPushButton("Browse...")
+
+        def _choose_code_dir() -> None:
+            selected = QFileDialog.getExistingDirectory(
+                dialog,
+                "Select default Save Code folder",
+                code_dir_edit.text().strip() or str(Path.home()),
+            )
+            if selected:
+                code_dir_edit.setText(selected)
+
+        code_dir_browse.clicked.connect(_choose_code_dir)
+        code_dir_row.addWidget(code_dir_label)
+        code_dir_row.addWidget(code_dir_edit, 1)
+        code_dir_row.addWidget(code_dir_browse)
+
+        plot_dir_row = QHBoxLayout()
+        plot_dir_label = QLabel("Default folder for Save Plot")
+        plot_dir_edit = QLineEdit(str(self._settings.get("last_save_plot_dir", str(Path.home()))))
+        plot_dir_browse = QPushButton("Browse...")
+
+        def _choose_plot_dir() -> None:
+            selected = QFileDialog.getExistingDirectory(
+                dialog,
+                "Select default Save Plot folder",
+                plot_dir_edit.text().strip() or str(Path.home()),
+            )
+            if selected:
+                plot_dir_edit.setText(selected)
+
+        plot_dir_browse.clicked.connect(_choose_plot_dir)
+        plot_dir_row.addWidget(plot_dir_label)
+        plot_dir_row.addWidget(plot_dir_edit, 1)
+        plot_dir_row.addWidget(plot_dir_browse)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+
+        layout.addLayout(recent_row)
+        layout.addLayout(code_dir_row)
+        layout.addLayout(plot_dir_row)
+        layout.addStretch(1)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        self._settings["max_recent_files"] = int(recent_spin.value())
+
+        code_dir = Path(code_dir_edit.text().strip() or str(Path.home())).expanduser()
+        if not code_dir.is_dir():
+            code_dir = Path.home()
+        self._settings["last_save_code_dir"] = str(code_dir)
+
+        plot_dir = Path(plot_dir_edit.text().strip() or str(Path.home())).expanduser()
+        if not plot_dir.is_dir():
+            plot_dir = Path.home()
+        self._settings["last_save_plot_dir"] = str(plot_dir)
+
+        # Clamp existing stored list to the updated configured size.
+        recent_files = self._load_recent_files()
+        self._settings["recent_files"] = recent_files
 
         try:
-            self._save_recent_files(recent_files)
+            self._save_settings()
         except OSError:
-            logger.exception("Failed to save recent files log: %s", self.recent_log_path)
+            logger.exception("Failed to save settings from dialog")
+            self.status.showMessage("Failed to save settings")
             return
 
         self._refresh_recent_menu()
+        self.status.showMessage("Settings saved")
+
+    def _remember_last_save_dir(self, settings_key: str, file_path: str) -> None:
+        """Persist the parent folder of a just-saved file for future defaults."""
+        parent = Path(file_path).expanduser().parent
+        self._settings[settings_key] = str(parent)
+        try:
+            self._save_settings()
+        except OSError:
+            logger.exception("Failed to save settings key %s", settings_key)
 
     def _open_recent_file(self, file_path: str) -> None:
         """Open a file selected from the Recent submenu."""
@@ -859,7 +1064,7 @@ class CFVCore(QMainWindow):
         if not getattr(self, "save_code_button", None) or not self.save_code_button.isEnabled():
             return
 
-        default_path = str(Path.home() / "cfview_plot_code.py")
+        default_path = self._default_save_path("last_save_code_dir", "cfview_plot_code.py")
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Plot Code",
@@ -872,6 +1077,7 @@ class CFVCore(QMainWindow):
         if not Path(file_path).suffix:
             file_path += ".py"
 
+        self._remember_last_save_dir("last_save_code_dir", file_path)
         self._request_plot_code_save(file_path)
 
     def _on_save_plot_button_clicked(self) -> None:
@@ -879,7 +1085,7 @@ class CFVCore(QMainWindow):
         if not getattr(self, "save_plot_button", None) or not self.save_plot_button.isEnabled():
             return
 
-        default_path = str(Path.home() / "cfview_plot.png")
+        default_path = self._default_save_path("last_save_plot_dir", "cfview_plot.png")
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Plot",
@@ -892,6 +1098,7 @@ class CFVCore(QMainWindow):
         if not Path(file_path).suffix:
             file_path += ".png"
 
+        self._remember_last_save_dir("last_save_plot_dir", file_path)
         self._request_plot_save(file_path)
 
     def _setup_status_bar(self) -> None:

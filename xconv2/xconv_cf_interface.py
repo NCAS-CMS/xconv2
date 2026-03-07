@@ -10,6 +10,8 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import cf
+import cfplot as cfp
+from matplotlib import pyplot as plt
 
 __all__ = [
     "field_info",
@@ -102,9 +104,6 @@ def get_data_for_plotting(
 
 def run_contour_plot(
     pfld: object,
-    cfp_module: object,
-    plt_module: object,
-    send_to_gui: Callable[..., object],
     options: dict[str, object] | None,
 ) -> None:
     """Apply contour options and render a contour plot for ``pfld``."""
@@ -131,13 +130,12 @@ def run_contour_plot(
     intervals = options.get("intervals")
 
     if cscale:
-        cfp_module.cscale(scale=cscale)
+        cfp.cscale(scale=cscale)
     else:
-        cfp_module.cscale()
+        cfp.cscale()
 
     if filename is not None:
-        cfp_module.gopen(file=filename)
-        send_to_gui(f"STATUS:Saved plot to {filename}")
+        cfp.gopen(file=filename)
 
     contour_levels = None
     contour_min = None
@@ -171,20 +169,20 @@ def run_contour_plot(
         contour_kwargs["blockfill_fast"] = bool(blockfill_fast)
 
     if contour_levels is not None:
-        cfp_module.levs(manual=contour_levels)
+        cfp.levs(manual=contour_levels)
     elif contour_min is not None and contour_max is not None and contour_step is not None:
-        cfp_module.levs(min=contour_min, max=contour_max, step=contour_step)
+        cfp.levs(min=contour_min, max=contour_max, step=contour_step)
     else:
-        cfp_module.levs()
+        cfp.levs()
 
-    cfp_module.con(pfld, **contour_kwargs)
+    cfp.con(pfld, **contour_kwargs)
 
     if annotation_display and annotation_properties:
         annotation_items = [f"{key}: {value}" for key, value in annotation_properties[:4]]
         line_one = " | ".join(annotation_items[:2])
         line_two = " | ".join(annotation_items[2:4])
         annotation_text = "\n".join([x for x in (line_one, line_two) if x])
-        plt_module.gcf().text(0.5, 0.02, annotation_text, ha="center", va="bottom", fontsize=8)
+        plt.gcf().text(0.5, 0.02, annotation_text, ha="center", va="bottom", fontsize=8)
 
     if filename is not None:
-        cfp_module.gclose()
+        cfp.gclose()

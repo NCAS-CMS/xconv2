@@ -1,11 +1,14 @@
-# Get a list of fields in a file using their identity, things that look
-# like <CF Field: air_pressure_at_mean_sea_level(time(30), latitude(721), longitude(1440)) Pa>
-# and strip the gubbins off the front and back
+# -------------------------------------------------------------------------------------------
+# These module includes the templates and functions which emit text
+# that is executed in the worker process. Some of the code here is 
+# signalling back to the GUI, and this is marked with a special
+# omit4save comment to indicate that it should not be included if the code
+# is being saved for later execution.
+# -------------------------------------------------------------------------------------------
 
 import textwrap
 
 # Emit list[str] so GUI transport and tests use a stable, serializable contract.
-# FIXME: Expand this so it's more tutorial like and useful to readers of code
 field_list = textwrap.dedent(
     """
     fields = field_info(f)
@@ -24,7 +27,7 @@ def coordinate_list(index: int) -> str:
         fld = f[{index}]
         fld.squeeze(inplace=True) # make it easier for the GUI to handle coordinates with length 1
         coords = coordinate_info(fld)
-        send_to_gui('COORD', coords)
+        send_to_gui('COORD', coords) #omit4save
         """
     ).lstrip()
 
@@ -65,10 +68,10 @@ def contour_range_from_selection(
     range_code = textwrap.dedent(
         """
         arr = np.ma.array(pfld.array).compressed()
-        if arr.size == 0:
-            send_to_gui('CONTOUR_RANGE', {'min': 0.0, 'max': 0.0})
+        if arr.size == 0:  #omit4save
+            send_to_gui('CONTOUR_RANGE', {'min': 0.0, 'max': 0.0}) #omit4save
         else:
-            send_to_gui('CONTOUR_RANGE', {'min': float(arr.min()), 'max': float(arr.max())})
+            send_to_gui('CONTOUR_RANGE', {'min': float(arr.min()), 'max': float(arr.max())}) #omit4save
         """
     ).lstrip()
     return "\n".join([prep_code, range_code])
@@ -102,11 +105,10 @@ def contour(options: dict[str, object] | None) -> str:
         contour_options = {options!r}
         run_contour_plot(
             pfld=pfld,
-            cfp_module=cfp,
-            plt_module=plt,
-            send_to_gui=send_to_gui,
             options=contour_options,
         )
+        if contour_options and 'filename' in contour_options:  #omit4save
+            send_to_gui(f"STATUS:Saved plot to {{contour_options['filename']}}")  #omit4save
         """
     ).lstrip()
     return payload_code

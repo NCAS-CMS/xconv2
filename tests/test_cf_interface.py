@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import xconv2.xconv_cf_interface as cf_interface
 
 from xconv2.xconv_cf_interface import (
     coordinate_info,
@@ -164,16 +165,17 @@ class _FakePlt:
         return self.figure
 
 
-def test_run_contour_plot_applies_levels_annotations_and_save() -> None:
+def test_run_contour_plot_applies_levels_annotations_and_save(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     cfp = _FakeCFPlot()
     plt_obj = _FakePlt()
-    messages: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(cf_interface, "cfp", cfp)
+    monkeypatch.setattr(cf_interface, "plt", plt_obj)
 
     run_contour_plot(
         pfld=object(),
-        cfp_module=cfp,
-        plt_module=plt_obj,
-        send_to_gui=lambda prefix, payload=None: messages.append((prefix, payload)),
         options={
             "mode": "explicit",
             "levels": [-1.0, 0.0, 1.0],
@@ -189,5 +191,4 @@ def test_run_contour_plot_applies_levels_annotations_and_save() -> None:
     assert cfp.levs_calls == [{"manual": [-1.0, 0.0, 1.0]}]
     assert cfp.con_calls
     assert cfp.gclose_calls == 1
-    assert messages == [("STATUS:Saved plot to /tmp/mock.png", None)]
     assert plt_obj.figure.text_calls
