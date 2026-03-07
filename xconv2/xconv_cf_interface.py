@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import cf
+
 
 def field_info(fields: object) -> list[str]:
     """Return serialized field metadata rows for GUI transport."""
@@ -53,7 +55,6 @@ def get_data_for_plotting(
     field: object,
     selection_spec: dict[str, tuple[object, object]],
     collapse_by_coord: dict[str, str],
-    cf_module: object,
 ) -> object:
     """Subspace and collapse a field from GUI selections, returning ``pfld``."""
 
@@ -80,7 +81,7 @@ def get_data_for_plotting(
         else:
             if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
                 lo, hi = sorted((lo, hi))
-            subspace_kwargs[coord_name] = cf_module.wi(lo, hi)
+            subspace_kwargs[coord_name] = cf.wi(lo, hi)
 
     pfld = field.subspace(**subspace_kwargs)
 
@@ -111,7 +112,7 @@ def run_contour_plot(
     cscale = options.get("cscale")
 
     fill = bool(options.get("fill", True))
-    lines_enabled = bool(options.get("lines", True))
+    lines_enabled = bool(options.get("lines", False))
     line_labels = bool(options.get("line_labels", True))
     negative_linestyle = options.get("negative_linestyle", "solid")
     zero_thick = options.get("zero_thick", False)

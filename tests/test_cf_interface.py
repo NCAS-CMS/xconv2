@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 
 from xconv2.xconv_cf_interface import (
     coordinate_info,
@@ -7,6 +8,8 @@ from xconv2.xconv_cf_interface import (
     get_data_for_plotting,
     run_contour_plot,
 )
+
+cf = pytest.importorskip("cf")
 
 
 class _MockCellMeasures:
@@ -83,12 +86,6 @@ def test_coordinate_info_filters_singletons_and_serializes_values() -> None:
     ]
 
 
-class _FakeCFModule:
-    @staticmethod
-    def wi(lo: object, hi: object) -> tuple[object, object]:
-        return (lo, hi)
-
-
 class _FakePlotField:
     def __init__(self) -> None:
         self.kwargs: dict[str, object] | None = None
@@ -114,15 +111,13 @@ def test_get_data_for_plotting_builds_subspace_kwargs() -> None:
             "name": ("foo", "foo"),
         },
         {"time": "mean", "name": "max"},
-        _FakeCFModule,
     )
 
     assert pfld is fld
-    assert fld.kwargs == {
-        "time": (1, 3),
-        "level": 850,
-        "name": "foo",
-    }
+    assert fld.kwargs is not None
+    assert fld.kwargs["level"] == 850
+    assert fld.kwargs["name"] == "foo"
+    assert str(fld.kwargs["time"]) == str(cf.wi(1, 3))
     assert fld.collapse_calls == [
         ("mean", "time", False),
         ("max", "name", False),

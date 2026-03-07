@@ -88,7 +88,7 @@ def _pfld_from_selection_code(
 
     selection_code = textwrap.dedent(
         """
-        pfld = get_data_for_plotting(fld, selection_spec, collapse_by_coord, cf)
+        pfld = get_data_for_plotting(fld, selection_spec, collapse_by_coord)
         """
     ).lstrip()
 
