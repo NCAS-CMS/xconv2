@@ -21,17 +21,18 @@ test = [
 
 [project.gui-scripts]
 # This creates an 'xconv2' command that launches your GUI
-xconv2 = "cf_view.gui:main"
+xconv2 = "xconv2.gui:main"
 
 [project.scripts]
 # This creates a 'cf-worker' command for the backend process
-cf-worker = "cf_view.worker:main"
+cf-worker = "xconv2.worker:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
+include = ["xconv2*"]
 
 [tool.setuptools.package-data]
-cf_view = ["assets/*.svg", "assets/*.png"]
+xconv2 = ["assets/*.svg", "assets/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

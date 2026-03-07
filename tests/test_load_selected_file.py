@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from cf_view.cf_templates import coordinate_list
-from cf_view.gui import CFVMain
+from xconv2.cf_templates import coordinate_list
+from xconv2.gui import CFVMain
 
 
 @dataclass

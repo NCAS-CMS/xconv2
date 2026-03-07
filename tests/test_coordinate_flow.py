@@ -4,7 +4,7 @@ import base64
 import pickle
 from dataclasses import dataclass, field
 
-from cf_view.main_window import CFVMain
+from xconv2.main_window import CFVMain
 
 
 @dataclass

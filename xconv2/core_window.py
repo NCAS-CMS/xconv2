@@ -170,6 +170,9 @@ class CFVCore(QMainWindow):
         # Keep menus inside the window for consistent cross-platform behavior.
         menu_bar = self.menuBar()
         menu_bar.setNativeMenuBar(False)
+        menu_font = menu_bar.font()
+        menu_font_size_px = max(int(round(menu_font.pointSizeF())), 10)
+        menu_font_weight = int(menu_font.weight())
         menu_bar.setStyleSheet(
             "QMenuBar {"
             " background-color: #186f4d;"
@@ -177,6 +180,8 @@ class CFVCore(QMainWindow):
             " padding: 2px;"
             "}"
             "QMenuBar::item {"
+            f" font-size: {menu_font_size_px}px;"
+            f" font-weight: {menu_font_weight};"
             " color: #f0f0f0;"
             " padding: 4px 10px;"
             " background: transparent;"
@@ -205,10 +210,10 @@ class CFVCore(QMainWindow):
 
         file_menu.addAction(quit_action)
 
-        self._setup_help_menu(menu_bar)
+        self._setup_help_menu(menu_bar, menu_font_size_px, menu_font_weight)
 
-    def _setup_help_menu(self, menu_bar) -> None:
-        """Attach a right-aligned Help menu with About and future entries."""
+    def _setup_help_menu(self, menu_bar, menu_font_size_px: int, menu_font_weight: int) -> None:
+        """Attach Help pinned to the right while left-side menus grow normally."""
         help_menu = QMenu("Help", self)
 
         about_action = QAction("About", self)
@@ -221,12 +226,15 @@ class CFVCore(QMainWindow):
 
         help_button = QToolButton(menu_bar)
         help_button.setText("Help")
+        help_button.setFont(menu_bar.font())
         help_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
         help_button.setAutoRaise(True)
         help_button.setPopupMode(QToolButton.InstantPopup)
         help_button.setMenu(help_menu)
         help_button.setStyleSheet(
             "QToolButton {"
+            f" font-size: {menu_font_size_px}px;"
+            f" font-weight: {menu_font_weight};"
             " color: #f0f0f0;"
             " padding: 4px 10px;"
             " background: transparent;"
@@ -242,7 +250,7 @@ class CFVCore(QMainWindow):
             "}"
         )
 
-        # Keep Help pinned to the far right independent of left-side menus.
+        # Corner widget stays right-aligned even if more menus are added on the left.
         menu_bar.setCornerWidget(help_button, Qt.TopRightCorner)
 
     def _show_about_dialog(self) -> None:

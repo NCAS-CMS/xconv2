@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from cf_view.cf_templates import contour_range_from_selection, plot_from_selection
+from xconv2.cf_templates import contour_range_from_selection, plot_from_selection
 
 
 @dataclass
