@@ -11,6 +11,13 @@ from collections.abc import Callable
 
 import cf
 
+__all__ = [
+    "field_info",
+    "coordinate_info",
+    "get_data_for_plotting",
+    "run_contour_plot",
+]
+
 
 def field_info(fields: object) -> list[str]:
     """Return serialized field metadata rows for GUI transport."""

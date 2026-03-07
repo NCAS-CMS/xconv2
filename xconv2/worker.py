@@ -32,6 +32,7 @@ warnings.filterwarnings(
 logger = logging.getLogger(__name__)
 SAVE_TASK_HEADER = "#SAVE_TASK_CODE_PATH_B64:"
 EMIT_IMAGE_HEADER = "#EMIT_IMAGE:"
+INTERFACE_EXPORTS = tuple(getattr(xconv_cf_interface, "__all__", ()))
 
 # This dictionary persists data (like 'f') between GUI commands
 worker_globals = {
@@ -44,9 +45,8 @@ worker_globals = {
 # Expose helper functions/constants from the interface module to generated code.
 worker_globals.update(
     {
-        name: value
-        for name, value in vars(xconv_cf_interface).items()
-        if not name.startswith("_")
+        name: getattr(xconv_cf_interface, name)
+        for name in INTERFACE_EXPORTS
     }
 )
 
@@ -94,11 +94,15 @@ def _extract_task_headers(code: str) -> tuple[str | None, bool, str]:
 
 def _build_saved_plot_script(exec_code: str) -> str:
     """Build a reproducible script with worker state preamble plus plot code."""
+    helper_import = ""
+    if INTERFACE_EXPORTS:
+        helper_import = f"from xconv2.xconv_cf_interface import {', '.join(INTERFACE_EXPORTS)}"
+
     lines: list[str] = [
         "import cf",
         "import cfplot as cfp",
         "from matplotlib import pyplot as plt",
-        "from xconv2.xconv_cf_interface import *",
+        helper_import,
         "",
     ]
 
