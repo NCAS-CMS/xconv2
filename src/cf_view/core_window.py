@@ -17,8 +17,8 @@ from pathlib import Path
 import logging
 from typing import Sequence
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QCloseEvent, QColor, QIcon, QImage, QKeySequence, QPixmap
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QAction, QCloseEvent, QColor, QDesktopServices, QIcon, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -71,7 +72,7 @@ class CFVCore(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
 
-        self.base_window_title = "cf-view (2026)"
+        self.base_window_title = "xconv2"
         self.current_file_path: str | None = None
         self.recent_log_path = Path.home() / ".cache" / "cfview" / "last_opened.log"
         self.setWindowTitle(self.base_window_title)
@@ -203,6 +204,150 @@ class CFVCore(QMainWindow):
         quit_action.triggered.connect(self._quit_application)
 
         file_menu.addAction(quit_action)
+
+        self._setup_help_menu(menu_bar)
+
+    def _setup_help_menu(self, menu_bar) -> None:
+        """Attach a right-aligned Help menu with About and future entries."""
+        help_menu = QMenu("Help", self)
+
+        about_action = QAction("About", self)
+        about_action.triggered.connect(self._show_about_dialog)
+        help_menu.addAction(about_action)
+
+        report_issue_action = QAction("Report Issue", self)
+        report_issue_action.triggered.connect(self._open_issue_tracker)
+        help_menu.addAction(report_issue_action)
+
+        help_button = QToolButton(menu_bar)
+        help_button.setText("Help")
+        help_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        help_button.setAutoRaise(True)
+        help_button.setPopupMode(QToolButton.InstantPopup)
+        help_button.setMenu(help_menu)
+        help_button.setStyleSheet(
+            "QToolButton {"
+            " color: #f0f0f0;"
+            " padding: 4px 10px;"
+            " background: transparent;"
+            " border: none;"
+            " border-radius: 4px;"
+            "}"
+            "QToolButton:hover {"
+            " background-color: #4a4a4a;"
+            "}"
+            "QToolButton::menu-indicator {"
+            " image: none;"
+            " width: 0px;"
+            "}"
+        )
+
+        # Keep Help pinned to the far right independent of left-side menus.
+        menu_bar.setCornerWidget(help_button, Qt.TopRightCorner)
+
+    def _show_about_dialog(self) -> None:
+        """Show application identity and runtime details."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("About xconv")
+        dialog.resize(560, 320)
+
+        layout = QVBoxLayout(dialog)
+
+        heading = QLabel(
+            "<h2 style='margin:0;'>xconv2</h2>"
+            "<p style='margin-top:8px;'>"
+            "High-performance data viewer and simple data converter."
+            "</p>"
+            "<p> Provides a graphical interface to explore and plot CF-compliant (and near compliant) datasets, " 
+            "stored in NetCDF, Zarr, or Met Office pp/fields files. Supports file conversion and simple" 
+            "data manipulation. All data saved will be CF-compliant." 
+            "</p>"
+            "<p>Maintained by NCAS-Computational Modelling Services (NCAS-CMS) at the University of Reading. "
+            "Powered by cf-python, pyfive, and Dask."
+            "</p>"
+        )
+        heading.setTextFormat(Qt.RichText)
+        heading.setWordWrap(True)
+
+        header_row = QHBoxLayout()
+        header_row.addWidget(
+            self._build_about_logo_label(
+                "cf-python",
+                ["cf-logo.png", "cf-logo.svg", "cf-python-logo.png", "cf-python-logo.svg"],
+                112,
+            )
+        )
+        header_row.addWidget(heading, 1)
+
+        logos_row = QHBoxLayout()
+        logo_specs = [
+            ("NCAS", ["ncas-logo.png", "ncas-logo.svg", "ncas.png", "ncas.svg"]),
+            ("University of Reading", ["UoR-logo.png", "UoR-logo.svg"]),
+            ("PyFive", ["pyfive-logo.png", "pyfive-logo.svg", "pyfive.png", "pyfive.svg"]),
+            ("Dask", ["dask-logo.png", "dask-logo.svg", "dask.png", "dask.svg"]),
+        ]
+
+        for display_name, candidates in logo_specs:
+            logos_row.addWidget(self._build_about_logo_label(display_name, candidates, 45))
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok)
+        buttons.accepted.connect(dialog.accept)
+
+        layout.addLayout(header_row)
+        layout.addLayout(logos_row)
+        layout.addWidget(buttons)
+
+        dialog.exec()
+
+    def _build_about_logo_label(
+        self,
+        display_name: str,
+        candidates: Sequence[str],
+        max_height: int,
+    ) -> QLabel:
+        """Build a single logo tile for the About dialog."""
+        label = QLabel()
+        label.setAlignment(Qt.AlignCenter)
+        label.setMinimumHeight(max_height + 14)
+        label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        logo_path = self._find_about_logo_path(candidates)
+        if logo_path is not None:
+            pixmap = QPixmap(str(logo_path))
+            if not pixmap.isNull():
+                label.setPixmap(
+                    pixmap.scaledToHeight(max_height, Qt.SmoothTransformation)
+                )
+                label.setToolTip(display_name)
+                return label
+
+        label.setText(display_name)
+        label.setToolTip(f"Missing logo asset for {display_name}")
+        label.setStyleSheet(
+            "QLabel {"
+            " border: 1px dashed #666;"
+            " border-radius: 6px;"
+            " color: #b0b0b0;"
+            " padding: 6px;"
+            "}"
+        )
+        return label
+
+    def _find_about_logo_path(self, candidates: Sequence[str]) -> Path | None:
+        """Return the first existing logo asset path from a list of candidates."""
+        assets_dir = Path(__file__).resolve().parent / "assets"
+        for name in candidates:
+            path = assets_dir / name
+            if path.exists() and path.is_file():
+                return path
+        return None
+
+    def _open_issue_tracker(self) -> None:
+        """Open the project issue tracker in the default browser."""
+        issues_url = QUrl("https://github.com/NCAS-CMS/xconv2/issues")
+        if not QDesktopServices.openUrl(issues_url):
+            self.status.showMessage("Unable to open issue tracker URL.")
+            logger.warning("Failed to open issue tracker URL: %s", issues_url.toString())
 
     def _refresh_recent_menu(self) -> None:
         """Refresh the Recent submenu from the persisted log file."""

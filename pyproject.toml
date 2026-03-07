@@ -20,8 +20,8 @@ test = [
 ]
 
 [project.gui-scripts]
-# This creates a 'cfview2' command that launches your GUI
-cfview2 = "cf_view.gui:main"
+# This creates an 'xconv2' command that launches your GUI
+xconv2 = "cf_view.gui:main"
 
 [project.scripts]
 # This creates a 'cf-worker' command for the backend process
