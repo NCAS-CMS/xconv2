@@ -20,7 +20,18 @@ __all__ = [
 
 
 def field_info(fields: object) -> list[str]:
-    """Return serialized field metadata rows for GUI transport."""
+    """
+    Serialize field metadata for GUI transport.
+
+    Build compact, delimited string rows that include field identity, coordinate
+    descriptions, optional cell metadata, and property mappings.
+
+    Args:
+        fields: Iterable of CF field-like objects.
+
+    Returns:
+        list[str]: Serialized rows ready for worker-to-GUI payload transfer.
+    """
     rows: list[str] = []
     for x in fields:
         id_ = f"{x.identity().strip()}{x.shape}"
@@ -42,7 +53,18 @@ def field_info(fields: object) -> list[str]:
 
 
 def coordinate_info(field: object) -> list[tuple[str, list[str]]]:
-    """Return 1D dimension-coordinate values for GUI slider construction."""
+    """
+    Extract plottable 1D dimension-coordinate values.
+
+    Reads dimension coordinates from a field and returns only coordinates with
+    more than one value so the GUI can build useful range sliders.
+
+    Args:
+        field: CF field-like object exposing dimension coordinate accessors.
+
+    Returns:
+        list[tuple[str, list[str]]]: Coordinate identity with serialized values.
+    """
     coords: list[tuple[str, list[str]]] = []
     for key in field.dimension_coordinates():
         c = field.coordinate(key)
@@ -61,7 +83,20 @@ def get_data_for_plotting(
     selection_spec: dict[str, tuple[object, object]],
     collapse_by_coord: dict[str, str],
 ) -> object:
-    """Subspace and collapse a field from GUI selections, returning ``pfld``."""
+    """
+    Build plot-ready data from selection and collapse directives.
+
+    Parses selection bounds, applies subspace extraction, and then applies any
+    requested collapses in sequence.
+
+    Args:
+        field: CF field-like object to subset and collapse.
+        selection_spec: Mapping of coordinate name to low/high bound pair.
+        collapse_by_coord: Mapping of coordinate name to collapse method.
+
+    Returns:
+        object: Subspaced and optionally collapsed field-like object.
+    """
 
     def _parse_bound(value: object) -> object:
         if isinstance(value, (int, float)):
@@ -104,7 +139,19 @@ def run_contour_plot(
     pfld: object,
     options: dict[str, object] | None,
 ) -> None:
-    """Apply contour options and render a contour plot for ``pfld``."""
+    """
+    Render a contour plot for a prepared field.
+
+    Applies contour styling, level configuration, optional annotations, and
+    optional file output using cf-plot and matplotlib.
+
+    Args:
+        pfld: Plot-ready field-like object.
+        options: Contour options mapping from GUI state or saved script.
+
+    Returns:
+        None
+    """
     options = options or {}
 
     filename = options.get("filename")
