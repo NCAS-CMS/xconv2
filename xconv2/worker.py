@@ -18,6 +18,8 @@ import cf
 import cfplot as cfp
 from matplotlib import pyplot as plt
 
+from . import xconv_cf_interface
+
 # cf-plot may still call show(); in Agg mode this is non-interactive and noisy.
 plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
 warnings.filterwarnings(
@@ -30,6 +32,7 @@ warnings.filterwarnings(
 logger = logging.getLogger(__name__)
 SAVE_TASK_HEADER = "#SAVE_TASK_CODE_PATH_B64:"
 EMIT_IMAGE_HEADER = "#EMIT_IMAGE:"
+INTERFACE_EXPORTS = tuple(getattr(xconv_cf_interface, "__all__", ()))
 
 # This dictionary persists data (like 'f') between GUI commands
 worker_globals = {
@@ -38,6 +41,14 @@ worker_globals = {
     'plt': plt,
     'np': np,
 }
+
+# Expose helper functions/constants from the interface module to generated code.
+worker_globals.update(
+    {
+        name: getattr(xconv_cf_interface, name)
+        for name in INTERFACE_EXPORTS
+    }
+)
 
 def send_to_gui(prefix, data=None):
     """Helper to format messages for the GUI pipe."""
@@ -83,10 +94,15 @@ def _extract_task_headers(code: str) -> tuple[str | None, bool, str]:
 
 def _build_saved_plot_script(exec_code: str) -> str:
     """Build a reproducible script with worker state preamble plus plot code."""
+    helper_import = ""
+    if INTERFACE_EXPORTS:
+        helper_import = f"from xconv2.xconv_cf_interface import {', '.join(INTERFACE_EXPORTS)}"
+
     lines: list[str] = [
         "import cf",
         "import cfplot as cfp",
         "from matplotlib import pyplot as plt",
+        helper_import,
         "",
     ]
 

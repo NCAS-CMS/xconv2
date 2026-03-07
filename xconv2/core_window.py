@@ -1292,7 +1292,7 @@ class CFVCore(QMainWindow):
         fill_checkbox.setChecked(bool(existing.get("fill", True)))
 
         lines_checkbox = QCheckBox("lines")
-        lines_checkbox.setChecked(bool(existing.get("lines", True)))
+        lines_checkbox.setChecked(bool(existing.get("lines", False)))
 
         line_labels_checkbox = QCheckBox("line_labels")
         line_labels_checkbox.setChecked(bool(existing.get("line_labels", True)))
