@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from xconv2.cf_templates import coordinate_list
+from xconv2.xconv_cf_interface import coordinate_info, field_info
 from xconv2.gui import CFVMain
 
 
@@ -38,6 +39,7 @@ def test_load_selected_file_builds_worker_task() -> None:
 
     code = window.sent_tasks[0]
     assert f"cf.read({file_path!r})" in code
+    assert "fields = field_info(f)" in code
     assert "send_to_gui('METADATA', fields)" in code
 
 
@@ -61,6 +63,7 @@ def test_load_selected_file_task_executes_with_mock_cf_example_fields() -> None:
 
     namespace = {
         "cf": _FakeCF,
+        "field_info": field_info,
         "send_to_gui": lambda prefix, payload: messages.append((prefix, payload)),
     }
 
@@ -91,6 +94,7 @@ def test_coordinate_list_emits_coordinates_for_example_field() -> None:
     messages: list[tuple[str, object]] = []
     namespace = {
         "cf": cf,
+        "coordinate_info": coordinate_info,
         "send_to_gui": lambda prefix, payload: messages.append((prefix, payload)),
     }
 

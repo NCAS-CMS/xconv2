@@ -18,6 +18,8 @@ import cf
 import cfplot as cfp
 from matplotlib import pyplot as plt
 
+from . import xconv_cf_interface
+
 # cf-plot may still call show(); in Agg mode this is non-interactive and noisy.
 plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
 warnings.filterwarnings(
@@ -38,6 +40,15 @@ worker_globals = {
     'plt': plt,
     'np': np,
 }
+
+# Expose helper functions/constants from the interface module to generated code.
+worker_globals.update(
+    {
+        name: value
+        for name, value in vars(xconv_cf_interface).items()
+        if not name.startswith("_")
+    }
+)
 
 def send_to_gui(prefix, data=None):
     """Helper to format messages for the GUI pipe."""
@@ -87,6 +98,7 @@ def _build_saved_plot_script(exec_code: str) -> str:
         "import cf",
         "import cfplot as cfp",
         "from matplotlib import pyplot as plt",
+        "from xconv2.xconv_cf_interface import *",
         "",
     ]
 
