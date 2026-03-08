@@ -13,13 +13,12 @@ from __future__ import annotations
 
 import ast
 import csv
-import json
 from pathlib import Path
 import logging
 from typing import Sequence
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QAction, QCloseEvent, QColor, QDesktopServices, QIcon, QImage, QKeySequence, QPixmap
+from PySide6.QtGui import QAction, QCloseEvent, QColor, QDesktopServices, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -51,7 +50,6 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -59,6 +57,8 @@ from superqt import QRangeSlider
 
 from .cf_templates import collapse_methods
 from .colour_scales import cscales, get_colour_scale_hexes
+from .ui.menu_controller import MenuController
+from .ui.settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -78,6 +78,13 @@ class CFVCore(QMainWindow):
         self.current_file_path: str | None = None
         self.settings_path = Path.home() / ".config" / "cfview" / "settings.json"
         self.recent_log_path = Path.home() / ".cache" / "cfview" / "last_opened.log"
+        self.settings_store = SettingsStore(
+            settings_path=self.settings_path,
+            recent_log_path=self.recent_log_path,
+            settings_version=SETTINGS_VERSION,
+            default_max_recent_files=DEFAULT_MAX_RECENT_FILES,
+        )
+        self.menu_controller = MenuController(self)
         self._settings = self._load_settings()
         self.setWindowTitle(self.base_window_title)
         self.resize(1000, 700)
@@ -171,97 +178,11 @@ class CFVCore(QMainWindow):
 
     def _setup_menu_bar(self) -> None:
         """Create application menu actions."""
-        # Keep menus inside the window for consistent cross-platform behavior.
-        menu_bar = self.menuBar()
-        menu_bar.setNativeMenuBar(False)
-        menu_font = menu_bar.font()
-        menu_font_size_px = max(int(round(menu_font.pointSizeF())), 10)
-        menu_font_weight = int(menu_font.weight())
-        menu_bar.setStyleSheet(
-            "QMenuBar {"
-            " background-color: #186f4d;"
-            " border-bottom: 1px solid #555;"
-            " padding: 2px;"
-            "}"
-            "QMenuBar::item {"
-            f" font-size: {menu_font_size_px}px;"
-            f" font-weight: {menu_font_weight};"
-            " color: #f0f0f0;"
-            " padding: 4px 10px;"
-            " background: transparent;"
-            " border-radius: 4px;"
-            "}"
-            "QMenuBar::item:selected {"
-            " background-color: #4a4a4a;"
-            "}"
-        )
-
-        file_menu = menu_bar.addMenu("&File")
-
-        open_action = QAction("Open...", self)
-        open_action.setShortcut(QKeySequence.StandardKey.Open)
-        open_action.triggered.connect(self._choose_file)
-        file_menu.addAction(open_action)
-
-        self.recent_menu = file_menu.addMenu("Recent")
-        self._refresh_recent_menu()
-
-        file_menu.addSeparator()
-
-        settings_action = QAction("Settings...", self)
-        settings_action.triggered.connect(self._show_settings_dialog)
-        file_menu.addAction(settings_action)
-
-        file_menu.addSeparator()
-
-        quit_action = QAction("Quit", self)
-        quit_action.setShortcut(QKeySequence.StandardKey.Quit)
-        quit_action.triggered.connect(self._quit_application)
-
-        file_menu.addAction(quit_action)
-
-        self._setup_help_menu(menu_bar, menu_font_size_px, menu_font_weight)
+        self.menu_controller.setup_menu_bar()
 
     def _setup_help_menu(self, menu_bar, menu_font_size_px: int, menu_font_weight: int) -> None:
         """Attach Help pinned to the right while left-side menus grow normally."""
-        help_menu = QMenu("Help", self)
-
-        about_action = QAction("About", self)
-        about_action.triggered.connect(self._show_about_dialog)
-        help_menu.addAction(about_action)
-
-        report_issue_action = QAction("Report Issue", self)
-        report_issue_action.triggered.connect(self._open_issue_tracker)
-        help_menu.addAction(report_issue_action)
-
-        help_button = QToolButton(menu_bar)
-        help_button.setText("Help")
-        help_button.setFont(menu_bar.font())
-        help_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        help_button.setAutoRaise(True)
-        help_button.setPopupMode(QToolButton.InstantPopup)
-        help_button.setMenu(help_menu)
-        help_button.setStyleSheet(
-            "QToolButton {"
-            f" font-size: {menu_font_size_px}px;"
-            f" font-weight: {menu_font_weight};"
-            " color: #f0f0f0;"
-            " padding: 4px 10px;"
-            " background: transparent;"
-            " border: none;"
-            " border-radius: 4px;"
-            "}"
-            "QToolButton:hover {"
-            " background-color: #4a4a4a;"
-            "}"
-            "QToolButton::menu-indicator {"
-            " image: none;"
-            " width: 0px;"
-            "}"
-        )
-
-        # Corner widget stays right-aligned even if more menus are added on the left.
-        menu_bar.setCornerWidget(help_button, Qt.TopRightCorner)
+        self.menu_controller._setup_help_menu(menu_bar, menu_font_size_px, menu_font_weight)
 
     def _show_about_dialog(self) -> None:
         """Show application identity and runtime details."""
@@ -369,54 +290,22 @@ class CFVCore(QMainWindow):
 
     def _refresh_recent_menu(self) -> None:
         """Refresh the Recent submenu from the persisted log file."""
-        self.recent_menu.clear()
-        recent_files = self._load_recent_files()
-
-        if not recent_files:
-            empty_action = QAction("No recent files", self)
-            empty_action.setEnabled(False)
-            self.recent_menu.addAction(empty_action)
-            return
-
-        for file_path in recent_files:
-            action = QAction(Path(file_path).name, self)
-            action.setToolTip(file_path)
-            action.triggered.connect(lambda checked=False, p=file_path: self._open_recent_file(p))
-            self.recent_menu.addAction(action)
+        self.menu_controller.refresh_recent_menu()
 
     def _load_recent_files(self) -> list[str]:
         """Load recent files from JSON settings and return a sanitized list."""
-        raw_recent = self._settings.get("recent_files", [])
-        if not isinstance(raw_recent, list):
-            return []
-
-        max_recent = self._max_recent_files()
-        recent_files: list[str] = []
-        for entry in raw_recent:
-            if not isinstance(entry, str):
-                continue
-            path = entry.strip()
-            if not path or path in recent_files:
-                continue
-            recent_files.append(path)
-            if len(recent_files) >= max_recent:
-                break
-        return recent_files
+        return self.settings_store.load_recent_files()
 
     def _save_recent_files(self, recent_files: list[str]) -> None:
         """Persist recent files list to JSON settings."""
-        self._settings["recent_files"] = recent_files[: self._max_recent_files()]
-        self._save_settings()
+        self.settings_store.save_recent_files(recent_files)
+        self._settings = self.settings_store.data
 
     def _record_recent_file(self, file_path: str) -> None:
         """Record a file open event and refresh the Recent submenu."""
-        normalized_path = str(Path(file_path).expanduser())
-        recent_files = [p for p in self._load_recent_files() if p != normalized_path]
-        recent_files.insert(0, normalized_path)
-        recent_files = recent_files[: self._max_recent_files()]
-
         try:
-            self._save_recent_files(recent_files)
+            self.settings_store.record_recent_file(file_path)
+            self._settings = self.settings_store.data
         except OSError:
             logger.exception("Failed to save recent files log: %s", self.recent_log_path)
             return
@@ -425,99 +314,29 @@ class CFVCore(QMainWindow):
 
     def _default_settings(self) -> dict[str, object]:
         """Return default persisted settings schema."""
-        return {
-            "version": SETTINGS_VERSION,
-            "recent_files": [],
-            "max_recent_files": DEFAULT_MAX_RECENT_FILES,
-            "last_save_code_dir": str(Path.home()),
-            "last_save_plot_dir": str(Path.home()),
-        }
+        return self.settings_store.default_settings()
 
     def _load_recent_files_legacy(self, settings: dict[str, object] | None = None) -> list[str]:
         """Load old newline-based recent-file log for one-time settings migration."""
-        if not self.recent_log_path.exists():
-            return []
-
-        try:
-            lines = self.recent_log_path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            logger.exception("Failed to read recent files log: %s", self.recent_log_path)
-            return []
-
-        recent_files: list[str] = []
-        max_recent = self._max_recent_files(settings)
-        for line in lines:
-            path = line.strip()
-            if not path or path in recent_files:
-                continue
-            recent_files.append(path)
-            if len(recent_files) >= max_recent:
-                break
-        return recent_files
+        return self.settings_store.load_recent_files_legacy(settings)
 
     def _load_settings(self) -> dict[str, object]:
         """Load JSON settings with sane defaults and legacy migration."""
-        settings = self._default_settings()
-
-        if self.settings_path.exists():
-            try:
-                payload = json.loads(self.settings_path.read_text(encoding="utf-8"))
-                if isinstance(payload, dict):
-                    settings.update(payload)
-            except (OSError, json.JSONDecodeError):
-                logger.exception("Failed to read settings JSON: %s", self.settings_path)
-
-        recent_files = settings.get("recent_files")
-        if not isinstance(recent_files, list) or not recent_files:
-            migrated = self._load_recent_files_legacy(settings)
-            if migrated:
-                settings["recent_files"] = migrated
-
-        for key in ("last_save_code_dir", "last_save_plot_dir"):
-            value = settings.get(key)
-            if not isinstance(value, str) or not value.strip():
-                settings[key] = str(Path.home())
-
-        max_recent = settings.get("max_recent_files")
-        if not isinstance(max_recent, int) or max_recent < 1:
-            settings["max_recent_files"] = DEFAULT_MAX_RECENT_FILES
-
-        self._settings = settings
-        try:
-            self._save_settings()
-        except OSError:
-            logger.exception("Failed to persist settings JSON after load")
-
-        return settings
+        self._settings = self.settings_store.load()
+        return self._settings
 
     def _save_settings(self) -> None:
         """Persist settings dictionary to disk as JSON."""
-        self.settings_path.parent.mkdir(parents=True, exist_ok=True)
-        self.settings_path.write_text(
-            json.dumps(self._settings, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        self.settings_store.data = self._settings
+        self.settings_store.save()
 
     def _default_save_path(self, settings_key: str, filename: str) -> str:
         """Build default save-file path from last-used directory setting."""
-        candidate = self._settings.get(settings_key, str(Path.home()))
-        if isinstance(candidate, str) and candidate.strip():
-            base_dir = Path(candidate).expanduser()
-        else:
-            base_dir = Path.home()
-
-        if not base_dir.is_dir():
-            base_dir = Path.home()
-
-        return str(base_dir / filename)
+        return self.settings_store.default_save_path(settings_key, filename)
 
     def _max_recent_files(self, settings: dict[str, object] | None = None) -> int:
         """Return validated max recent-files value from settings."""
-        source = settings if settings is not None else getattr(self, "_settings", {})
-        raw = source.get("max_recent_files", DEFAULT_MAX_RECENT_FILES)
-        if isinstance(raw, int) and raw > 0:
-            return raw
-        return DEFAULT_MAX_RECENT_FILES
+        return self.settings_store.max_recent_files(settings)
 
     def _show_settings_dialog(self) -> None:
         """Show basic settings editor for persisted app preferences."""
@@ -615,8 +434,8 @@ class CFVCore(QMainWindow):
 
     def _remember_last_save_dir(self, settings_key: str, file_path: str) -> None:
         """Persist the parent folder of a just-saved file for future defaults."""
-        parent = Path(file_path).expanduser().parent
-        self._settings[settings_key] = str(parent)
+        self._settings = self.settings_store.data
+        self._settings[settings_key] = str(Path(file_path).expanduser().parent)
         try:
             self._save_settings()
         except OSError:
