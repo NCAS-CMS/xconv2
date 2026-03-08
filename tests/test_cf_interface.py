@@ -4,6 +4,7 @@ import pytest
 import xconv2.xconv_cf_interface as cf_interface
 
 from xconv2.xconv_cf_interface import (
+    auto_contour_title,
     coordinate_info,
     field_info,
     get_data_for_plotting,
@@ -192,3 +193,65 @@ def test_run_contour_plot_applies_levels_annotations_and_save(
     assert cfp.con_calls
     assert cfp.gclose_calls == 1
     assert plt_obj.figure.text_calls
+
+
+def test_run_contour_plot_sets_title_from_singleton_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfp = _FakeCFPlot()
+    plt_obj = _FakePlt()
+
+    monkeypatch.setattr(cf_interface, "cfp", cfp)
+    monkeypatch.setattr(cf_interface, "plt", plt_obj)
+
+    run_contour_plot(
+        pfld=object(),
+        options={"mode": "default"},
+        selection_spec={"time": ("2000-01-01", "2000-01-01"), "lat": ("-90", "90")},
+        collapse_by_coord={},
+    )
+
+    assert cfp.con_calls
+    assert cfp.con_calls[-1]["title"] == "time=2000-01-01"
+
+
+def test_run_contour_plot_prefers_cell_method_title_for_collapses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfp = _FakeCFPlot()
+    plt_obj = _FakePlt()
+
+    monkeypatch.setattr(cf_interface, "cfp", cfp)
+    monkeypatch.setattr(cf_interface, "plt", plt_obj)
+    monkeypatch.setattr(cf_interface, "cell_methods_string_from_field", lambda _field: "time: mean")
+
+    run_contour_plot(
+        pfld=object(),
+        options={"mode": "default"},
+        selection_spec={"time": ("2000-01-01", "2000-12-31")},
+        collapse_by_coord={"time": "mean"},
+    )
+
+    assert cfp.con_calls
+    assert cfp.con_calls[-1]["title"] == "time: mean"
+
+
+def test_auto_contour_title_from_singleton_selection() -> None:
+    title = auto_contour_title(
+        pfld=object(),
+        selection_spec={"time": ("2001-01-01", "2001-01-01"), "lat": ("-90", "90")},
+        collapse_by_coord={},
+    )
+    assert title == "time=2001-01-01"
+
+
+def test_auto_contour_title_prefers_cell_method_for_collapse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cf_interface, "cell_methods_string_from_field", lambda _field: "time: mean")
+    title = auto_contour_title(
+        pfld=object(),
+        selection_spec={"time": ("2001-01-01", "2001-12-31")},
+        collapse_by_coord={"time": "mean"},
+    )
+    assert title == "time: mean"

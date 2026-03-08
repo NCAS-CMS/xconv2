@@ -68,10 +68,15 @@ def contour_range_from_selection(
     range_code = textwrap.dedent(
         """
         arr = np.ma.array(pfld.array).compressed()
+        suggested_title = auto_contour_title(
+            pfld=pfld,
+            selection_spec=selection_spec,
+            collapse_by_coord=collapse_by_coord,
+        )
         if arr.size == 0:  #omit4save
-            send_to_gui('CONTOUR_RANGE', {'min': 0.0, 'max': 0.0}) #omit4save
+            send_to_gui('CONTOUR_RANGE', {'min': 0.0, 'max': 0.0, 'suggested_title': suggested_title}) #omit4save
         else:
-            send_to_gui('CONTOUR_RANGE', {'min': float(arr.min()), 'max': float(arr.max())}) #omit4save
+            send_to_gui('CONTOUR_RANGE', {'min': float(arr.min()), 'max': float(arr.max()), 'suggested_title': suggested_title}) #omit4save
         """
     ).lstrip()
     return "\n".join([prep_code, range_code])
@@ -106,6 +111,8 @@ def contour(options: dict[str, object] | None) -> str:
         run_contour_plot(
             pfld=pfld,
             options=contour_options,
+            selection_spec=selection_spec,
+            collapse_by_coord=collapse_by_coord,
         )
         if contour_options and 'filename' in contour_options:  #omit4save
             send_to_gui(f"STATUS:Saved plot to {{contour_options['filename']}}")  #omit4save

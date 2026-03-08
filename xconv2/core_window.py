@@ -1397,7 +1397,12 @@ class CFVCore(QMainWindow):
     def _request_plot_options(self) -> None:
         """Hook for worker-backed implementations to fetch option context."""
 
-    def _show_contour_options_dialog(self, range_min: float, range_max: float) -> None:
+    def _show_contour_options_dialog(
+        self,
+        range_min: float,
+        range_max: float,
+        suggested_title: str | None = None,
+    ) -> None:
         """Show contour options dialog and persist selected options."""
         existing = self.plot_options_by_kind.get("contour", {})
 
@@ -1408,6 +1413,8 @@ class CFVCore(QMainWindow):
         layout = QVBoxLayout(dialog)
 
         default_title = existing.get("title")
+        if not default_title:
+            default_title = suggested_title
         if not default_title:
             default_title = Path(self.current_file_path).name if self.current_file_path else ""
         default_page_title = existing.get("page_title")

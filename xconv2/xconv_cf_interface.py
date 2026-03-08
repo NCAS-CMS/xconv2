@@ -16,6 +16,7 @@ __all__ = [
     "field_info",
     "coordinate_info",
     "get_data_for_plotting",
+    "auto_contour_title",
     "run_contour_plot",
 ]
 
@@ -143,6 +144,8 @@ def get_data_for_plotting(
 def run_contour_plot(
     pfld: object,
     options: dict[str, object] | None,
+    selection_spec: dict[str, tuple[object, object]] | None = None,
+    collapse_by_coord: dict[str, str] | None = None,
 ) -> None:
     """
     Render a contour plot for a prepared field.
@@ -158,6 +161,8 @@ def run_contour_plot(
         None
     """
     options = options or {}
+    selection_spec = selection_spec or {}
+    collapse_by_coord = collapse_by_coord or {}
 
     filename = options.get("filename")
     title = options.get("title")
@@ -209,6 +214,13 @@ def run_contour_plot(
         contour_max = float(auto_max)
         interval_count = max(int(intervals), 1)
         contour_step = (contour_max - contour_min) / float(interval_count)
+
+    if not title:
+        title = auto_contour_title(
+            pfld=pfld,
+            selection_spec=selection_spec,
+            collapse_by_coord=collapse_by_coord,
+        )
 
     contour_kwargs: dict[str, object] = {
         "fill": fill,
@@ -384,3 +396,28 @@ def run_contour_plot(
 
     if filename is not None:
         cfp.gclose()
+
+
+def auto_contour_title(
+    pfld: object,
+    selection_spec: dict[str, tuple[object, object]] | None,
+    collapse_by_coord: dict[str, str] | None,
+) -> str:
+    """Derive default contour title from collapse metadata or singleton selections."""
+    selection_spec = selection_spec or {}
+    collapse_by_coord = collapse_by_coord or {}
+
+    if collapse_by_coord:
+        collapse_title = cell_methods_string_from_field(pfld).strip()
+        if collapse_title:
+            return collapse_title
+
+    selections: list[str] = []
+    for coord_name, bounds in selection_spec.items():
+        if not isinstance(bounds, (tuple, list)) or len(bounds) < 2:
+            continue
+        lo, hi = bounds[0], bounds[1]
+        if lo == hi:
+            selections.append(f"{coord_name}={lo}")
+
+    return ", ".join(selections)

@@ -114,7 +114,15 @@ class CFVMain(CFVCore):
                         logger.warning("Malformed CONTOUR_RANGE payload: %r", payload)
                         continue
 
-                    self._show_contour_options_dialog(range_min, range_max)
+                    suggested_title = payload.get("suggested_title")
+                    if suggested_title is not None:
+                        suggested_title = str(suggested_title).strip() or None
+
+                    self._show_contour_options_dialog(
+                        range_min,
+                        range_max,
+                        suggested_title=suggested_title,
+                    )
                 else:
                     logger.warning("Unexpected CONTOUR_RANGE payload type: %s", type(payload).__name__)
 
@@ -279,10 +287,6 @@ class CFVMain(CFVCore):
             return
 
         plot_options = dict(self.plot_options_by_kind.get(plot_kind, {}))
-        if plot_kind == "contour" and not plot_options.get("title"):
-            current_file = getattr(self, "current_file_path", None)
-            if isinstance(current_file, str) and current_file:
-                plot_options["title"] = Path(current_file).name
         if save_plot_path:
             plot_options["filename"] = str(Path(save_plot_path).expanduser())
         elif not plot_options:
