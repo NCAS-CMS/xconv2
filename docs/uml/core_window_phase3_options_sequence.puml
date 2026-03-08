@@ -1,0 +1,16 @@
+@startuml CoreWindowPhase3OptionsSequence
+actor User
+participant CFVCore
+participant WorkerBridge as CFVMain
+participant Worker
+participant ContourOptionsController as OptionsCtrl
+
+User -> CFVCore : click Options
+CFVCore -> WorkerBridge : _request_plot_options()
+WorkerBridge -> Worker : contour_range_from_selection
+Worker --> WorkerBridge : CONTOUR_RANGE(min,max,suggested_title)
+WorkerBridge -> CFVCore : _show_contour_options_dialog(...)
+CFVCore -> OptionsCtrl : show_contour_options_dialog(...)
+OptionsCtrl --> CFVCore : updated plot_options_by_kind
+CFVCore -> WorkerBridge : _request_plot_update()
+@enduml

@@ -17,10 +17,10 @@ package "xconv2.ui" {
 }
 
 CFVMain --|> CFVCore
-CFVCore o-- MenuController : menus/recent UI
-CFVCore o-- SettingsStore : settings persistence
-CFVCore o-- SelectionController : slider/collapse state
-CFVCore o-- FieldMetadataController : fields/properties UI
+CFVCore o-- MenuController : menus\nrecent UI
+CFVCore o-- SettingsStore : settings\npersistence
+CFVCore o-- SelectionController : slider\ncollapse state
+CFVCore o-- FieldMetadataController : fields\nproperties UI
 @enduml
 
 @startuml CoreWindowPhase2SelectionSequence
