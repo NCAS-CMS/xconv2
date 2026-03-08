@@ -11,8 +11,6 @@ Worker orchestration and request/response handling live in `main_window.py`.
 
 from __future__ import annotations
 
-import ast
-import csv
 from pathlib import Path
 import logging
 from typing import Sequence
@@ -31,7 +29,6 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHeaderView,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -53,11 +50,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from superqt import QRangeSlider
 
-from .cf_templates import collapse_methods
 from .colour_scales import cscales, get_colour_scale_hexes
+from .ui.field_metadata_controller import FieldMetadataController
 from .ui.menu_controller import MenuController
+from .ui.selection_controller import SelectionController
 from .ui.settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
@@ -85,6 +82,8 @@ class CFVCore(QMainWindow):
             default_max_recent_files=DEFAULT_MAX_RECENT_FILES,
         )
         self.menu_controller = MenuController(self)
+        self.selection_controller = SelectionController(self)
+        self.field_metadata_controller = FieldMetadataController(self, FIELD_METADATA_SEPARATOR)
         self._settings = self._load_settings()
         self.setWindowTitle(self.base_window_title)
         self.resize(1000, 700)
@@ -543,96 +542,15 @@ class CFVCore(QMainWindow):
 
     def _reset_all_sliders(self) -> None:
         """Reset all slider ranges to full extent and refresh summary state."""
-        for name, control in self.controls.items():
-            slider = control.get("range_slider")
-            values = control.get("values", [])
-            if slider is None or not values:
-                continue
-
-            slider.blockSignals(True)
-            slider.setValue((0, len(values) - 1))
-            slider.blockSignals(False)
-
-            self._update_range_labels(name)
-
-        self._refresh_plot_summary()
+        self.selection_controller.reset_all_sliders()
 
     def _set_field_list_hint(self, text: str) -> None:
         """Show a non-selectable hint message in the fields list."""
-        self.field_list_widget.clear()
-        hint_item = QListWidgetItem(text)
-        hint_item.setFlags(Qt.NoItemFlags)
-        self.field_list_widget.addItem(hint_item)
+        self.field_metadata_controller.set_field_list_hint(text)
 
     def _show_selection_properties(self) -> None:
         """Show properties for the currently selected field."""
-        selected_item = self.field_list_widget.currentItem()
-        if selected_item is None:
-            self.status.showMessage("Select a field to view properties.")
-            return
-
-        selected_field = selected_item.text()
-        raw_properties = selected_item.data(Qt.UserRole + 1)
-        properties = self._parse_properties_dict(raw_properties)
-
-        if not properties:
-            self.status.showMessage("No properties available for this field.")
-            return
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"Properties: {selected_field}")
-        dialog.resize(700, 420)
-
-        layout = QVBoxLayout(dialog)
-        table = QTableWidget(dialog)
-        table.setColumnCount(2)
-        table.setHorizontalHeaderLabels(["Key", "Value"])
-        table.setRowCount(len(properties))
-        table.verticalHeader().setVisible(False)
-        table.setEditTriggers(QTableWidget.NoEditTriggers)
-        table.setAlternatingRowColors(True)
-        table.setWordWrap(False)
-        table.setTextElideMode(Qt.ElideRight)
-        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        table.verticalHeader().setDefaultSectionSize(table.fontMetrics().height() + 6)
-        table.verticalHeader().setMinimumSectionSize(table.fontMetrics().height() + 6)
-
-        for row, (key, value) in enumerate(sorted(properties.items(), key=lambda kv: str(kv[0]).lower())):
-            key_text = str(key)
-            value_text = str(value)
-
-            key_item = QTableWidgetItem(key_text)
-            key_item.setToolTip(key_text)
-            value_item = QTableWidgetItem(value_text)
-            value_item.setToolTip(value_text)
-
-            table.setItem(row, 0, key_item)
-            table.setItem(row, 1, value_item)
-
-        header = table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        key_max_width = 260
-        if table.columnWidth(0) > key_max_width:
-            table.setColumnWidth(0, key_max_width)
-
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        header.setStretchLastSection(False)
-
-        controls_row = QHBoxLayout()
-        controls_row.addStretch(1)
-        save_button = QPushButton("Save CSV...")
-        save_button.clicked.connect(
-            lambda: self._save_properties_to_csv(properties, selected_field, dialog)
-        )
-        close_button = QPushButton("Close")
-        close_button.clicked.connect(dialog.accept)
-        controls_row.addWidget(save_button)
-        controls_row.addWidget(close_button)
-
-        layout.addWidget(table)
-        layout.addLayout(controls_row)
-        dialog.setWindowModality(Qt.ApplicationModal)
-        dialog.open()
+        self.field_metadata_controller.show_selection_properties()
 
     def _save_properties_to_csv(
         self,
@@ -641,116 +559,19 @@ class CFVCore(QMainWindow):
         parent: QWidget | None = None,
     ) -> None:
         """Save properties dictionary to a CSV file with Key/Value columns."""
-        safe_field_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in field_name)
-        default_name = f"{safe_field_name or 'field'}_properties.csv"
-        default_path = str(Path.home() / default_name)
-
-        file_path, _ = QFileDialog.getSaveFileName(
-            parent or self,
-            "Save Properties as CSV",
-            default_path,
-            "CSV files (*.csv);;All files (*)",
-        )
-        if not file_path:
-            return
-
-        if not file_path.lower().endswith(".csv"):
-            file_path += ".csv"
-
-        rows = sorted(properties.items(), key=lambda kv: str(kv[0]).lower())
-        with open(file_path, "w", newline="", encoding="utf-8") as csv_file:
-            writer = csv.writer(csv_file)
-            writer.writerow(["Key", "Value"])
-            for key, value in rows:
-                writer.writerow([str(key), str(value)])
-
-        self.status.showMessage(f"Saved properties CSV: {file_path}")
-        logger.info("Saved properties CSV: %s", file_path)
+        self.field_metadata_controller.save_properties_to_csv(properties, field_name, parent)
 
     def _parse_properties_dict(self, raw_properties: object) -> dict[object, object]:
         """Parse properties payload into a dictionary when possible."""
-        logger.info("Parsing properties payload of type %s", type(raw_properties).__name__)
-        logger.info("Raw properties content: %r", raw_properties)
-        if isinstance(raw_properties, dict):
-            return raw_properties
-
-        if isinstance(raw_properties, str) and raw_properties.strip():
-            text = raw_properties.strip()
-
-            # Handle OrderedDict([...]) style string representations.
-            if text.startswith("OrderedDict(") and text.endswith(")"):
-                inner = text[len("OrderedDict(") : -1]
-                try:
-                    ordered_items = ast.literal_eval(inner)
-                    if isinstance(ordered_items, list):
-                        return dict(ordered_items)
-                except (SyntaxError, ValueError, TypeError):
-                    pass
-
-            try:
-                parsed = ast.literal_eval(text)
-                if isinstance(parsed, dict):
-                    return parsed
-            except (SyntaxError, ValueError):
-                pass
-
-            fallback = self._parse_properties_lines(text)
-            if fallback:
-                return fallback
-
-            logger.warning(
-                "Could not parse properties payload into dict (type=%s, preview=%r)",
-                type(raw_properties).__name__,
-                text[:240],
-            )
-
-        return {}
+        return self.field_metadata_controller.parse_properties_dict(raw_properties)
 
     def _parse_properties_lines(self, text: str) -> dict[str, str]:
         """Parse key/value properties from multi-line text representations."""
-        parsed: dict[str, str] = {}
-
-        normalized = text.strip()
-        if normalized.startswith("{") and normalized.endswith("}"):
-            normalized = normalized[1:-1]
-
-        raw_lines = normalized.splitlines()
-        if len(raw_lines) == 1 and "," in normalized:
-            raw_lines = normalized.split(",")
-
-        for raw_line in raw_lines:
-            line = raw_line.strip()
-            if not line:
-                continue
-
-            line = line.strip("{}")
-
-            if " = " in line:
-                key, value = line.split(" = ", 1)
-            elif ": " in line:
-                key, value = line.split(": ", 1)
-            elif ":" in line:
-                key, value = line.split(":", 1)
-            else:
-                continue
-
-            key = key.strip().strip("'\"")
-            value = value.strip().strip(",").strip().strip("'\"")
-            if key:
-                parsed[key] = value
-
-        return parsed
+        return self.field_metadata_controller.parse_properties_lines(text)
 
     def _set_field_list_visible_rows(self, row_count: int) -> None:
         """Size the field list to show a target number of rows by default."""
-        row_height = self.field_list_widget.sizeHintForRow(0)
-        if row_height <= 0:
-            row_height = self.field_list_widget.fontMetrics().lineSpacing() + 6
-
-        frame = self.field_list_widget.frameWidth() * 2
-        height = (row_height * row_count) + frame
-        self.field_list_widget.setMinimumHeight(height)
-        self.field_list_widget.setMaximumHeight(height)
+        self.field_metadata_controller.set_field_list_visible_rows(row_count)
 
     def _create_slider_scroll_area(self) -> QScrollArea:
         """Create the scrollable container that hosts dynamic sliders."""
@@ -928,256 +749,31 @@ class CFVCore(QMainWindow):
 
     def populate_field_list(self, fields: Sequence[object]) -> None:
         """Populate the field list UI from worker metadata."""
-        self.field_list_widget.clear()
-
-        for field in fields:
-            if isinstance(field, str) and FIELD_METADATA_SEPARATOR in field:
-                parts = field.split(FIELD_METADATA_SEPARATOR, 2)
-                identity = parts[0]
-                detail = parts[1] if len(parts) > 1 else parts[0]
-                properties = parts[2] if len(parts) > 2 else ""
-            elif isinstance(field, (tuple, list)) and len(field) >= 2:
-                # Backward compatibility if tuple payloads are still encountered.
-                identity = str(field[0])
-                detail = str(field[1])
-                properties = str(field[2]) if len(field) > 2 else ""
-            else:
-                identity = str(field)
-                detail = str(field)
-                properties = ""
-
-            item = QListWidgetItem(identity)
-            item.setData(Qt.UserRole, detail)
-            item.setData(Qt.UserRole + 1, properties)
-            self.field_list_widget.addItem(item)
-
-        self._set_field_list_visible_rows(5)
-        self.selection_output.setPlainText(
-            f"Loaded {self.field_list_widget.count()} fields.\n"
-            "Click an entry to show field details."
-        )
-        logger.info("Displayed %d fields in list", self.field_list_widget.count())
+        self.field_metadata_controller.populate_field_list(fields)
 
     def on_field_clicked(self, item: QListWidgetItem) -> None:
         """Display selected field details in the output panel."""
-        selected_field = item.text()
-        detail = item.data(Qt.UserRole)
-        if detail:
-            detail = '\n'.join(detail.splitlines()[2:])
-            self.selection_output.setPlainText(detail)
-        else:
-            self.selection_output.setPlainText("No additional detail available.")
-        logger.info("Field selected: %s", selected_field)
+        self.field_metadata_controller.on_field_clicked(item)
 
     def build_dynamic_sliders(self, metadata: dict[str, list[object]]) -> None:
         """Build compact dual-handle range sliders from coordinate metadata."""
-        self.controls.clear()
-        self.selected_counts.clear()
-        self.selected_collapse_methods.clear()
-
-        for i in reversed(range(self.sidebar.count())):
-            widget = self.sidebar.itemAt(i).widget()
-            if widget is not None:
-                widget.setParent(None)
-
-        for name, values in metadata.items():
-            if not values:
-                continue
-
-            container = QWidget()
-            row = QVBoxLayout(container)
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(2)
-
-            header_row = QHBoxLayout()
-            header_row.setContentsMargins(0, 0, 0, 0)
-            header_row.setSpacing(4)
-            name_label = QLabel(f"{name.upper()}:")
-            collapse_label = QLabel("collapse")
-            collapse_checkbox = QCheckBox("")
-            collapse_checkbox.setToolTip("Select a collapse method")
-            collapse_checkbox.toggled.connect(
-                lambda checked, n=name: self.on_collapse_toggled(n, checked)
-            )
-
-            header_row.addWidget(name_label)
-            header_row.addStretch(1)
-            header_row.addWidget(collapse_label)
-            header_row.addWidget(collapse_checkbox)
-
-            selection_label = QLabel()
-            selection_label.setWordWrap(True)
-            selection_label.setContentsMargins(0, 0, 0, 0)
-
-            # Show the fixed coordinate bounds around the slider track.
-            bounds_start_label = QLabel(str(values[0]))
-            bounds_end_label = QLabel(str(values[-1]))
-            bounds_start_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            bounds_end_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-
-            slider = QRangeSlider(Qt.Horizontal)
-            slider.setRange(0, len(values) - 1)
-            slider.setValue((0, len(values) - 1))
-            slider.valueChanged.connect(
-                lambda _value, n=name: self.on_range_slider_moved(n)
-            )
-
-            slider_row = QHBoxLayout()
-            slider_row.setContentsMargins(0, 0, 0, 0)
-            slider_row.setSpacing(4)
-            slider_row.addWidget(bounds_start_label)
-            slider_row.addWidget(slider, 1)
-            slider_row.addWidget(bounds_end_label)
-
-            row.addLayout(header_row)
-            row.addWidget(selection_label)
-            row.addLayout(slider_row)
-            self.sidebar.addWidget(container)
-            self.controls[name] = {
-                "range_slider": slider,
-                "name_label": name_label,
-                "selection_label": selection_label,
-                "bounds_start_label": bounds_start_label,
-                "bounds_end_label": bounds_end_label,
-                "collapse_checkbox": collapse_checkbox,
-                "values": values,
-            }
-
-            self._update_range_labels(name)
-
-        self._refresh_plot_summary()
-        logger.info("Built %d dynamic sliders", len(self.controls))
+        self.selection_controller.build_dynamic_sliders(metadata)
 
     def on_range_slider_moved(self, name: str) -> None:
         """Handle dual-handle range slider movement."""
-        control = self.controls.get(name)
-        if control is None:
-            return
-
-        slider = control["range_slider"]
-        start_idx, end_idx = slider.value()
-
-        self._update_range_labels(name)
-        self._refresh_plot_summary()
-        logger.debug("Range slider moved: %s start=%d end=%d", name, start_idx, end_idx)
+        self.selection_controller.on_range_slider_moved(name)
 
     def on_collapse_toggled(self, name: str, checked: bool) -> None:
         """Choose and persist a collapse method for the coordinate."""
-        control = self.controls.get(name)
-        if control is None:
-            return
-
-        collapse_checkbox = control["collapse_checkbox"]
-        if checked:
-            if not collapse_methods:
-                collapse_checkbox.blockSignals(True)
-                collapse_checkbox.setChecked(False)
-                collapse_checkbox.blockSignals(False)
-                self.selected_collapse_methods.pop(name, None)
-                collapse_checkbox.setText("")
-                self.status.showMessage("No collapse methods configured.")
-                return
-
-            current_method = self.selected_collapse_methods.get(name, collapse_methods[0])
-            current_index = (
-                collapse_methods.index(current_method)
-                if current_method in collapse_methods
-                else 0
-            )
-            method, ok = QInputDialog.getItem(
-                self,
-                "Collapse Method",
-                f"Select collapse method for {name}:",
-                collapse_methods,
-                current_index,
-                False,
-            )
-            if ok and method:
-                self.selected_collapse_methods[name] = method
-                collapse_checkbox.setText(f"({method})")
-            else:
-                collapse_checkbox.blockSignals(True)
-                collapse_checkbox.setChecked(False)
-                collapse_checkbox.blockSignals(False)
-                self.selected_collapse_methods.pop(name, None)
-                collapse_checkbox.setText("")
-                return
-        else:
-            self.selected_collapse_methods.pop(name, None)
-            collapse_checkbox.setText("")
-
-        self._update_range_labels(name)
-        self._refresh_plot_summary()
+        self.selection_controller.on_collapse_toggled(name, checked)
 
     def _update_range_labels(self, name: str) -> None:
         """Refresh compact summary line for current range selection."""
-        control = self.controls.get(name)
-        if control is None:
-            return
-
-        values = control["values"]
-        start_idx, end_idx = control["range_slider"].value()
-        lo_idx = int(min(start_idx, end_idx))
-        hi_idx = int(max(start_idx, end_idx))
-        selected_count = hi_idx - lo_idx
-        self.selected_counts[name] = selected_count
-
-        control["bounds_start_label"].setText(str(values[0]))
-        control["bounds_end_label"].setText(str(values[-1]))
-        control["selection_label"].setText(
-            f"selected: {values[lo_idx]}..{values[hi_idx]} ({selected_count})"
-        )
+        self.selection_controller.update_range_labels(name)
 
     def _refresh_plot_summary(self) -> None:
         """Update plot summary text and plot button availability."""
-        if not self.controls:
-            self.plot_summary_label.setText("Open a field to inspect plot options.")
-            self.plot_button.setEnabled(False)
-            self.options_button.setEnabled(False)
-            self.save_code_button.setEnabled(False)
-            self.save_plot_button.setEnabled(False)
-            return
-
-        dims: list[int] = []
-        for name, control in self.controls.items():
-            if name in self.selected_collapse_methods:
-                dims.append(1)
-                continue
-
-            start_idx, end_idx = control["range_slider"].value()
-            lo_idx = int(min(start_idx, end_idx))
-            hi_idx = int(max(start_idx, end_idx))
-            dims.append(1 if (hi_idx - lo_idx) <= 1 else 2)
-
-        varying_dims = sum(1 for dim in dims if dim != 1)
-        dims_text = f"Selection dimensions = {dims}"
-
-        if varying_dims == 0:
-            self.plot_summary_label.setText(f"{dims_text} Total collapse, plot not possible")
-            self.plot_button.setEnabled(False)
-            self.options_button.setEnabled(False)
-            self.save_code_button.setEnabled(False)
-            self.save_plot_button.setEnabled(False)
-        elif varying_dims == 1:
-            self.plot_summary_label.setText(f"{dims_text} Lineplot possible")
-            self.plot_button.setEnabled(True)
-            self.options_button.setEnabled(True)
-            self.save_code_button.setEnabled(True)
-            self.save_plot_button.setEnabled(True)
-        elif varying_dims == 2:
-            self.plot_summary_label.setText(f"{dims_text} Contour possible")
-            self.plot_button.setEnabled(True)
-            self.options_button.setEnabled(True)
-            self.save_code_button.setEnabled(True)
-            self.save_plot_button.setEnabled(True)
-        else:
-            self.plot_summary_label.setText(
-                f"{dims_text} Need to reduce to 1 or 2 dimensions before plotting"
-            )
-            self.plot_button.setEnabled(False)
-            self.options_button.setEnabled(False)
-            self.save_code_button.setEnabled(False)
-            self.save_plot_button.setEnabled(False)
+        self.selection_controller.refresh_plot_summary()
 
     def on_slider_moved(self, name: str, val: object, label: QLabel) -> None:
         """Handle slider movement events."""
