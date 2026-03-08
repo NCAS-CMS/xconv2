@@ -28,3 +28,4 @@ def test_build_saved_plot_script_omits_gui_only_lines(monkeypatch) -> None:
     assert "pfld = get_data_for_plotting" in script
     assert "f = cf.read('/tmp/in.nc')" in script
     assert "fld = f[3]" in script
+    assert "plt.show(block=True)" in script

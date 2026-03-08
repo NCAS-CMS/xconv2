@@ -10,6 +10,7 @@ from __future__ import annotations
 import cf
 import cfplot as cfp
 from matplotlib import pyplot as plt
+from xconv2.cell_method_handler import cell_methods_string_from_field
 
 __all__ = [
     "field_info",
@@ -41,10 +42,14 @@ def field_info(fields: object) -> list[str]:
         cell_methods = x.cell_methods()
         if cell_methods:
             info.append(str(cell_methods))
+        else:
+            info.append('No cell methods')
 
         cell_measures = x.cell_measures()
         if cell_measures:
             info.append(str(cell_measures))
+        else:
+            info.append('No cell measures')
 
         nl = "\n"
         rows.append(f"{id_}\x1f{nl.join(info)}\x1f{str(props)}")
@@ -156,8 +161,11 @@ def run_contour_plot(
 
     filename = options.get("filename")
     title = options.get("title")
+    page_title = options.get("page_title")
+    page_title_display = bool(options.get("page_title_display", False))
     annotation_display = bool(options.get("annotation_display", False))
     annotation_properties = options.get("annotation_properties", [])
+    annotation_free_text = str(options.get("annotation_free_text", "") or "").strip()
     cscale = options.get("cscale")
 
     fill = bool(options.get("fill", True))
@@ -173,14 +181,16 @@ def run_contour_plot(
     auto_min = options.get("min")
     auto_max = options.get("max")
     intervals = options.get("intervals")
+    page_margin_top = float(options.get("page_margin_top", 0.0) or 0.0)
+    page_margin_bottom = float(options.get("page_margin_bottom", 0.0) or 0.0)
+
+    page_margin_top = max(0.0, min(page_margin_top, 0.25))
+    page_margin_bottom = max(0.0, min(page_margin_bottom, 0.25))
 
     if cscale:
         cfp.cscale(scale=cscale)
     else:
         cfp.cscale()
-
-    if filename is not None:
-        cfp.gopen(file=filename)
 
     contour_levels = None
     contour_min = None
@@ -213,21 +223,164 @@ def run_contour_plot(
     if blockfill_fast is not None:
         contour_kwargs["blockfill_fast"] = bool(blockfill_fast)
 
-    if contour_levels is not None:
-        cfp.levs(manual=contour_levels)
-    elif contour_min is not None and contour_max is not None and contour_step is not None:
-        cfp.levs(min=contour_min, max=contour_max, step=contour_step)
-    else:
-        cfp.levs()
+    def _apply_levels() -> None:
+        if contour_levels is not None:
+            cfp.levs(manual=contour_levels)
+        elif contour_min is not None and contour_max is not None and contour_step is not None:
+            cfp.levs(min=contour_min, max=contour_max, step=contour_step)
+        else:
+            cfp.levs()
 
+    def _annotation_text() -> str:
+        """Build a compact two-line annotation string from selected properties."""
+        if not annotation_display:
+            return ""
+
+        max_props = 3 if annotation_free_text else 4
+        annotation_items = [f"{key}: {value}" for key, value in annotation_properties[:max_props]]
+
+        entries: list[str] = []
+        if annotation_free_text:
+            entries.append(annotation_free_text)
+        entries.extend(annotation_items)
+
+        if not entries:
+            return ""
+
+        lines: list[str] = []
+        for idx in range(0, len(entries), 2):
+            lines.append(" | ".join(entries[idx : idx + 2]))
+
+        return "\n".join(lines)
+
+    def _estimate_layout_padding() -> tuple[float, float]:
+        """
+        Estimate top and bottom padding from a cheap map-only prepass.
+        We need this before rendering the final plot so we can reserve headroom for the page title and annotations 
+        without overlapping the plot area. We basically do the simplest possible contour prepass with all styling 
+        cues turned off, and then measure the resulting title and annotation text extents against the axes to 
+        determine how much vertical padding to reserve.
+        """
+        if not page_title and not _annotation_text():
+            return (0.0, 0.0)
+
+        fig = plt.gcf()
+        canvas = getattr(fig, "canvas", None)
+        if canvas is None or not hasattr(canvas, "draw") or not hasattr(canvas, "get_renderer"):
+            return (0.0, 0.0)
+
+        prepass_kwargs = dict(contour_kwargs)
+        prepass_kwargs["fill"] = False
+        prepass_kwargs["lines"] = False
+        prepass_kwargs["line_labels"] = False
+        prepass_kwargs["blockfill"] = False
+        prepass_kwargs.pop("blockfill_fast", None)
+
+        _apply_levels()
+        cfp.con(pfld, **prepass_kwargs)
+
+        fig = plt.gcf()
+        title_artist = None
+        if page_title_display and page_title:
+            title_artist = fig.suptitle(str(page_title), y=0.995, fontsize=10)
+
+        annotation_artist = None
+        annotation_text = _annotation_text()
+        if annotation_text:
+            annotation_artist = fig.text(
+                0.5,
+                0.02,
+                annotation_text,
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+
+        canvas.draw()
+        renderer = canvas.get_renderer()
+
+        axes_top = 0.0
+        axes_bottom = 1.0
+        for ax in fig.axes:
+            tight_bbox = ax.get_tightbbox(renderer)
+            if tight_bbox is None:
+                continue
+            fig_bbox = tight_bbox.transformed(fig.transFigure.inverted())
+            axes_top = max(axes_top, fig_bbox.y1)
+            axes_bottom = min(axes_bottom, fig_bbox.y0)
+
+        top_padding = 0.0
+        if title_artist is not None:
+            title_bbox = title_artist.get_window_extent(renderer).transformed(fig.transFigure.inverted())
+            title_bottom = title_bbox.y0
+            top_overlap = (axes_top + 0.01) - title_bottom
+            if top_overlap > 0:
+                top_padding = min(top_overlap + 0.01, 0.25)
+
+        bottom_padding = 0.0
+        if annotation_artist is not None:
+            annotation_bbox = annotation_artist.get_window_extent(renderer).transformed(
+                fig.transFigure.inverted()
+            )
+            annotation_top = annotation_bbox.y1
+            bottom_overlap = (annotation_top + 0.01) - axes_bottom
+            if bottom_overlap > 0:
+                bottom_padding = min(bottom_overlap + 0.01, 0.25)
+
+        if hasattr(plt, "close"):
+            plt.close(fig)
+
+        return (top_padding, bottom_padding)
+
+    def _apply_vertical_padding(fig: object, top_pad: float, bottom_pad: float) -> None:
+        """Resize and reposition all axes to reserve top and bottom headroom."""
+        if top_pad <= 0 and bottom_pad <= 0:
+            return
+
+        axes = list(getattr(fig, "axes", ()))
+        if not axes:
+            return
+
+        total_pad = top_pad + bottom_pad
+        if total_pad <= 0:
+            return
+
+        bottom_fraction = bottom_pad / total_pad
+        for ax in axes:
+            pos = ax.get_position()
+            # Apply per-axis clamping so short axes (e.g. colorbars) do not
+            # collapse the entire layout adjustment.
+            reduction = min(total_pad, max(pos.height - 0.01, 0.0))
+            if reduction <= 0:
+                continue
+
+            bottom_reduction = reduction * bottom_fraction
+            new_y0 = pos.y0 + bottom_reduction
+            new_height = pos.height - reduction
+            ax.set_position([pos.x0, new_y0, pos.width, new_height])
+
+    top_padding, bottom_padding = _estimate_layout_padding()
+    top_padding += page_margin_top
+    bottom_padding += page_margin_bottom
+
+    if filename is not None:
+        cfp.gopen(file=filename)
+
+    _apply_levels()
     cfp.con(pfld, **contour_kwargs)
+    
+    mycanvas = plt.gcf()
+    if top_padding > 0 or bottom_padding > 0:
+        # Reserve headroom for page title and bottom annotations even when
+        # axes are not subplot-managed.
+        _apply_vertical_padding(mycanvas, top_padding, bottom_padding)
 
-    if annotation_display and annotation_properties:
-        annotation_items = [f"{key}: {value}" for key, value in annotation_properties[:4]]
-        line_one = " | ".join(annotation_items[:2])
-        line_two = " | ".join(annotation_items[2:4])
-        annotation_text = "\n".join([x for x in (line_one, line_two) if x])
-        plt.gcf().text(0.5, 0.02, annotation_text, ha="center", va="bottom", fontsize=8)
+    if page_title_display and page_title:
+        mycanvas.suptitle(str(page_title), y=0.995, fontsize=10)
+
+    annotation_text = _annotation_text()
+    if annotation_text:
+        mycanvas.text(0.5, 0.02, annotation_text, ha="center", va="bottom", fontsize=8)
 
     if filename is not None:
         cfp.gclose()

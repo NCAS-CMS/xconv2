@@ -1410,8 +1410,33 @@ class CFVCore(QMainWindow):
         default_title = existing.get("title")
         if not default_title:
             default_title = Path(self.current_file_path).name if self.current_file_path else ""
+        default_page_title = existing.get("page_title")
+        if not default_page_title:
+            default_page_title = Path(self.current_file_path).name if self.current_file_path else ""
 
-        annotations_group = QGroupBox("Annotations")
+        titles_group = QGroupBox("Titles")
+        titles_layout = QVBoxLayout(titles_group)
+
+        title_row = QHBoxLayout()
+        title_label = QLabel("contour title")
+        title_edit = QLineEdit(str(default_title))
+        title_edit.setPlaceholderText("Contour title")
+        title_row.addWidget(title_label)
+        title_row.addWidget(title_edit, 1)
+        titles_layout.addLayout(title_row)
+
+        page_title_row = QHBoxLayout()
+        page_title_label = QLabel("page title")
+        page_title_edit = QLineEdit(str(default_page_title))
+        page_title_edit.setPlaceholderText("Figure page title")
+        page_title_display_checkbox = QCheckBox("display")
+        page_title_display_checkbox.setChecked(bool(existing.get("page_title_display", False)))
+        page_title_row.addWidget(page_title_label)
+        page_title_row.addWidget(page_title_edit, 1)
+        page_title_row.addWidget(page_title_display_checkbox)
+        titles_layout.addLayout(page_title_row)
+
+        annotations_group = QGroupBox("Choose annotation properties")
         annotations_layout = QVBoxLayout(annotations_group)
 
         selected_annotation_props: list[tuple[str, str]] = []
@@ -1421,17 +1446,44 @@ class CFVCore(QMainWindow):
                 if isinstance(entry, (tuple, list)) and len(entry) >= 2:
                     selected_annotation_props.append((str(entry[0]), str(entry[1])))
 
-        title_row = QHBoxLayout()
-        title_label = QLabel("title")
-        title_edit = QLineEdit(str(default_title))
-        title_edit.setPlaceholderText("Contour title")
-        title_row.addWidget(title_label)
-        title_row.addWidget(title_edit, 1)
-        annotations_layout.addLayout(title_row)
+        free_text_row = QHBoxLayout()
+        free_text_label = QLabel("free text")
+        free_text_edit = QLineEdit(str(existing.get("annotation_free_text", "")))
+        free_text_edit.setPlaceholderText("Optional custom annotation text")
+        free_text_row.addWidget(free_text_label)
+        free_text_row.addWidget(free_text_edit, 1)
+        annotations_layout.addLayout(free_text_row)
+
+        annotation_limit_label = QLabel()
+        annotation_limit_label.setStyleSheet("color: #666;")
+
+        def _refresh_annotation_limit_hint() -> None:
+            max_selected = 3 if free_text_edit.text().strip() else 4
+            annotation_limit_label.setText(
+                f"Annotation property limit: {max_selected}"
+            )
+
+        free_text_edit.textChanged.connect(lambda _text: _refresh_annotation_limit_hint())
+        _refresh_annotation_limit_hint()
+        annotations_layout.addWidget(annotation_limit_label)
+
+        top_margin_spin = QDoubleSpinBox()
+        top_margin_spin.setRange(0.0, 0.20)
+        top_margin_spin.setDecimals(3)
+        top_margin_spin.setSingleStep(0.005)
+        top_margin_spin.setValue(float(existing.get("page_margin_top", 0.0) or 0.0))
+        top_margin_spin.setToolTip("Extra figure-fraction space above plot for page title")
+
+        bottom_margin_spin = QDoubleSpinBox()
+        bottom_margin_spin.setRange(0.0, 0.20)
+        bottom_margin_spin.setDecimals(3)
+        bottom_margin_spin.setSingleStep(0.005)
+        bottom_margin_spin.setValue(float(existing.get("page_margin_bottom", 0.0) or 0.0))
+        bottom_margin_spin.setToolTip("Extra figure-fraction space below plot for annotations")
 
         annotation_row = QHBoxLayout()
-        choose_annotations_button = QPushButton("Choose annotation properties")
-        annotation_display_checkbox = QCheckBox("display")
+        choose_annotations_button = QPushButton("Select annotations from properties")
+        annotation_display_checkbox = QCheckBox("display annotations")
         annotation_display_checkbox.setChecked(bool(existing.get("annotation_display", False)))
 
         annotation_preview = QLabel()
@@ -1446,6 +1498,12 @@ class CFVCore(QMainWindow):
                 "\n".join(f"{key}: {value}" for key, value in selected_annotation_props)
             )
 
+        def _maybe_enable_annotation_display() -> None:
+            has_free_text = bool(free_text_edit.text().strip())
+            has_props = bool(selected_annotation_props)
+            if has_free_text or has_props:
+                annotation_display_checkbox.setChecked(True)
+
         def _choose_annotation_properties() -> None:
             selected_item = self.field_list_widget.currentItem()
             if selected_item is None:
@@ -1458,13 +1516,23 @@ class CFVCore(QMainWindow):
                 self.status.showMessage("No properties available for annotation")
                 return
 
-            chosen = self._show_annotation_properties_chooser(properties, selected_annotation_props)
+            max_selected = 3 if free_text_edit.text().strip() else 4
+            if len(selected_annotation_props) > max_selected:
+                selected_annotation_props[:] = selected_annotation_props[:max_selected]
+
+            chosen = self._show_annotation_properties_chooser(
+                properties,
+                selected_annotation_props,
+                max_selected=max_selected,
+            )
             if chosen is not None:
                 selected_annotation_props.clear()
                 selected_annotation_props.extend(chosen)
                 _refresh_annotation_preview()
+                _maybe_enable_annotation_display()
 
         choose_annotations_button.clicked.connect(_choose_annotation_properties)
+        free_text_edit.textChanged.connect(lambda _text: _maybe_enable_annotation_display())
         _refresh_annotation_preview()
 
         annotation_row.addWidget(choose_annotations_button)
@@ -1472,6 +1540,19 @@ class CFVCore(QMainWindow):
         annotation_row.addWidget(annotation_display_checkbox)
         annotations_layout.addLayout(annotation_row)
         annotations_layout.addWidget(annotation_preview)
+
+        margin_row = QHBoxLayout()
+        layout_label = QLabel("Layout:")
+        top_margin_label = QLabel("top margin")
+        bottom_margin_label = QLabel("bottom margin")
+        margin_row.addWidget(layout_label)
+        margin_row.addWidget(top_margin_label)
+        margin_row.addWidget(top_margin_spin)
+        margin_row.addSpacing(10)
+        margin_row.addWidget(bottom_margin_label)
+        margin_row.addWidget(bottom_margin_spin)
+        margin_row.addStretch(1)
+        annotations_layout.addLayout(margin_row)
 
         levels_group = QGroupBox("Contour levels")
         levels_layout = QVBoxLayout(levels_group)
@@ -1544,10 +1625,16 @@ class CFVCore(QMainWindow):
 
         selected_cscale: dict[str, str | None] = {"value": existing.get("cscale")}
 
-        cscale_row = QHBoxLayout()
+        cscale_row = QVBoxLayout()
+        cscale_header_row = QHBoxLayout()
         cscale_label = QLabel("colour scale")
         cscale_value_label = QLabel()
         choose_cscale_button = QPushButton("Choose...")
+        cscale_value_label.setStyleSheet("font-weight: 700;")
+        cscale_row.setContentsMargins(0, 0, 0, 0)
+        cscale_row.setSpacing(2)
+        cscale_header_row.setContentsMargins(0, 0, 0, 0)
+        cscale_header_row.setSpacing(6)
 
         def _update_cscale_label() -> None:
             value = selected_cscale.get("value")
@@ -1562,9 +1649,13 @@ class CFVCore(QMainWindow):
         choose_cscale_button.clicked.connect(_choose_cscale)
         _update_cscale_label()
 
-        cscale_row.addWidget(cscale_label)
-        cscale_row.addWidget(cscale_value_label, 1)
-        cscale_row.addWidget(choose_cscale_button)
+        cscale_header_row.addWidget(cscale_label)
+        cscale_header_row.addStretch(1)
+        cscale_header_row.addWidget(choose_cscale_button)
+        cscale_header_row.setAlignment(cscale_label, Qt.AlignTop)
+        cscale_header_row.setAlignment(choose_cscale_button, Qt.AlignTop)
+        cscale_row.addLayout(cscale_header_row)
+        cscale_row.addWidget(cscale_value_label)
 
         fill_checkbox = QCheckBox("fill")
         fill_checkbox.setChecked(bool(existing.get("fill", True)))
@@ -1611,15 +1702,28 @@ class CFVCore(QMainWindow):
         lines_checkbox.toggled.connect(_sync_line_labels)
         _sync_line_labels()
 
-        style_layout.addWidget(fill_checkbox)
-        style_layout.addWidget(lines_checkbox)
-        style_layout.addWidget(line_labels_checkbox)
-        style_layout.addLayout(cscale_row)
+        style_top_row = QHBoxLayout()
+        style_checks_col = QVBoxLayout()
+        style_cscale_col = QVBoxLayout()
+
+        style_checks_col.addWidget(fill_checkbox)
+        style_checks_col.addWidget(lines_checkbox)
+        style_checks_col.addWidget(line_labels_checkbox)
+        style_checks_col.addStretch(1)
+
+        style_cscale_col.addLayout(cscale_row)
+        style_cscale_col.addStretch(1)
+
+        style_top_row.addLayout(style_checks_col, 1)
+        style_top_row.addLayout(style_cscale_col, 1)
+
+        style_layout.addLayout(style_top_row)
         style_layout.addLayout(negative_row)
         style_layout.addLayout(zero_row)
         style_layout.addWidget(blockfill_checkbox)
         style_layout.addWidget(blockfill_fast_checkbox)
 
+        layout.addWidget(titles_group)
         layout.addWidget(annotations_group)
         layout.addWidget(levels_group)
         layout.addWidget(style_group)
@@ -1677,9 +1781,19 @@ class CFVCore(QMainWindow):
         title_text = title_edit.text().strip()
         if title_text:
             options["title"] = title_text
+        page_title_text = page_title_edit.text().strip()
+        options["page_title_display"] = bool(page_title_display_checkbox.isChecked())
+        if options["page_title_display"] and page_title_text:
+            options["page_title"] = page_title_text
+        options["page_margin_top"] = float(top_margin_spin.value())
+        options["page_margin_bottom"] = float(bottom_margin_spin.value())
+        free_text = free_text_edit.text().strip()
+        if free_text:
+            options["annotation_free_text"] = free_text
         options["annotation_display"] = bool(annotation_display_checkbox.isChecked())
         if selected_annotation_props:
-            options["annotation_properties"] = selected_annotation_props[:4]
+            max_selected = 3 if free_text else 4
+            options["annotation_properties"] = selected_annotation_props[:max_selected]
         if selected_cscale.get("value"):
             options["cscale"] = selected_cscale["value"]
 
@@ -1691,14 +1805,15 @@ class CFVCore(QMainWindow):
         self,
         properties: dict[object, object],
         current_selected: list[tuple[str, str]],
+        max_selected: int = 4,
     ) -> list[tuple[str, str]] | None:
-        """Show a chooser for up to 4 annotation properties."""
+        """Show a chooser for up to ``max_selected`` annotation properties."""
         dialog = QDialog(self)
         dialog.setWindowTitle("Choose annotation properties")
         dialog.resize(640, 420)
 
         layout = QVBoxLayout(dialog)
-        hint = QLabel("Select up to 4 properties to annotate on plots")
+        hint = QLabel(f"Select up to {max_selected} properties to annotate on plots")
         layout.addWidget(hint)
 
         table = QTableWidget(len(properties), 2, dialog)
@@ -1747,11 +1862,11 @@ class CFVCore(QMainWindow):
             if key_item.checkState() == Qt.Checked:
                 selected.append((key_item.text(), value_item.text()))
 
-        if len(selected) > 4:
+        if len(selected) > max_selected:
             QMessageBox.warning(
                 self,
                 "Too many properties",
-                "Please select at most 4 annotation properties.",
+                f"Please select at most {max_selected} annotation properties.",
             )
             return None
 

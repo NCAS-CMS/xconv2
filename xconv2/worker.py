@@ -143,6 +143,8 @@ def _build_saved_plot_script(exec_code: str) -> str:
     lines.append("")
     lines.append(save_exec_code)
     lines.append("")
+    lines.append("plt.show(block=True)")
+    lines.append("")
     return "\n".join(lines)
 
 
