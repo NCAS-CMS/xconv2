@@ -604,6 +604,14 @@ class CFVCore(QMainWindow):
         """Scale current plot pixmap to fit the visible plot frame."""
         self.plot_view_controller.refresh_plot_pixmap()
 
+    def _set_plot_loading(self, is_loading: bool, message: str = "Rendering plot...") -> None:
+        """Toggle the plot loading overlay state."""
+        self.plot_view_controller.set_plot_loading(is_loading, message)
+
+    def _clear_plot_canvas(self, message: str = "Plot unavailable") -> None:
+        """Clear the rendered plot image and display a fallback message."""
+        self.plot_view_controller.clear_plot_canvas(message)
+
     def _on_save_code_button_clicked(self) -> None:
         """Prompt for destination file and request worker-side plot code save."""
         self.plot_view_controller.on_save_code_button_clicked()

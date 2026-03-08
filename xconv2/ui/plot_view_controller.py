@@ -1,17 +1,89 @@
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import QApplication, QFileDialog, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QStackedLayout,
+    QVBoxLayout,
+    QWidget,
+)
 
 if TYPE_CHECKING:
     from xconv2.core_window import CFVCore
 
 logger = logging.getLogger(__name__)
+
+
+class CircularSpinner(QWidget):
+    """Simple animated circular spinner drawn with Qt painter primitives."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._tick = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(70)
+        self._timer.timeout.connect(self._advance)
+        self.setMinimumSize(52, 52)
+        self.setMaximumSize(52, 52)
+
+    def start(self) -> None:
+        """Start spinner animation."""
+        if not self._timer.isActive():
+            self._timer.start()
+        self.show()
+
+    def stop(self) -> None:
+        """Stop spinner animation."""
+        self._timer.stop()
+        self.hide()
+
+    def _advance(self) -> None:
+        """Advance animated segment and repaint."""
+        self._tick = (self._tick + 1) % 12
+        self.update()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        """Paint radial segments with a rotating bright head."""
+        _ = event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        size = min(self.width(), self.height())
+        radius = size * 0.35
+        center_x = self.width() / 2
+        center_y = self.height() / 2
+        segment_count = 12
+
+        for index in range(segment_count):
+            # Fade trailing segments behind the active head.
+            distance = (index - self._tick) % segment_count
+            alpha = max(35, 255 - (distance * 18))
+            color = QColor(120, 185, 255, alpha)
+
+            angle = (2 * math.pi * index) / segment_count
+            inner = radius * 0.55
+            outer = radius
+            x1 = center_x + inner * math.cos(angle)
+            y1 = center_y + inner * math.sin(angle)
+            x2 = center_x + outer * math.cos(angle)
+            y2 = center_y + outer * math.sin(angle)
+
+            pen = QPen(color)
+            pen.setWidth(4)
+            pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(pen)
+            painter.drawLine(int(x1), int(y1), int(x2), int(y2))
 
 
 class PlotViewController:
@@ -31,6 +103,37 @@ class PlotViewController:
         self.host.plot_frame.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.host.plot_frame.setMinimumSize(120, 120)
         self.host.plot_frame.setStyleSheet("background-color: #222; color: #888; border: 1px solid #444;")
+
+        self.host.plot_loading_overlay = QWidget()
+        self.host.plot_loading_overlay.setStyleSheet(
+            "background-color: rgba(20, 20, 20, 160);"
+            "color: #f0f0f0;"
+            "border: 1px solid rgba(120, 120, 120, 120);"
+        )
+
+        overlay_layout = QVBoxLayout(self.host.plot_loading_overlay)
+        overlay_layout.setContentsMargins(12, 12, 12, 12)
+        overlay_layout.addStretch(1)
+
+        self.host.plot_loading_spinner = CircularSpinner(self.host.plot_loading_overlay)
+
+        self.host.plot_loading_text = QLabel("Rendering plot...")
+        self.host.plot_loading_text.setAlignment(Qt.AlignCenter)
+        self.host.plot_loading_text.setWordWrap(True)
+        self.host.plot_loading_text.setStyleSheet("font-size: 14px; font-weight: 600;")
+
+        overlay_layout.addWidget(self.host.plot_loading_spinner)
+        overlay_layout.addWidget(self.host.plot_loading_text)
+        overlay_layout.addStretch(1)
+        self.host.plot_loading_overlay.hide()
+
+        plot_stack = QStackedLayout()
+        plot_stack.setStackingMode(QStackedLayout.StackAll)
+        plot_stack.addWidget(self.host.plot_frame)
+        plot_stack.addWidget(self.host.plot_loading_overlay)
+
+        plot_stack_container = QWidget()
+        plot_stack_container.setLayout(plot_stack)
 
         summary_row = QHBoxLayout()
         self.host.plot_summary_label = QLabel("Open a field to inspect plot options.")
@@ -53,9 +156,31 @@ class PlotViewController:
         summary_row.addWidget(self.host.save_code_button)
         summary_row.addWidget(self.host.save_plot_button)
 
-        layout.addWidget(self.host.plot_frame, 1)
+        layout.addWidget(plot_stack_container, 1)
         layout.addLayout(summary_row)
         return container
+
+    def set_plot_loading(self, is_loading: bool, message: str = "Rendering plot...") -> None:
+        """Show or hide an inline loading overlay while worker plot tasks run."""
+        overlay = getattr(self.host, "plot_loading_overlay", None)
+        if overlay is None:
+            return
+
+        if is_loading:
+            self.host.plot_loading_text.setText(message)
+            self.host.plot_loading_spinner.start()
+            overlay.show()
+            overlay.raise_()
+            return
+
+        self.host.plot_loading_spinner.stop()
+        overlay.hide()
+
+    def clear_plot_canvas(self, message: str = "Plot unavailable") -> None:
+        """Clear any rendered plot image and show a fallback message."""
+        self.host._plot_pixmap_original = None
+        self.host.plot_frame.setPixmap(QPixmap())
+        self.host.plot_frame.setText(message)
 
     def on_plot_button_clicked(self) -> None:
         """Request a plot refresh when the current selection is plottable."""
@@ -80,6 +205,7 @@ class PlotViewController:
             return
 
         self.host._plot_pixmap_original = pixmap
+        self.set_plot_loading(False)
         self.fit_window_to_plot_aspect()
         self.refresh_plot_pixmap()
 

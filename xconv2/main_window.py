@@ -33,6 +33,8 @@ class CFVMain(CFVCore):
 
     def __init__(self) -> None:
         super().__init__()
+        self._plot_request_in_flight = False
+        self._plot_request_expects_image = False
 
         self.worker = QProcess()
         self.worker.readyReadStandardOutput.connect(self.handle_worker_output)
@@ -67,7 +69,26 @@ class CFVMain(CFVCore):
             logger.debug("Worker stdout line: %s", line)
 
             if line.startswith("STATUS:"):
-                self.status.showMessage(line.replace("STATUS:", ""))
+                status_text = line.split(":", 1)[1]
+                self.status.showMessage(status_text)
+                is_plot_error = self._plot_request_in_flight and status_text.startswith("Error -")
+                should_finish = False
+                if is_plot_error:
+                    should_finish = True
+                elif (
+                    self._plot_request_in_flight
+                    and status_text == "Task Complete"
+                    and not self._plot_request_expects_image
+                ):
+                    should_finish = True
+
+                if is_plot_error:
+                    self._clear_plot_canvas("Plot failed. Adjust options and try again.")
+
+                if should_finish:
+                    self._plot_request_in_flight = False
+                    self._plot_request_expects_image = False
+                    self._set_plot_loading(False)
 
             elif line.startswith("METADATA:"):
                 raw_payload = line.split(":", 1)[1]
@@ -87,11 +108,19 @@ class CFVMain(CFVCore):
                 if isinstance(payload, bytes):
                     self.set_plot_image(payload)
                     self.status.showMessage("Plot Updated.")
+                    if self._plot_request_in_flight:
+                        self._plot_request_in_flight = False
+                        self._plot_request_expects_image = False
+                        self._set_plot_loading(False)
                 else:
                     logger.warning("Unexpected IMG_READY payload type: %s", type(payload).__name__)
 
             elif line == "IMG_READY":
                 self.status.showMessage("Plot Updated.")
+                if self._plot_request_in_flight:
+                    self._plot_request_in_flight = False
+                    self._plot_request_expects_image = False
+                    self._set_plot_loading(False)
 
             elif line.startswith("COORD:"):
                 raw_payload = line.split(":", 1)[1]
@@ -149,10 +178,20 @@ class CFVMain(CFVCore):
     def handle_worker_process_error(self, process_error: QProcess.ProcessError) -> None:
         """Capture QProcess-level failures, such as start or crash issues."""
         logger.error("Worker process error: %s", process_error)
+        if self._plot_request_in_flight:
+            self._plot_request_in_flight = False
+            self._plot_request_expects_image = False
+            self._set_plot_loading(False)
+            self._clear_plot_canvas("Plot failed because the worker encountered an error.")
 
     def handle_worker_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
         """Capture worker shutdown information."""
         logger.warning("Worker finished with exit_code=%s exit_status=%s", exit_code, exit_status)
+        if self._plot_request_in_flight:
+            self._plot_request_in_flight = False
+            self._plot_request_expects_image = False
+            self._set_plot_loading(False)
+            self._clear_plot_canvas("Plot failed because the worker stopped.")
 
     def _load_selected_file(self, file_path: str) -> None:
         """Load selected file in worker and publish field metadata."""
@@ -313,6 +352,17 @@ class CFVMain(CFVCore):
             bool(save_target),
             bool(plot_options),
         )
+
+        if save_plot_path:
+            loading_message = "Rendering and saving plot..."
+        elif save_code_path:
+            loading_message = "Rendering plot and saving code..."
+        else:
+            loading_message = "Rendering plot..."
+
+        self._plot_request_in_flight = True
+        self._plot_request_expects_image = emit_image
+        self._set_plot_loading(True, loading_message)
         self._send_worker_task(cmd, save_code_path=save_target, emit_image=emit_image)
 
     def _send_worker_task(
