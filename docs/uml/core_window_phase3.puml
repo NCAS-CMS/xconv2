@@ -1,0 +1,45 @@
+@startuml CoreWindowPhase3Class
+skinparam classAttributeIconSize 0
+
+package "xconv2" {
+  class CFVCore
+}
+
+package "xconv2.main_window" {
+  class CFVMain
+}
+
+package "xconv2.ui" {
+  class MenuController
+  class SettingsStore
+  class SelectionController
+  class FieldMetadataController
+  class PlotViewController
+  class ContourOptionsController
+}
+
+CFVMain --|> CFVCore
+CFVCore o-- MenuController : menu orchestration
+CFVCore o-- SettingsStore : settings persistence
+CFVCore o-- SelectionController : slider/collapse state
+CFVCore o-- FieldMetadataController : field/properties UI
+CFVCore o-- PlotViewController : plot panel + save actions
+CFVCore o-- ContourOptionsController : contour dialogs
+@enduml
+
+@startuml CoreWindowPhase3OptionsSequence
+actor User
+participant CFVCore
+participant WorkerBridge as CFVMain
+participant Worker
+participant ContourOptionsController as OptionsCtrl
+
+User -> CFVCore : click Options
+CFVCore -> WorkerBridge : _request_plot_options()
+WorkerBridge -> Worker : contour_range_from_selection
+Worker --> WorkerBridge : CONTOUR_RANGE(min,max,suggested_title)
+WorkerBridge -> CFVCore : _show_contour_options_dialog(...)
+CFVCore -> OptionsCtrl : show_contour_options_dialog(...)
+OptionsCtrl --> CFVCore : updated plot_options_by_kind
+CFVCore -> WorkerBridge : _request_plot_update()
+@enduml

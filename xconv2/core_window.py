@@ -16,18 +16,13 @@ import logging
 from typing import Sequence
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QAction, QCloseEvent, QColor, QDesktopServices, QIcon, QImage, QPixmap
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
-    QButtonGroup,
-    QCheckBox,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
-    QDoubleSpinBox,
     QFileDialog,
     QGroupBox,
-    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -35,25 +30,22 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMenu,
-    QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QRadioButton,
     QScrollArea,
     QSizePolicy,
-    QSpinBox,
     QStatusBar,
+        QSpinBox,
     QStyle,
     QSystemTrayIcon,
-    QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from .colour_scales import cscales, get_colour_scale_hexes
+from .ui.contour_options_controller import ContourOptionsController
 from .ui.field_metadata_controller import FieldMetadataController
 from .ui.menu_controller import MenuController
+from .ui.plot_view_controller import PlotViewController
 from .ui.selection_controller import SelectionController
 from .ui.settings_store import SettingsStore
 
@@ -84,6 +76,8 @@ class CFVCore(QMainWindow):
         self.menu_controller = MenuController(self)
         self.selection_controller = SelectionController(self)
         self.field_metadata_controller = FieldMetadataController(self, FIELD_METADATA_SEPARATOR)
+        self.plot_view_controller = PlotViewController(self)
+        self.contour_options_controller = ContourOptionsController(self)
         self._settings = self._load_settings()
         self.setWindowTitle(self.base_window_title)
         self.resize(1000, 700)
@@ -588,158 +582,35 @@ class CFVCore(QMainWindow):
 
     def _create_plot_area(self) -> QWidget:
         """Create right-side plot frame plus plot-type summary and button."""
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        self.plot_frame = QLabel("Waiting for data...")
-        self.plot_frame.setAlignment(Qt.AlignCenter)
-        # Ignore pixmap size hints so large rendered plots do not force window growth.
-        self.plot_frame.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        self.plot_frame.setMinimumSize(120, 120)
-        self.plot_frame.setStyleSheet("background-color: #222; color: #888; border: 1px solid #444;")
-
-        summary_row = QHBoxLayout()
-        self.plot_summary_label = QLabel("Open a field to inspect plot options.")
-        self.plot_button = QPushButton("Plot")
-        self.plot_button.setEnabled(False)
-        self.plot_button.clicked.connect(self._on_plot_button_clicked)
-        self.options_button = QPushButton("Options")
-        self.options_button.setEnabled(False)
-        self.options_button.clicked.connect(self._on_options_button_clicked)
-        self.save_code_button = QPushButton("Save Code...")
-        self.save_code_button.setEnabled(False)
-        self.save_code_button.clicked.connect(self._on_save_code_button_clicked)
-        self.save_plot_button = QPushButton("Save Plot...")
-        self.save_plot_button.setEnabled(False)
-        self.save_plot_button.clicked.connect(self._on_save_plot_button_clicked)
-
-        summary_row.addWidget(self.plot_summary_label, 1)
-        summary_row.addWidget(self.plot_button)
-        summary_row.addWidget(self.options_button)
-        summary_row.addWidget(self.save_code_button)
-        summary_row.addWidget(self.save_plot_button)
-
-        layout.addWidget(self.plot_frame, 1)
-        layout.addLayout(summary_row)
-        return container
+        return self.plot_view_controller.create_plot_area()
 
     def _on_plot_button_clicked(self) -> None:
         """Request a plot refresh when the current selection is plottable."""
-        if not getattr(self, "plot_button", None) or not self.plot_button.isEnabled():
-            return
-        self._request_plot_update()
+        self.plot_view_controller.on_plot_button_clicked()
 
     def _on_options_button_clicked(self) -> None:
         """Request plot-type specific options from worker/UI flow."""
-        if not getattr(self, "options_button", None) or not self.options_button.isEnabled():
-            return
-        self._request_plot_options()
+        self.plot_view_controller.on_options_button_clicked()
 
     def set_plot_image(self, png_bytes: bytes) -> None:
         """Render PNG bytes from worker output into the plot frame."""
-        if not png_bytes:
-            return
-
-        pixmap = QPixmap()
-        if not pixmap.loadFromData(png_bytes, "PNG"):
-            logger.warning("Failed to decode plot PNG payload")
-            return
-
-        self._plot_pixmap_original = pixmap
-        self._fit_window_to_plot_aspect()
-        self._refresh_plot_pixmap()
+        self.plot_view_controller.set_plot_image(png_bytes)
 
     def _fit_window_to_plot_aspect(self) -> None:
         """Nudge window height to match plot aspect ratio without exceeding screen bounds."""
-        if self._plot_pixmap_original is None:
-            return
-
-        plot_height = self._plot_pixmap_original.height()
-        plot_width = self._plot_pixmap_original.width()
-        if plot_height <= 0 or plot_width <= 0:
-            return
-
-        aspect_ratio = plot_width / plot_height
-        current_plot_width = max(self.plot_frame.width(), 1)
-        desired_plot_height = max(1, int(current_plot_width / aspect_ratio))
-        current_plot_height = max(self.plot_frame.height(), 1)
-        height_delta = desired_plot_height - current_plot_height
-
-        # Avoid jitter from tiny adjustments.
-        if abs(height_delta) < 12:
-            return
-
-        screen = self.screen() or QApplication.primaryScreen()
-        if screen is None:
-            return
-
-        available_height = screen.availableGeometry().height()
-        min_height = max(self.minimumHeight(), 420)
-        max_height = max(min_height, int(available_height * 0.9))
-        target_height = max(min_height, min(self.height() + height_delta, max_height))
-
-        if target_height != self.height():
-            self.resize(self.width(), target_height)
+        self.plot_view_controller.fit_window_to_plot_aspect()
 
     def _refresh_plot_pixmap(self) -> None:
         """Scale current plot pixmap to fit the visible plot frame."""
-        if self._plot_pixmap_original is None:
-            return
-
-        target_size = self.plot_frame.size()
-        if target_size.width() <= 0 or target_size.height() <= 0:
-            return
-
-        scaled = self._plot_pixmap_original.scaled(
-            target_size,
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
-        )
-        self.plot_frame.setPixmap(scaled)
-        self.plot_frame.setText("")
+        self.plot_view_controller.refresh_plot_pixmap()
 
     def _on_save_code_button_clicked(self) -> None:
         """Prompt for destination file and request worker-side plot code save."""
-        if not getattr(self, "save_code_button", None) or not self.save_code_button.isEnabled():
-            return
-
-        default_path = self._default_save_path("last_save_code_dir", "cfview_plot_code.py")
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Plot Code",
-            default_path,
-            "Python files (*.py);;Text files (*.txt);;All files (*)",
-        )
-        if not file_path:
-            return
-
-        if not Path(file_path).suffix:
-            file_path += ".py"
-
-        self._remember_last_save_dir("last_save_code_dir", file_path)
-        self._request_plot_code_save(file_path)
+        self.plot_view_controller.on_save_code_button_clicked()
 
     def _on_save_plot_button_clicked(self) -> None:
         """Prompt for destination image file and request worker-side plot save."""
-        if not getattr(self, "save_plot_button", None) or not self.save_plot_button.isEnabled():
-            return
-
-        default_path = self._default_save_path("last_save_plot_dir", "cfview_plot.png")
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Plot",
-            default_path,
-            "PNG files (*.png);;PDF files (*.pdf);;PostScript files (*.ps);;All files (*)",
-        )
-        if not file_path:
-            return
-
-        if not Path(file_path).suffix:
-            file_path += ".png"
-
-        self._remember_last_save_dir("last_save_plot_dir", file_path)
-        self._request_plot_save(file_path)
+        self.plot_view_controller.on_save_plot_button_clicked()
 
     def _setup_status_bar(self) -> None:
         """Create and initialize the status bar."""
@@ -819,409 +690,11 @@ class CFVCore(QMainWindow):
         suggested_title: str | None = None,
     ) -> None:
         """Show contour options dialog and persist selected options."""
-        existing = self.plot_options_by_kind.get("contour", {})
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Contour Options")
-        dialog.resize(520, 280)
-
-        layout = QVBoxLayout(dialog)
-
-        default_title = existing.get("title")
-        if not default_title:
-            default_title = suggested_title
-        if not default_title:
-            default_title = Path(self.current_file_path).name if self.current_file_path else ""
-        default_page_title = existing.get("page_title")
-        if not default_page_title:
-            default_page_title = Path(self.current_file_path).name if self.current_file_path else ""
-
-        titles_group = QGroupBox("Titles")
-        titles_layout = QVBoxLayout(titles_group)
-
-        title_row = QHBoxLayout()
-        title_label = QLabel("contour title")
-        title_edit = QLineEdit(str(default_title))
-        title_edit.setPlaceholderText("Contour title")
-        title_row.addWidget(title_label)
-        title_row.addWidget(title_edit, 1)
-        titles_layout.addLayout(title_row)
-
-        page_title_row = QHBoxLayout()
-        page_title_label = QLabel("page title")
-        page_title_edit = QLineEdit(str(default_page_title))
-        page_title_edit.setPlaceholderText("Figure page title")
-        page_title_display_checkbox = QCheckBox("display")
-        page_title_display_checkbox.setChecked(bool(existing.get("page_title_display", False)))
-        page_title_row.addWidget(page_title_label)
-        page_title_row.addWidget(page_title_edit, 1)
-        page_title_row.addWidget(page_title_display_checkbox)
-        titles_layout.addLayout(page_title_row)
-
-        annotations_group = QGroupBox("Choose annotation properties")
-        annotations_layout = QVBoxLayout(annotations_group)
-
-        selected_annotation_props: list[tuple[str, str]] = []
-        existing_props = existing.get("annotation_properties", [])
-        if isinstance(existing_props, list):
-            for entry in existing_props:
-                if isinstance(entry, (tuple, list)) and len(entry) >= 2:
-                    selected_annotation_props.append((str(entry[0]), str(entry[1])))
-
-        free_text_row = QHBoxLayout()
-        free_text_label = QLabel("free text")
-        free_text_edit = QLineEdit(str(existing.get("annotation_free_text", "")))
-        free_text_edit.setPlaceholderText("Optional custom annotation text")
-        free_text_row.addWidget(free_text_label)
-        free_text_row.addWidget(free_text_edit, 1)
-        annotations_layout.addLayout(free_text_row)
-
-        annotation_limit_label = QLabel()
-        annotation_limit_label.setStyleSheet("color: #666;")
-
-        def _refresh_annotation_limit_hint() -> None:
-            max_selected = 3 if free_text_edit.text().strip() else 4
-            annotation_limit_label.setText(
-                f"Annotation property limit: {max_selected}"
-            )
-
-        free_text_edit.textChanged.connect(lambda _text: _refresh_annotation_limit_hint())
-        _refresh_annotation_limit_hint()
-        annotations_layout.addWidget(annotation_limit_label)
-
-        top_margin_spin = QDoubleSpinBox()
-        top_margin_spin.setRange(0.0, 0.20)
-        top_margin_spin.setDecimals(3)
-        top_margin_spin.setSingleStep(0.005)
-        top_margin_spin.setValue(float(existing.get("page_margin_top", 0.0) or 0.0))
-        top_margin_spin.setToolTip("Extra figure-fraction space above plot for page title")
-
-        bottom_margin_spin = QDoubleSpinBox()
-        bottom_margin_spin.setRange(0.0, 0.20)
-        bottom_margin_spin.setDecimals(3)
-        bottom_margin_spin.setSingleStep(0.005)
-        bottom_margin_spin.setValue(float(existing.get("page_margin_bottom", 0.0) or 0.0))
-        bottom_margin_spin.setToolTip("Extra figure-fraction space below plot for annotations")
-
-        annotation_row = QHBoxLayout()
-        choose_annotations_button = QPushButton("Select annotations from properties")
-        annotation_display_checkbox = QCheckBox("display annotations")
-        annotation_display_checkbox.setChecked(bool(existing.get("annotation_display", False)))
-
-        annotation_preview = QLabel()
-        annotation_preview.setWordWrap(True)
-        annotation_preview.setStyleSheet("color: #444;")
-
-        def _refresh_annotation_preview() -> None:
-            if not selected_annotation_props:
-                annotation_preview.setText("No annotation properties selected")
-                return
-            annotation_preview.setText(
-                "\n".join(f"{key}: {value}" for key, value in selected_annotation_props)
-            )
-
-        def _maybe_enable_annotation_display() -> None:
-            has_free_text = bool(free_text_edit.text().strip())
-            has_props = bool(selected_annotation_props)
-            if has_free_text or has_props:
-                annotation_display_checkbox.setChecked(True)
-
-        def _choose_annotation_properties() -> None:
-            selected_item = self.field_list_widget.currentItem()
-            if selected_item is None:
-                self.status.showMessage("Select a field before choosing annotation properties")
-                return
-
-            raw_properties = selected_item.data(Qt.UserRole + 1)
-            properties = self._parse_properties_dict(raw_properties)
-            if not properties:
-                self.status.showMessage("No properties available for annotation")
-                return
-
-            max_selected = 3 if free_text_edit.text().strip() else 4
-            if len(selected_annotation_props) > max_selected:
-                selected_annotation_props[:] = selected_annotation_props[:max_selected]
-
-            chosen = self._show_annotation_properties_chooser(
-                properties,
-                selected_annotation_props,
-                max_selected=max_selected,
-            )
-            if chosen is not None:
-                selected_annotation_props.clear()
-                selected_annotation_props.extend(chosen)
-                _refresh_annotation_preview()
-                _maybe_enable_annotation_display()
-
-        choose_annotations_button.clicked.connect(_choose_annotation_properties)
-        free_text_edit.textChanged.connect(lambda _text: _maybe_enable_annotation_display())
-        _refresh_annotation_preview()
-
-        annotation_row.addWidget(choose_annotations_button)
-        annotation_row.addStretch(1)
-        annotation_row.addWidget(annotation_display_checkbox)
-        annotations_layout.addLayout(annotation_row)
-        annotations_layout.addWidget(annotation_preview)
-
-        margin_row = QHBoxLayout()
-        layout_label = QLabel("Layout:")
-        top_margin_label = QLabel("top margin")
-        bottom_margin_label = QLabel("bottom margin")
-        margin_row.addWidget(layout_label)
-        margin_row.addWidget(top_margin_label)
-        margin_row.addWidget(top_margin_spin)
-        margin_row.addSpacing(10)
-        margin_row.addWidget(bottom_margin_label)
-        margin_row.addWidget(bottom_margin_spin)
-        margin_row.addStretch(1)
-        annotations_layout.addLayout(margin_row)
-
-        levels_group = QGroupBox("Contour levels")
-        levels_layout = QVBoxLayout(levels_group)
-        levels_layout.addWidget(QLabel(f"Field range: min={range_min:g}, max={range_max:g}"))
-
-        default_radio = QRadioButton("Default - let matplotlib decide")
-        auto_radio = QRadioButton("Use min/max + intervals")
-        explicit_radio = QRadioButton("Use explicit contour levels (comma-separated)")
-        mode_group = QButtonGroup(dialog)
-        mode_group.addButton(default_radio)
-        mode_group.addButton(auto_radio)
-        mode_group.addButton(explicit_radio)
-
-        auto_row = QHBoxLayout()
-        min_label = QLabel("min")
-        min_edit = QLineEdit(str(existing.get("min", range_min)))
-        max_label = QLabel("max")
-        max_edit = QLineEdit(str(existing.get("max", range_max)))
-        intervals_label = QLabel("intervals")
-        intervals_spin = QSpinBox()
-        intervals_spin.setRange(1, 200)
-        intervals_spin.setValue(int(existing.get("intervals", 12)))
-
-        auto_row.addWidget(min_label)
-        auto_row.addWidget(min_edit)
-        auto_row.addWidget(max_label)
-        auto_row.addWidget(max_edit)
-        auto_row.addWidget(intervals_label)
-        auto_row.addWidget(intervals_spin)
-
-        explicit_levels = existing.get("levels", [])
-        explicit_levels_text = ""
-        if isinstance(explicit_levels, list):
-            explicit_levels_text = ", ".join(str(v) for v in explicit_levels)
-        explicit_edit = QLineEdit(explicit_levels_text)
-        explicit_edit.setPlaceholderText("e.g. -2, -1, 0, 1, 2")
-
-        if existing.get("mode") == "explicit":
-            explicit_radio.setChecked(True)
-        elif existing.get("mode") == "auto":
-            auto_radio.setChecked(True)
-        else:
-            default_radio.setChecked(True)
-
-        def _sync_mode() -> None:
-            use_auto = auto_radio.isChecked()
-            use_explicit = explicit_radio.isChecked()
-            min_edit.setEnabled(use_auto)
-            max_edit.setEnabled(use_auto)
-            intervals_spin.setEnabled(use_auto)
-            explicit_edit.setEnabled(use_explicit)
-
-        default_radio.toggled.connect(_sync_mode)
-        auto_radio.toggled.connect(_sync_mode)
-        explicit_radio.toggled.connect(_sync_mode)
-        _sync_mode()
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-
-        levels_layout.addWidget(default_radio)
-        levels_layout.addWidget(auto_radio)
-        levels_layout.addLayout(auto_row)
-        levels_layout.addWidget(explicit_radio)
-        levels_layout.addWidget(explicit_edit)
-
-        style_group = QGroupBox("Contour style")
-        style_layout = QVBoxLayout(style_group)
-
-        selected_cscale: dict[str, str | None] = {"value": existing.get("cscale")}
-
-        cscale_row = QVBoxLayout()
-        cscale_header_row = QHBoxLayout()
-        cscale_label = QLabel("colour scale")
-        cscale_value_label = QLabel()
-        choose_cscale_button = QPushButton("Choose...")
-        cscale_value_label.setStyleSheet("font-weight: 700;")
-        cscale_row.setContentsMargins(0, 0, 0, 0)
-        cscale_row.setSpacing(2)
-        cscale_header_row.setContentsMargins(0, 0, 0, 0)
-        cscale_header_row.setSpacing(6)
-
-        def _update_cscale_label() -> None:
-            value = selected_cscale.get("value")
-            cscale_value_label.setText(str(value) if value else "default")
-
-        def _choose_cscale() -> None:
-            chosen = self._show_colour_scale_chooser(selected_cscale.get("value"))
-            if chosen:
-                selected_cscale["value"] = chosen
-                _update_cscale_label()
-
-        choose_cscale_button.clicked.connect(_choose_cscale)
-        _update_cscale_label()
-
-        cscale_header_row.addWidget(cscale_label)
-        cscale_header_row.addStretch(1)
-        cscale_header_row.addWidget(choose_cscale_button)
-        cscale_header_row.setAlignment(cscale_label, Qt.AlignTop)
-        cscale_header_row.setAlignment(choose_cscale_button, Qt.AlignTop)
-        cscale_row.addLayout(cscale_header_row)
-        cscale_row.addWidget(cscale_value_label)
-
-        fill_checkbox = QCheckBox("fill")
-        fill_checkbox.setChecked(bool(existing.get("fill", True)))
-
-        lines_checkbox = QCheckBox("lines")
-        lines_checkbox.setChecked(bool(existing.get("lines", False)))
-
-        line_labels_checkbox = QCheckBox("line_labels")
-        line_labels_checkbox.setChecked(bool(existing.get("line_labels", True)))
-
-        negative_row = QHBoxLayout()
-        negative_label = QLabel("negative_linestyle")
-        negative_style_combo = QComboBox()
-        negative_style_combo.addItems(["solid", "dashed"])
-        current_negative = str(existing.get("negative_linestyle", "solid"))
-        idx = negative_style_combo.findText(current_negative)
-        negative_style_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        negative_row.addWidget(negative_label)
-        negative_row.addWidget(negative_style_combo)
-
-        zero_row = QHBoxLayout()
-        zero_label = QLabel("zero_thick")
-        zero_thick_spin = QDoubleSpinBox()
-        zero_thick_spin.setRange(0.0, 20.0)
-        zero_thick_spin.setDecimals(2)
-        zero_thick_spin.setSingleStep(0.5)
-        zero_thick_spin.setToolTip("0.0 disables thick zero contour")
-        existing_zero = existing.get("zero_thick", False)
-        zero_thick_spin.setValue(0.0 if existing_zero in (False, None) else float(existing_zero))
-        zero_row.addWidget(zero_label)
-        zero_row.addWidget(zero_thick_spin)
-
-        blockfill_checkbox = QCheckBox("blockfill")
-        blockfill_checkbox.setChecked(bool(existing.get("blockfill", False)))
-
-        blockfill_fast_checkbox = QCheckBox("blockfill_fast (pcolormesh)")
-        blockfill_fast_checkbox.setChecked(bool(existing.get("blockfill_fast", None)))
-
-        def _sync_line_labels() -> None:
-            line_labels_checkbox.setEnabled(lines_checkbox.isChecked())
-            if not lines_checkbox.isChecked():
-                line_labels_checkbox.setChecked(False)
-
-        lines_checkbox.toggled.connect(_sync_line_labels)
-        _sync_line_labels()
-
-        style_top_row = QHBoxLayout()
-        style_checks_col = QVBoxLayout()
-        style_cscale_col = QVBoxLayout()
-
-        style_checks_col.addWidget(fill_checkbox)
-        style_checks_col.addWidget(lines_checkbox)
-        style_checks_col.addWidget(line_labels_checkbox)
-        style_checks_col.addStretch(1)
-
-        style_cscale_col.addLayout(cscale_row)
-        style_cscale_col.addStretch(1)
-
-        style_top_row.addLayout(style_checks_col, 1)
-        style_top_row.addLayout(style_cscale_col, 1)
-
-        style_layout.addLayout(style_top_row)
-        style_layout.addLayout(negative_row)
-        style_layout.addLayout(zero_row)
-        style_layout.addWidget(blockfill_checkbox)
-        style_layout.addWidget(blockfill_fast_checkbox)
-
-        layout.addWidget(titles_group)
-        layout.addWidget(annotations_group)
-        layout.addWidget(levels_group)
-        layout.addWidget(style_group)
-        layout.addWidget(buttons)
-
-        if dialog.exec() != QDialog.Accepted:
-            return
-
-        if default_radio.isChecked():
-            options = {"mode": "default"}
-        elif explicit_radio.isChecked():
-            raw_levels = [piece.strip() for piece in explicit_edit.text().split(",") if piece.strip()]
-            try:
-                levels = [float(piece) for piece in raw_levels]
-            except ValueError:
-                self.status.showMessage("Invalid explicit contour levels; expected comma-separated numbers")
-                return
-
-            if len(levels) < 2:
-                self.status.showMessage("Please provide at least two contour levels")
-                return
-
-            options = {
-                "mode": "explicit",
-                "levels": levels,
-            }
-        else:
-            try:
-                user_min = float(min_edit.text().strip())
-                user_max = float(max_edit.text().strip())
-            except ValueError:
-                self.status.showMessage("Invalid contour min/max values")
-                return
-
-            if user_min == user_max:
-                self.status.showMessage("Contour min and max must differ")
-                return
-
-            lo, hi = sorted((user_min, user_max))
-            options = {
-                "mode": "auto",
-                "min": lo,
-                "max": hi,
-                "intervals": int(intervals_spin.value()),
-            }
-
-        options["fill"] = bool(fill_checkbox.isChecked())
-        options["lines"] = bool(lines_checkbox.isChecked())
-        options["line_labels"] = bool(line_labels_checkbox.isChecked())
-        options["negative_linestyle"] = str(negative_style_combo.currentText())
-        zero_thick_value = float(zero_thick_spin.value())
-        options["zero_thick"] = zero_thick_value if zero_thick_value > 0 else False
-        options["blockfill"] = bool(blockfill_checkbox.isChecked())
-        options["blockfill_fast"] = True if blockfill_fast_checkbox.isChecked() else None
-        title_text = title_edit.text().strip()
-        if title_text:
-            options["title"] = title_text
-        page_title_text = page_title_edit.text().strip()
-        options["page_title_display"] = bool(page_title_display_checkbox.isChecked())
-        if options["page_title_display"] and page_title_text:
-            options["page_title"] = page_title_text
-        options["page_margin_top"] = float(top_margin_spin.value())
-        options["page_margin_bottom"] = float(bottom_margin_spin.value())
-        free_text = free_text_edit.text().strip()
-        if free_text:
-            options["annotation_free_text"] = free_text
-        options["annotation_display"] = bool(annotation_display_checkbox.isChecked())
-        if selected_annotation_props:
-            max_selected = 3 if free_text else 4
-            options["annotation_properties"] = selected_annotation_props[:max_selected]
-        if selected_cscale.get("value"):
-            options["cscale"] = selected_cscale["value"]
-
-        self.plot_options_by_kind["contour"] = options
-        self.status.showMessage("Updated contour options")
-        self._request_plot_update()
+        self.contour_options_controller.show_contour_options_dialog(
+            range_min=range_min,
+            range_max=range_max,
+            suggested_title=suggested_title,
+        )
 
     def _show_annotation_properties_chooser(
         self,
@@ -1230,142 +703,23 @@ class CFVCore(QMainWindow):
         max_selected: int = 4,
     ) -> list[tuple[str, str]] | None:
         """Show a chooser for up to ``max_selected`` annotation properties."""
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Choose annotation properties")
-        dialog.resize(640, 420)
-
-        layout = QVBoxLayout(dialog)
-        hint = QLabel(f"Select up to {max_selected} properties to annotate on plots")
-        layout.addWidget(hint)
-
-        table = QTableWidget(len(properties), 2, dialog)
-        table.setHorizontalHeaderLabels(["Property", "Value"])
-        table.verticalHeader().setVisible(False)
-        table.setAlternatingRowColors(True)
-        table.setWordWrap(False)
-        table.setEditTriggers(QTableWidget.NoEditTriggers)
-        table.setSelectionMode(QTableWidget.NoSelection)
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-
-        selected_set = {(str(k), str(v)) for k, v in current_selected}
-
-        for row, (key, value) in enumerate(sorted(properties.items(), key=lambda kv: str(kv[0]).lower())):
-            key_text = str(key)
-            value_text = str(value)
-
-            key_item = QTableWidgetItem(key_text)
-            key_item.setFlags(key_item.flags() | Qt.ItemIsUserCheckable)
-            key_item.setCheckState(
-                Qt.Checked if (key_text, value_text) in selected_set else Qt.Unchecked
-            )
-            value_item = QTableWidgetItem(value_text)
-            value_item.setToolTip(value_text)
-
-            table.setItem(row, 0, key_item)
-            table.setItem(row, 1, value_item)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-
-        layout.addWidget(table)
-        layout.addWidget(buttons)
-
-        if dialog.exec() != QDialog.Accepted:
-            return None
-
-        selected: list[tuple[str, str]] = []
-        for row in range(table.rowCount()):
-            key_item = table.item(row, 0)
-            value_item = table.item(row, 1)
-            if key_item is None or value_item is None:
-                continue
-            if key_item.checkState() == Qt.Checked:
-                selected.append((key_item.text(), value_item.text()))
-
-        if len(selected) > max_selected:
-            QMessageBox.warning(
-                self,
-                "Too many properties",
-                f"Please select at most {max_selected} annotation properties.",
-            )
-            return None
-
-        return selected
+        return self.contour_options_controller.show_annotation_properties_chooser(
+            properties=properties,
+            current_selected=current_selected,
+            max_selected=max_selected,
+        )
 
     def _show_colour_scale_chooser(self, current_scale: str | None) -> str | None:
         """Show colour scale chooser with preview bars and return selected name."""
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Choose colour scale")
-        dialog.resize(760, 560)
-
-        layout = QVBoxLayout(dialog)
-
-        table = QTableWidget(len(cscales), 2, dialog)
-        table.setHorizontalHeaderLabels(["Scale", "Preview"])
-        table.verticalHeader().setVisible(False)
-        table.setEditTriggers(QTableWidget.NoEditTriggers)
-        table.setSelectionBehavior(QTableWidget.SelectRows)
-        table.setSelectionMode(QTableWidget.SingleSelection)
-        table.setWordWrap(False)
-        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-
-        selected_row = 0
-        for row, name in enumerate(cscales):
-            name_item = QTableWidgetItem(name)
-            table.setItem(row, 0, name_item)
-
-            preview_label = QLabel()
-            preview_label.setPixmap(self._build_colour_scale_preview(name, width=420, height=14))
-            table.setCellWidget(row, 1, preview_label)
-            table.setRowHeight(row, 22)
-
-            if current_scale and name == current_scale:
-                selected_row = row
-
-        table.selectRow(selected_row)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        table.doubleClicked.connect(dialog.accept)
-
-        layout.addWidget(table)
-        layout.addWidget(buttons)
-
-        if dialog.exec() != QDialog.Accepted:
-            return None
-
-        row = table.currentRow()
-        if row < 0:
-            return None
-
-        item = table.item(row, 0)
-        return item.text() if item else None
+        return self.contour_options_controller.show_colour_scale_chooser(current_scale)
 
     def _build_colour_scale_preview(self, scale_name: str, width: int, height: int) -> QPixmap:
         """Build a small horizontal preview pixmap for a cf-plot colour scale."""
-        colors = get_colour_scale_hexes(scale_name)
-        if not colors:
-            pixmap = QPixmap(width, height)
-            pixmap.fill(Qt.lightGray)
-            return pixmap
-
-        image = QImage(width, height, QImage.Format_RGB32)
-        n = len(colors)
-        for x in range(width):
-            idx = int((x / max(width - 1, 1)) * max(n - 1, 0))
-            color_name = colors[idx]
-            color = QColor(color_name)
-            if not color.isValid():
-                color = QColor("#aaaaaa")
-            for y in range(height):
-                image.setPixelColor(x, y, color)
-
-        return QPixmap.fromImage(image)
+        return self.contour_options_controller.build_colour_scale_preview(
+            scale_name=scale_name,
+            width=width,
+            height=height,
+        )
 
     def _request_plot_code_save(self, file_path: str) -> None:
         """Hook for worker-backed implementations to save generated plot code."""
