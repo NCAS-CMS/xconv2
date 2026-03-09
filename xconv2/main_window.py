@@ -379,7 +379,7 @@ class CFVMain(CFVCore):
             len(selections),
             len(collapse_by_coord),
             bool(save_target),
-            bool(plot_options),
+            bool(save_plot_path),
         )
 
         if save_plot_path:
