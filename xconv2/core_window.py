@@ -55,6 +55,8 @@ logger.setLevel(logging.DEBUG)
 FIELD_METADATA_SEPARATOR = "\x1f"
 DEFAULT_MAX_RECENT_FILES = 10
 SETTINGS_VERSION = 1
+STATUSBAR_NORMAL_STYLE = ""
+STATUSBAR_ERROR_STYLE = "QStatusBar { color: #c62828; font-weight: 600; }"
 
 
 class CFVCore(QMainWindow):
@@ -624,7 +626,13 @@ class CFVCore(QMainWindow):
         """Create and initialize the status bar."""
         self.status = QStatusBar()
         self.setStatusBar(self.status)
-        self.status.showMessage("System Ready. Initialize S3 Load.")
+        self._show_status_message("System Ready. Initialize S3 Load.")
+
+    def _show_status_message(self, message: str, is_error: bool = False) -> None:
+        """Show a status-bar message with optional error styling."""
+        style = STATUSBAR_ERROR_STYLE if is_error else STATUSBAR_NORMAL_STYLE
+        self.status.setStyleSheet(style)
+        self.status.showMessage(message)
 
     def populate_field_list(self, fields: Sequence[object]) -> None:
         """Populate the field list UI from worker metadata."""

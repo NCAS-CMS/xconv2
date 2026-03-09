@@ -23,6 +23,10 @@ class _DummyWindow:
     status: _DummyStatus = field(default_factory=_DummyStatus)
     sent_tasks: list[str] = field(default_factory=list)
 
+    def _show_status_message(self, message: str, is_error: bool = False) -> None:
+        _ = is_error
+        self.status.showMessage(message)
+
     def _send_worker_task(self, code: str) -> None:
         self.sent_tasks.append(code)
 
@@ -77,9 +81,6 @@ def test_load_selected_file_task_executes_with_mock_cf_example_fields() -> None:
 
     parts = payload[0].split("\x1f", 2)
     assert len(parts) == 3
-    print('[[',parts[0],']]')
-    print(parts[1])
-    print(parts[2])
     assert parts[0].startswith("specific_humidity")
     assert "latitude" in parts[1]
 

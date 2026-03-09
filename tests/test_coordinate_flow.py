@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import pickle
 from dataclasses import dataclass, field
+import types
 
 from xconv2.main_window import CFVMain
 
@@ -13,6 +14,15 @@ class _DummyMain:
 
     def build_dynamic_sliders(self, metadata: dict[str, list[object]]) -> None:
         self.built_slider_payloads.append(metadata)
+
+    def _show_status_message(self, _message: str, is_error: bool = False) -> None:
+        _ = is_error
+
+    def _set_plot_loading(self, _is_loading: bool, message: str = "Rendering plot...") -> None:
+        _ = message
+
+    def _clear_plot_canvas(self, message: str = "Plot unavailable") -> None:
+        _ = message
 
 
 @dataclass
@@ -40,6 +50,75 @@ class _FakeRangeSlider:
 
     def value(self) -> tuple[int, int]:
         return self._bounds
+
+
+@dataclass
+class _DummyFieldMetadataController:
+    clicked_items: list[object] = field(default_factory=list)
+
+    def on_field_clicked(self, item: object) -> None:
+        self.clicked_items.append(item)
+
+
+@dataclass
+class _DummyFieldListWidget:
+    index_to_return: int
+
+    def row(self, _item: object) -> int:
+        return self.index_to_return
+
+
+@dataclass
+class _DummyResetMain:
+    _plot_request_in_flight: bool = True
+    _plot_request_expects_image: bool = True
+    loading_calls: list[bool] = field(default_factory=list)
+    canvas_messages: list[str] = field(default_factory=list)
+    status_messages: list[str] = field(default_factory=list)
+
+    def _set_plot_loading(self, is_loading: bool, message: str = "Rendering plot...") -> None:
+        _ = message
+        self.loading_calls.append(is_loading)
+
+    def _clear_plot_canvas(self, message: str = "Plot unavailable") -> None:
+        self.canvas_messages.append(message)
+
+    def _show_status_message(self, message: str, is_error: bool = False) -> None:
+        _ = is_error
+        self.status_messages.append(message)
+
+
+@dataclass
+class _DummyCoordRequestMain:
+    status_messages: list[str] = field(default_factory=list)
+    sent_tasks: list[str] = field(default_factory=list)
+
+    def _show_status_message(self, message: str, is_error: bool = False) -> None:
+        _ = is_error
+        self.status_messages.append(message)
+
+    def _send_worker_task(self, code: str) -> None:
+        self.sent_tasks.append(code)
+
+
+@dataclass
+class _DummyStaleErrorMain:
+    _plot_request_in_flight: bool = False
+    _plot_request_expects_image: bool = False
+    _suppress_stale_error_status: bool = True
+    shown_statuses: list[tuple[str, bool]] = field(default_factory=list)
+    cleared_messages: list[str] = field(default_factory=list)
+    loading_calls: list[bool] = field(default_factory=list)
+
+    def _show_status_message(self, message: str, is_error: bool = False) -> None:
+        self.shown_statuses.append((message, is_error))
+
+    def _clear_plot_canvas(self, message: str = "Plot unavailable") -> None:
+        self.cleared_messages.append(message)
+
+    def _set_plot_loading(self, is_loading: bool, message: str = "Rendering plot...") -> None:
+        _ = message
+        self.loading_calls.append(is_loading)
 
 
 def test_normalize_coordinate_metadata_filters_and_coerces() -> None:
@@ -103,3 +182,89 @@ def test_build_plot_context_treats_adjacent_first_value_singletons_as_1d() -> No
     assert selections["time"] == ("t0", "t0")
     assert collapse_by_coord == {}
     assert plot_kind == "contour"
+
+
+def test_reset_ui_for_new_field_selection_clears_error_state() -> None:
+    dummy = _DummyResetMain()
+
+    CFVMain._reset_ui_for_new_field_selection(dummy)
+
+    assert dummy._plot_request_in_flight is False
+    assert dummy._plot_request_expects_image is False
+    assert dummy.loading_calls[-1] is False
+    assert dummy.canvas_messages[-1] == "Waiting for data..."
+    assert dummy.status_messages[-1] == "Task Complete"
+
+
+def test_request_coordinates_can_skip_status_message(monkeypatch) -> None:
+    dummy = _DummyCoordRequestMain()
+
+    monkeypatch.setattr(
+        "xconv2.main_window.coordinate_list",
+        lambda index: f"TASK_FOR_{index}",
+    )
+
+    CFVMain._request_coordinates_for_field(dummy, 4, show_status=False)
+
+    assert dummy.status_messages == []
+    assert dummy.sent_tasks == ["TASK_FOR_4"]
+
+
+def test_on_field_clicked_resets_ui_then_requests_coordinates() -> None:
+    """Field click should flow through core handling, reset UI, then request coordinates."""
+    window = CFVMain.__new__(CFVMain)
+    field_controller = _DummyFieldMetadataController()
+    window.field_metadata_controller = field_controller
+    window.field_list_widget = _DummyFieldListWidget(index_to_return=7)
+
+    call_order: list[tuple[str, object]] = []
+
+    window._reset_ui_for_new_field_selection = types.MethodType(
+        lambda self: call_order.append(("reset", None)),
+        window,
+    )
+    window._request_coordinates_for_field = types.MethodType(
+        lambda self, index, show_status=True: call_order.append(("request", (index, show_status))),
+        window,
+    )
+
+    fake_item = object()
+    CFVMain.on_field_clicked(window, fake_item)
+
+    # The core-window behavior should still run first.
+    assert field_controller.clicked_items == [fake_item]
+    # Then CFVMain-specific flow should reset stale state and request coordinates.
+    assert call_order == [
+        ("reset", None),
+        ("request", (7, False)),
+    ]
+
+
+def test_handle_worker_output_ignores_stale_error_after_field_reset() -> None:
+    dummy = _DummyStaleErrorMain()
+    dummy.worker = _FakeWorker(["STATUS:Error - old failure from previous field\n"])
+
+    CFVMain.handle_worker_output(dummy)
+
+    assert dummy.shown_statuses == []
+    assert dummy._suppress_stale_error_status is True
+
+
+def test_handle_worker_output_ignores_stale_error_after_coord_message() -> None:
+    coord_payload = [("time", ["1", "2"])]
+    encoded = base64.b64encode(pickle.dumps(coord_payload)).decode()
+
+    dummy = _DummyStaleErrorMain()
+    dummy._normalize_coordinate_metadata = lambda payload: CFVMain._normalize_coordinate_metadata(None, payload)
+    dummy.build_dynamic_sliders = lambda metadata: None
+    dummy.worker = _FakeWorker(
+        [
+            f"COORD:{encoded}\n",
+            "STATUS:Error - old failure from previous field\n",
+        ]
+    )
+
+    CFVMain.handle_worker_output(dummy)
+
+    assert dummy.shown_statuses == []
+    assert dummy._suppress_stale_error_status is True
