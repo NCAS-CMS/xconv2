@@ -32,9 +32,9 @@ Branch: `refactor/core-window-phase1-phase2`
 
 ## UML Artifacts
 
-- `docs/uml/core_window_phase3.puml`
-- `docs/uml/core_window_phase3_gui_worker_signals.puml`
-- `docs/uml/core_window_phase3_options_sequence.puml`
+- `docs/uml/core_window.puml`
+- `docs/uml/core_window_gui_worker_signals.puml`
+- `docs/uml/core_window_options_sequence.puml`
 
 These diagrams provide both class-level structure and key sequence flows for interaction paths.
 
