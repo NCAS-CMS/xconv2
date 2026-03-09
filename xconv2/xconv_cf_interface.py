@@ -18,6 +18,7 @@ __all__ = [
     "field_info",
     "coordinate_info",
     "get_data_for_plotting",
+    "annotation_text",
     "estimate_layout_padding",
     "apply_vertical_padding",
     "auto_contour_title",
@@ -144,6 +145,34 @@ def get_data_for_plotting(
             pfld = pfld.collapse(method, axes=axis)
 
     return pfld
+
+
+def annotation_text(
+    *,
+    annotation_display: bool,
+    annotation_properties: list[tuple[object, object]] | list[list[object]],
+    annotation_free_text: str,
+) -> str:
+    """Build a compact two-line annotation string from selected properties."""
+    if not annotation_display:
+        return ""
+
+    max_props = 3 if annotation_free_text else 4
+    annotation_items = [f"{key}: {value}" for key, value in annotation_properties[:max_props]]
+
+    entries: list[str] = []
+    if annotation_free_text:
+        entries.append(annotation_free_text)
+    entries.extend(annotation_items)
+
+    if not entries:
+        return ""
+
+    lines: list[str] = []
+    for idx in range(0, len(entries), 2):
+        lines.append(" | ".join(entries[idx : idx + 2]))
+
+    return "\n".join(lines)
 
 
 def estimate_layout_padding(
@@ -352,28 +381,6 @@ def run_contour_plot(
         else:
             cfp.levs()
 
-    def _annotation_text() -> str:
-        """Build a compact two-line annotation string from selected properties."""
-        if not annotation_display:
-            return ""
-
-        max_props = 3 if annotation_free_text else 4
-        annotation_items = [f"{key}: {value}" for key, value in annotation_properties[:max_props]]
-
-        entries: list[str] = []
-        if annotation_free_text:
-            entries.append(annotation_free_text)
-        entries.extend(annotation_items)
-
-        if not entries:
-            return ""
-
-        lines: list[str] = []
-        for idx in range(0, len(entries), 2):
-            lines.append(" | ".join(entries[idx : idx + 2]))
-
-        return "\n".join(lines)
-
     def _run_contour_prepass() -> None:
         prepass_kwargs = dict(contour_kwargs)
         prepass_kwargs["fill"] = False
@@ -385,11 +392,15 @@ def run_contour_plot(
         _apply_levels()
         cfp.con(pfld, **prepass_kwargs)
 
-    annotation_text = _annotation_text()
+    annotation_text_value = annotation_text(
+        annotation_display=annotation_display,
+        annotation_properties=annotation_properties,
+        annotation_free_text=annotation_free_text,
+    )
     top_padding, bottom_padding = estimate_layout_padding(
         page_title=page_title,
         page_title_display=page_title_display,
-        annotation_text=annotation_text,
+        annotation_text=annotation_text_value,
         run_prepass=_run_contour_prepass,
     )
     top_padding += page_margin_top
@@ -410,8 +421,8 @@ def run_contour_plot(
     if page_title_display and page_title:
         mycanvas.suptitle(str(page_title), y=0.995, fontsize=10)
 
-    if annotation_text:
-        mycanvas.text(0.5, 0.02, annotation_text, ha="center", va="bottom", fontsize=8)
+    if annotation_text_value:
+        mycanvas.text(0.5, 0.02, annotation_text_value, ha="center", va="bottom", fontsize=8)
 
     if filename is not None:
         cfp.gclose()
