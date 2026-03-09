@@ -219,3 +219,15 @@ def test_contour_range_from_selection_emits_min_max_payload() -> None:
     assert payload["min"] == 0.0
     assert payload["max"] == 3.0
     assert isinstance(payload.get("suggested_title"), str)
+
+
+def test_plot_from_selection_lineplot_generates_worker_call() -> None:
+    code = plot_from_selection(
+        selections={"time": ("1", "2")},
+        collapse_by_coord={},
+        plot_kind="lineplot",
+        plot_options={"mode": "default"},
+    )
+
+    assert "run_line_plot(" in code
+    assert "lineplot_options" in code

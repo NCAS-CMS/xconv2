@@ -93,6 +93,9 @@ class CFVCore(QMainWindow):
         self.controls = {}
         self.selected_counts: dict[str, int] = {}
         self.selected_collapse_methods: dict[str, str] = {}
+        self.last_varying_dims: int | None = None
+        self.available_plot_kinds: list[str] = []
+        self.selected_plot_kind: str | None = None
         self.plot_options_by_kind: dict[str, dict[str, object]] = {}
         self._plot_pixmap_original: QPixmap | None = None
 
@@ -189,7 +192,7 @@ class CFVCore(QMainWindow):
         layout = QVBoxLayout(dialog)
 
         heading = QLabel(
-            f"<h2 style='margin:0;'>xconv2</h2>"
+            f"<h2 style='margin:0;'>xconv2 ({__version__})</h2>"
             "<p style='margin-top:8px;'>"
             "High-performance data viewer and simple data converter."
             "</p>"

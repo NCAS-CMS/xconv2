@@ -42,6 +42,8 @@ class SelectionController:
         self.host.controls.clear()
         self.host.selected_counts.clear()
         self.host.selected_collapse_methods.clear()
+        self.host.available_plot_kinds = []
+        self.host.selected_plot_kind = None
 
         for i in reversed(range(self.host.sidebar.count())):
             widget = self.host.sidebar.itemAt(i).widget()
@@ -199,6 +201,10 @@ class SelectionController:
         """Update plot summary text and plot button availability."""
         if not self.host.controls:
             self.host.plot_summary_label.setText("Open a field to inspect plot options.")
+            self.host.last_varying_dims = None
+            self.host.available_plot_kinds = []
+            self.host.selected_plot_kind = None
+            self.host.plot_view_controller.set_plot_type_options([], None)
             self.host.plot_button.setEnabled(False)
             self.host.options_button.setEnabled(False)
             self.host.save_code_button.setEnabled(False)
@@ -217,29 +223,60 @@ class SelectionController:
             dims.append(1 if (hi_idx - lo_idx) <= 1 else 2)
 
         varying_dims = sum(1 for dim in dims if dim != 1)
-        dims_text = f"Selection dimensions = {dims}"
+        dims_text = f"Selection Dimensions: {varying_dims}D"
+
+        if varying_dims == 1:
+            available_plot_kinds = ["lineplot"]
+        elif varying_dims == 2:
+            available_plot_kinds = ["lineplot", "contour", "vector"]
+        else:
+            available_plot_kinds = []
+
+        previous_kind = self.host.selected_plot_kind
+        previous_varying_dims = self.host.last_varying_dims
+        entering_2d = varying_dims == 2 and previous_varying_dims != 2
+
+        if entering_2d:
+            selected_kind = "contour"
+        elif previous_kind in available_plot_kinds:
+            selected_kind = previous_kind
+        elif "contour" in available_plot_kinds:
+            selected_kind = "contour"
+        elif available_plot_kinds:
+            selected_kind = available_plot_kinds[0]
+        else:
+            selected_kind = None
+
+        self.host.available_plot_kinds = available_plot_kinds
+        self.host.selected_plot_kind = selected_kind
+        self.host.last_varying_dims = varying_dims
+        self.host.plot_view_controller.set_plot_type_options(available_plot_kinds, selected_kind)
 
         if varying_dims == 0:
-            self.host.plot_summary_label.setText(f"{dims_text} Total collapse, plot not possible")
+            self.host.plot_summary_label.setText(f"{dims_text} | Total collapse, plot not possible")
             self.host.plot_button.setEnabled(False)
             self.host.options_button.setEnabled(False)
             self.host.save_code_button.setEnabled(False)
             self.host.save_plot_button.setEnabled(False)
         elif varying_dims == 1:
-            self.host.plot_summary_label.setText(f"{dims_text} Lineplot possible")
+            self.host.plot_summary_label.setText(
+                f"{dims_text} | Plot Type: {selected_kind.title() if selected_kind else 'N/A'}"
+            )
             self.host.plot_button.setEnabled(True)
-            self.host.options_button.setEnabled(True)
+            self.host.options_button.setEnabled(False)
             self.host.save_code_button.setEnabled(True)
             self.host.save_plot_button.setEnabled(True)
         elif varying_dims == 2:
-            self.host.plot_summary_label.setText(f"{dims_text} Contour possible")
+            self.host.plot_summary_label.setText(
+                f"{dims_text} | Plot Type: {selected_kind.title() if selected_kind else 'N/A'}"
+            )
             self.host.plot_button.setEnabled(True)
-            self.host.options_button.setEnabled(True)
+            self.host.options_button.setEnabled(selected_kind == "contour")
             self.host.save_code_button.setEnabled(True)
             self.host.save_plot_button.setEnabled(True)
         else:
             self.host.plot_summary_label.setText(
-                f"{dims_text} Need to reduce to 1 or 2 dimensions before plotting"
+                f"{dims_text} | Need to reduce to 1D or 2D before plotting"
             )
             self.host.plot_button.setEnabled(False)
             self.host.options_button.setEnabled(False)

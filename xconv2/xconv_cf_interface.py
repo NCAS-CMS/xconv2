@@ -18,6 +18,7 @@ __all__ = [
     "get_data_for_plotting",
     "auto_contour_title",
     "run_contour_plot",
+    "run_line_plot",
 ]
 
 
@@ -396,6 +397,17 @@ def run_contour_plot(
 
     if filename is not None:
         cfp.gclose()
+
+
+def run_line_plot(
+    pfld: object,
+    options: dict[str, object] | None,
+    selection_spec: dict[str, tuple[object, object]] | None = None,
+    collapse_by_coord: dict[str, str] | None = None,
+) -> None:
+    """Placeholder line-plot hook used by worker-generated lineplot tasks."""
+    _ = (pfld, options, selection_spec, collapse_by_coord)
+    raise NotImplementedError("Lineplot rendering is not implemented yet")
 
 
 def auto_contour_title(

@@ -9,6 +9,7 @@ from xconv2.xconv_cf_interface import (
     field_info,
     get_data_for_plotting,
     run_contour_plot,
+    run_line_plot,
 )
 
 cf = pytest.importorskip("cf")
@@ -255,3 +256,13 @@ def test_auto_contour_title_prefers_cell_method_for_collapse(
         collapse_by_coord={"time": "mean"},
     )
     assert title == "time: mean"
+
+
+def test_run_line_plot_placeholder_raises_not_implemented() -> None:
+    with pytest.raises(NotImplementedError):
+        run_line_plot(
+            pfld=object(),
+            options={"mode": "default"},
+            selection_spec={"time": ("1", "2")},
+            collapse_by_coord={},
+        )
