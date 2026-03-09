@@ -131,6 +131,7 @@ class _FakeCFPlot:
     def __init__(self) -> None:
         self.levs_calls: list[dict[str, object]] = []
         self.con_calls: list[dict[str, object]] = []
+        self.lineplot_calls: list[dict[str, object]] = []
         self.cscale_calls: list[dict[str, object]] = []
         self.gopen_calls: list[str] = []
         self.gclose_calls = 0
@@ -140,6 +141,9 @@ class _FakeCFPlot:
 
     def con(self, _field: object, **kwargs: object) -> None:
         self.con_calls.append(kwargs)
+
+    def lineplot(self, _field: object, **kwargs: object) -> None:
+        self.lineplot_calls.append(kwargs)
 
     def cscale(self, **kwargs: object) -> None:
         self.cscale_calls.append(kwargs)
@@ -258,11 +262,30 @@ def test_auto_contour_title_prefers_cell_method_for_collapse(
     assert title == "time: mean"
 
 
-def test_run_line_plot_placeholder_raises_not_implemented() -> None:
-    with pytest.raises(NotImplementedError):
+def test_run_line_plot_uses_canonical_axes_and_wraps_file_output() -> None:
+   
+
+    import cf
+    
+    field_eg = cf.example_fields(7)[0].collapse("X: mean").squeeze()
+    cfp = _FakeCFPlot()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(cf_interface, "cfp", cfp)
+    monkeypatch.setattr(cf_interface, "cf",cf)
+
+    print(field_eg)
+
+    try:
         run_line_plot(
-            pfld=object(),
-            options={"mode": "default"},
+            pfld=field_eg,
+            options={"filename": "/tmp/line.png", "title": "line"},
             selection_spec={"time": ("1", "2")},
             collapse_by_coord={},
         )
+    finally:
+        monkeypatch.undo()
+
+    assert cfp.gopen_calls == ["/tmp/line.png"]
+    assert cfp.gclose_calls == 1
+    assert len(cfp.lineplot_calls) == 4
+ 
