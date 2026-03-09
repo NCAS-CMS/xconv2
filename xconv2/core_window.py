@@ -204,13 +204,30 @@ class CFVCore(QMainWindow):
         heading.setWordWrap(True)
 
         header_row = QHBoxLayout()
-        header_row.addWidget(
+        left_logo_column = QVBoxLayout()
+        left_logo_column.setContentsMargins(0, 0, 0, 0)
+        left_logo_column.setSpacing(6)
+        left_logo_column.addWidget(
+            self._build_about_logo_label(
+                "Under construction",
+                ["under-construction.svg"],
+                56,
+            ),
+            alignment=Qt.AlignHCenter,
+        )
+        left_logo_column.addWidget(
             self._build_about_logo_label(
                 "cf-python",
                 ["cf-logo.png", "cf-logo.svg", "cf-python-logo.png", "cf-python-logo.svg"],
                 112,
-            )
+            ),
+            alignment=Qt.AlignHCenter,
         )
+        left_logo_column.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+        left_logo_widget = QWidget()
+        left_logo_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        left_logo_widget.setLayout(left_logo_column)
+        header_row.addWidget(left_logo_widget)
         header_row.addWidget(heading, 1)
 
         logos_row = QHBoxLayout()
