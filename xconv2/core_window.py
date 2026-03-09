@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import __version__
 from .ui.contour_options_controller import ContourOptionsController
 from .ui.field_metadata_controller import FieldMetadataController
 from .ui.menu_controller import MenuController
@@ -65,7 +66,7 @@ class CFVCore(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
 
-        self.base_window_title = "xconv2"
+        self.base_window_title = f"xconv2 ({__version__})"
         self.current_file_path: str | None = None
         self.settings_path = Path.home() / ".config" / "cfview" / "settings.json"
         self.recent_log_path = Path.home() / ".cache" / "cfview" / "last_opened.log"
@@ -182,13 +183,13 @@ class CFVCore(QMainWindow):
     def _show_about_dialog(self) -> None:
         """Show application identity and runtime details."""
         dialog = QDialog(self)
-        dialog.setWindowTitle("About xconv")
+        dialog.setWindowTitle(f"About xconv2 ({__version__})")
         dialog.resize(560, 320)
 
         layout = QVBoxLayout(dialog)
 
         heading = QLabel(
-            "<h2 style='margin:0;'>xconv2</h2>"
+            f"<h2 style='margin:0;'>xconv2 ({__version__})</h2>"
             "<p style='margin-top:8px;'>"
             "High-performance data viewer and simple data converter."
             "</p>"

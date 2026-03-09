@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cfv2"
-version = "1.0beta"
+version = "0.1.0a1"
 description = "High-performance data viewer and simple data converter"
 requires-python = ">=3.12"
 dependencies = [
