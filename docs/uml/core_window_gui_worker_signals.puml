@@ -1,0 +1,89 @@
+@startuml CoreWindowPhase3GuiWorkerSignals
+title GUI <-> Worker Signals and Message Protocol
+
+actor User
+participant "CFVCore UI" as GUI
+participant "CFVMain\n(QProcess wrapper)" as Main
+participant "QProcess worker" as Proc
+participant "cf-worker\n(worker.py main loop)" as Worker
+
+== Worker lifecycle wiring ==
+Main -> Proc : readyReadStandardOutput.connect(handle_worker_output)
+Main -> Proc : readyReadStandardError.connect(handle_worker_error)
+Main -> Proc : errorOccurred.connect(handle_worker_process_error)
+Main -> Proc : finished.connect(handle_worker_finished)
+Main -> Proc : start("cf-worker")
+
+== Open file metadata flow ==
+User -> GUI : Open file
+GUI -> Main : on_file_selected(path)
+Main -> Proc : write(task + "#END_TASK\\n")
+Proc -> Worker : stdin task block
+Worker -> Proc : stdout "METADATA:<b64pickle>"
+Proc -> Main : readyReadStandardOutput
+Main -> Main : handle_worker_output() -> populate_field_list(...)
+Worker -> Proc : stdout "STATUS:Task Complete"
+Proc -> Main : readyReadStandardOutput
+
+== Field coordinate flow ==
+User -> GUI : Click field
+GUI -> Main : on_field_clicked(item)
+Main -> Main : _reset_ui_for_new_field_selection()
+Main -> GUI : _set_plot_loading(False)
+Main -> GUI : _clear_plot_canvas("Waiting for data...")
+Main -> GUI : _show_status_message("Task Complete")
+Main -> Proc : write(coordinate_list + "#END_TASK\\n")
+Proc -> Worker : stdin task block
+Worker -> Proc : stdout "COORD:<b64pickle>"
+Proc -> Main : readyReadStandardOutput
+Main -> Main : handle_worker_output() -> build_dynamic_sliders(...)
+Worker -> Proc : stdout "STATUS:Error - <stale previous task>"
+Proc -> Main : readyReadStandardOutput
+Main -> Main : handle_worker_output() -> ignore stale error while suppression enabled
+
+== Plot update flow ==
+User -> GUI : Click Plot
+GUI -> Main : _request_plot_update()
+Main -> GUI : _set_plot_loading(True, "Rendering plot...")
+Main -> Proc : write(plot_from_selection + "#END_TASK\\n")
+Proc -> Worker : stdin task block
+Worker -> Proc : stdout "IMG_READY:<b64pickle_png_bytes>"
+Proc -> Main : readyReadStandardOutput
+Main -> Main : handle_worker_output() -> set_plot_image(...)
+Main -> GUI : _set_plot_loading(False)
+Worker -> Proc : stdout "STATUS:Task Complete"
+Proc -> Main : readyReadStandardOutput
+
+== Plot error flow ==
+Worker -> Proc : stdout "STATUS:Error - <message>"
+Proc -> Main : readyReadStandardOutput
+Main -> GUI : _show_status_message(..., is_error=True)
+Main -> GUI : _clear_plot_canvas("Plot failed.")
+Main -> GUI : _set_plot_loading(False)
+
+== Options context flow (contour) ==
+User -> GUI : Click Options
+GUI -> Main : _request_plot_options()
+Main -> Proc : write(contour_range_from_selection + "#END_TASK\\n")
+Proc -> Worker : stdin task block
+Worker -> Proc : stdout "CONTOUR_RANGE:<b64pickle>"
+Proc -> Main : readyReadStandardOutput
+Main -> GUI : _show_contour_options_dialog(min,max,title)
+GUI -> Main : _request_plot_update() (dialog accepted)
+Main -> GUI : _set_plot_loading(True, "Rendering plot...")
+
+== Error/termination signals ==
+Worker -> Proc : stderr traceback/log lines
+Proc -> Main : readyReadStandardError
+Main -> Main : handle_worker_error()
+Proc -> Main : errorOccurred(ProcessError)
+Main -> Main : handle_worker_process_error(...)
+Main -> GUI : _show_status_message(..., is_error=True)
+Main -> GUI : _clear_plot_canvas(...)
+Main -> GUI : _set_plot_loading(False)
+Proc -> Main : finished(exit_code, exit_status)
+Main -> Main : handle_worker_finished(...)
+Main -> GUI : _show_status_message(..., is_error=True)
+Main -> GUI : _clear_plot_canvas(...)
+Main -> GUI : _set_plot_loading(False)
+@enduml

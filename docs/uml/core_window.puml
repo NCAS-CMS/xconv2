@@ -1,0 +1,28 @@
+@startuml CoreWindowPhase3Class
+skinparam classAttributeIconSize 0
+
+package "xconv2" {
+  class CFVCore
+}
+
+package "xconv2.main_window" {
+  class CFVMain
+}
+
+package "xconv2.ui" {
+  class MenuController
+  class SettingsStore
+  class SelectionController
+  class FieldMetadataController
+  class PlotViewController
+  class ContourOptionsController
+}
+
+CFVMain --|> CFVCore
+CFVCore o-- MenuController : menu\norchestration
+CFVCore o-- SettingsStore : settings\npersistence
+CFVCore o-- SelectionController : slider\ncollapse state
+CFVCore o-- FieldMetadataController : field\nproperties UI
+CFVCore o-- PlotViewController : plot panel\n+ save actions
+CFVCore o-- ContourOptionsController : contour\ndialogs
+@enduml

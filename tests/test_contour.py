@@ -6,7 +6,7 @@ import numpy as np
 
 from xconv2.cf_templates import contour_range_from_selection, plot_from_selection
 import xconv2.xconv_cf_interface as cf_interface
-from xconv2.xconv_cf_interface import get_data_for_plotting, run_contour_plot
+from xconv2.xconv_cf_interface import auto_contour_title, get_data_for_plotting, run_contour_plot
 
 
 @dataclass
@@ -25,6 +25,9 @@ class _FakeField:
     def collapse(self, method: str, axes: str, weights: bool = False) -> "_FakeField":
         self.collapse_calls.append((method, axes, weights))
         return self
+
+    def cell_methods(self) -> None:
+        return None
 
 
 class _FakeCF:
@@ -96,6 +99,7 @@ def _run_generated(
         "np": np,
         "get_data_for_plotting": get_data_for_plotting,
         "run_contour_plot": run_contour_plot,
+        "auto_contour_title": auto_contour_title,
         "send_to_gui": lambda prefix, payload=None: messages.append((prefix, payload)),
     }
     try:
@@ -212,4 +216,6 @@ def test_contour_range_from_selection_emits_min_max_payload() -> None:
     assert messages
     prefix, payload = messages[-1]
     assert prefix == "CONTOUR_RANGE"
-    assert payload == {"min": 0.0, "max": 3.0}
+    assert payload["min"] == 0.0
+    assert payload["max"] == 3.0
+    assert isinstance(payload.get("suggested_title"), str)

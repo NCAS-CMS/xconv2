@@ -1,0 +1,31 @@
+@startuml CoreWindowPhase3OptionsSequence
+actor User
+participant CFVCore
+participant WorkerBridge as CFVMain
+participant Worker
+participant ContourOptionsController as OptionsCtrl
+
+User -> CFVCore : click Options
+CFVCore -> WorkerBridge : _request_plot_options()
+WorkerBridge -> Worker : contour_range_from_selection
+Worker --> WorkerBridge : CONTOUR_RANGE(min,max,suggested_title)
+WorkerBridge -> CFVCore : _show_contour_options_dialog(...)
+CFVCore -> OptionsCtrl : show_contour_options_dialog(...)
+OptionsCtrl --> CFVCore : updated plot_options_by_kind
+CFVCore -> WorkerBridge : _request_plot_update()
+WorkerBridge -> CFVCore : _set_plot_loading(True, "Rendering plot...")
+WorkerBridge -> Worker : plot_from_selection
+
+alt Successful render
+	Worker --> WorkerBridge : IMG_READY(png bytes)
+	WorkerBridge -> CFVCore : set_plot_image(...)
+	WorkerBridge -> CFVCore : _set_plot_loading(False)
+	Worker --> WorkerBridge : STATUS:Task Complete
+	WorkerBridge -> CFVCore : _show_status_message("Task Complete")
+else Plot error
+	Worker --> WorkerBridge : STATUS:Error - <message>
+	WorkerBridge -> CFVCore : _show_status_message(..., is_error=True)
+	WorkerBridge -> CFVCore : _clear_plot_canvas("Plot failed.")
+	WorkerBridge -> CFVCore : _set_plot_loading(False)
+end
+@enduml

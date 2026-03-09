@@ -33,6 +33,9 @@ class CFVMain(CFVCore):
 
     def __init__(self) -> None:
         super().__init__()
+        self._plot_request_in_flight = False
+        self._plot_request_expects_image = False
+        self._suppress_stale_error_status = False
 
         self.worker = QProcess()
         self.worker.readyReadStandardOutput.connect(self.handle_worker_output)
@@ -50,12 +53,22 @@ class CFVMain(CFVCore):
     def on_field_clicked(self, item: QListWidgetItem) -> None:
         """Show selection details and request slider coordinates for the field."""
         super().on_field_clicked(item)
+        self._reset_ui_for_new_field_selection()
 
         field_index = self.field_list_widget.row(item)
         if field_index < 0:
             return
 
-        self._request_coordinates_for_field(field_index)
+        self._request_coordinates_for_field(field_index, show_status=False)
+
+    def _reset_ui_for_new_field_selection(self) -> None:
+        """Clear stale error/loading UI state before handling a fresh field selection."""
+        self._plot_request_in_flight = False
+        self._plot_request_expects_image = False
+        self._suppress_stale_error_status = True
+        self._set_plot_loading(False)
+        self._clear_plot_canvas("Waiting for data...")
+        self._show_status_message("Task Complete")
 
     def handle_worker_output(self) -> None:
         """Process worker stdout messages and route updates to UI."""
@@ -67,7 +80,37 @@ class CFVMain(CFVCore):
             logger.debug("Worker stdout line: %s", line)
 
             if line.startswith("STATUS:"):
-                self.status.showMessage(line.replace("STATUS:", ""))
+                status_text = line.split(":", 1)[1]
+                is_error_status = status_text.startswith("Error -")
+
+                # Ignore delayed worker errors from a previous task right after field reselection.
+                if self._suppress_stale_error_status and is_error_status and not self._plot_request_in_flight:
+                    logger.debug("Ignoring stale worker error status after field reset: %s", status_text)
+                    continue
+
+                self._show_status_message(
+                    status_text,
+                    is_error=is_error_status,
+                )
+
+                is_plot_error = self._plot_request_in_flight and is_error_status
+                should_finish = False
+                if is_plot_error:
+                    should_finish = True
+                elif (
+                    self._plot_request_in_flight
+                    and status_text == "Task Complete"
+                    and not self._plot_request_expects_image
+                ):
+                    should_finish = True
+
+                if is_plot_error:
+                    self._clear_plot_canvas("Plot failed.")
+
+                if should_finish:
+                    self._plot_request_in_flight = False
+                    self._plot_request_expects_image = False
+                    self._set_plot_loading(False)
 
             elif line.startswith("METADATA:"):
                 raw_payload = line.split(":", 1)[1]
@@ -86,12 +129,20 @@ class CFVMain(CFVCore):
                 payload = pickle.loads(base64.b64decode(raw_payload))
                 if isinstance(payload, bytes):
                     self.set_plot_image(payload)
-                    self.status.showMessage("Plot Updated.")
+                    self._show_status_message("Plot Updated.")
+                    if self._plot_request_in_flight:
+                        self._plot_request_in_flight = False
+                        self._plot_request_expects_image = False
+                        self._set_plot_loading(False)
                 else:
                     logger.warning("Unexpected IMG_READY payload type: %s", type(payload).__name__)
 
             elif line == "IMG_READY":
-                self.status.showMessage("Plot Updated.")
+                self._show_status_message("Plot Updated.")
+                if self._plot_request_in_flight:
+                    self._plot_request_in_flight = False
+                    self._plot_request_expects_image = False
+                    self._set_plot_loading(False)
 
             elif line.startswith("COORD:"):
                 raw_payload = line.split(":", 1)[1]
@@ -149,14 +200,30 @@ class CFVMain(CFVCore):
     def handle_worker_process_error(self, process_error: QProcess.ProcessError) -> None:
         """Capture QProcess-level failures, such as start or crash issues."""
         logger.error("Worker process error: %s", process_error)
+        self._show_status_message(f"Worker process error: {process_error}", is_error=True)
+        if self._plot_request_in_flight:
+            self._plot_request_in_flight = False
+            self._plot_request_expects_image = False
+            self._set_plot_loading(False)
+            self._clear_plot_canvas("Plot failed because the worker encountered an error.")
 
     def handle_worker_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
         """Capture worker shutdown information."""
         logger.warning("Worker finished with exit_code=%s exit_status=%s", exit_code, exit_status)
+        if exit_code != 0:
+            self._show_status_message(
+                f"Worker stopped unexpectedly (exit_code={exit_code}).",
+                is_error=True,
+            )
+        if self._plot_request_in_flight:
+            self._plot_request_in_flight = False
+            self._plot_request_expects_image = False
+            self._set_plot_loading(False)
+            self._clear_plot_canvas("Plot failed because the worker stopped.")
 
     def _load_selected_file(self, file_path: str) -> None:
         """Load selected file in worker and publish field metadata."""
-        self.status.showMessage(f"Loading file: {file_path}")
+        self._show_status_message(f"Loading file: {file_path}")
         logger.info("Loading file in worker: %s", file_path)
 
         code = (
@@ -168,9 +235,10 @@ class CFVMain(CFVCore):
         )
         self._send_worker_task(code)
 
-    def _request_coordinates_for_field(self, index: int) -> None:
+    def _request_coordinates_for_field(self, index: int, show_status: bool = True) -> None:
         """Request coordinate arrays for a selected field index."""
-        self.status.showMessage(f"Loading coordinates for field index {index}...")
+        if show_status:
+            self._show_status_message(f"Loading coordinates for field index {index}...")
         self._send_worker_task(coordinate_list(index))
 
     def _normalize_coordinate_metadata(self, payload: object) -> dict[str, list[object]]:
@@ -229,7 +297,7 @@ class CFVMain(CFVCore):
 
         selections, collapse_by_coord, plot_kind = context
         if plot_kind != "contour":
-            self.status.showMessage(f"No options dialog available for plot type: {plot_kind}")
+            self._show_status_message(f"No options dialog available for plot type: {plot_kind}")
             return
 
         code = contour_range_from_selection(selections, collapse_by_coord)
@@ -295,7 +363,7 @@ class CFVMain(CFVCore):
         try:
             cmd = plot_from_selection(selections, collapse_by_coord, plot_kind, plot_options)
         except (ValueError, NotImplementedError) as exc:
-            self.status.showMessage(f"Plot request unavailable: {exc}")
+            self._show_status_message(f"Plot request unavailable: {exc}", is_error=True)
             logger.warning("Plot template unavailable for kind=%s: %s", plot_kind, exc)
             return
 
@@ -311,8 +379,20 @@ class CFVMain(CFVCore):
             len(selections),
             len(collapse_by_coord),
             bool(save_target),
-            bool(plot_options),
+            bool(save_plot_path),
         )
+
+        if save_plot_path:
+            loading_message = "Rendering and saving plot..."
+        elif save_code_path:
+            loading_message = "Rendering plot and saving code..."
+        else:
+            loading_message = "Rendering plot..."
+
+        self._plot_request_in_flight = True
+        self._plot_request_expects_image = emit_image
+        self._suppress_stale_error_status = False
+        self._set_plot_loading(True, loading_message)
         self._send_worker_task(cmd, save_code_path=save_target, emit_image=emit_image)
 
     def _send_worker_task(
