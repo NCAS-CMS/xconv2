@@ -189,7 +189,7 @@ class CFVCore(QMainWindow):
         layout = QVBoxLayout(dialog)
 
         heading = QLabel(
-            f"<h2 style='margin:0;'>xconv2 ({__version__})</h2>"
+            f"<h2 style='margin:0;'>xconv2</h2>"
             "<p style='margin-top:8px;'>"
             "High-performance data viewer and simple data converter."
             "</p>"
