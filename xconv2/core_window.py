@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStatusBar,
-        QSpinBox,
+    QSpinBox,
     QStyle,
     QSystemTrayIcon,
     QVBoxLayout,
