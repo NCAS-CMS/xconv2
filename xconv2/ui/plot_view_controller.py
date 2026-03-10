@@ -9,6 +9,7 @@ from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -137,6 +138,10 @@ class PlotViewController:
 
         summary_row = QHBoxLayout()
         self.host.plot_summary_label = QLabel("Open a field to inspect plot options.")
+        self.host.plot_type_combo = QComboBox()
+        self.host.plot_type_combo.setMinimumWidth(130)
+        self.host.plot_type_combo.setEnabled(False)
+        self.host.plot_type_combo.currentIndexChanged.connect(self.on_plot_type_changed)
         self.host.plot_button = QPushButton("Plot")
         self.host.plot_button.setEnabled(False)
         self.host.plot_button.clicked.connect(self.on_plot_button_clicked)
@@ -151,6 +156,7 @@ class PlotViewController:
         self.host.save_plot_button.clicked.connect(self.on_save_plot_button_clicked)
 
         summary_row.addWidget(self.host.plot_summary_label, 1)
+        summary_row.addWidget(self.host.plot_type_combo)
         summary_row.addWidget(self.host.plot_button)
         summary_row.addWidget(self.host.options_button)
         summary_row.addWidget(self.host.save_code_button)
@@ -159,6 +165,37 @@ class PlotViewController:
         layout.addWidget(plot_stack_container, 1)
         layout.addLayout(summary_row)
         return container
+
+    def set_plot_type_options(self, options: list[str], selected: str | None) -> None:
+        """Populate the plot-type selector from available plot kinds."""
+        combo = getattr(self.host, "plot_type_combo", None)
+        if combo is None:
+            return
+
+        combo.blockSignals(True)
+        combo.clear()
+        for kind in options:
+            combo.addItem(kind.title(), kind)
+
+        if options:
+            combo.setEnabled(True)
+            selected_kind = selected if selected in options else options[0]
+            selected_index = combo.findData(selected_kind)
+            combo.setCurrentIndex(selected_index if selected_index >= 0 else 0)
+        else:
+            combo.setEnabled(False)
+
+        combo.blockSignals(False)
+
+    def on_plot_type_changed(self) -> None:
+        """Persist selected plot type and refresh context-sensitive actions."""
+        combo = getattr(self.host, "plot_type_combo", None)
+        if combo is None:
+            return
+        selected_kind = combo.currentData()
+        if isinstance(selected_kind, str):
+            self.host.selected_plot_kind = selected_kind
+            self.host.selection_controller.refresh_plot_summary()
 
     def set_plot_loading(self, is_loading: bool, message: str = "Rendering plot...") -> None:
         """Show or hide an inline loading overlay while worker plot tasks run."""

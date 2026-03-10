@@ -331,12 +331,20 @@ class CFVMain(CFVCore):
                 dims.append(1 if is_singleton else 2)
 
         varying_dims = sum(1 for dim in dims if dim != 1)
-        if varying_dims == 1:
+        available_kinds = getattr(self, "available_plot_kinds", [])
+        selected_kind = getattr(self, "selected_plot_kind", None)
+
+        if varying_dims == 0:
+            plot_kind = "collapsed"
+        elif varying_dims > 2:
+            plot_kind = "unsupported"
+        elif isinstance(selected_kind, str) and selected_kind in available_kinds:
+            plot_kind = selected_kind
+        elif varying_dims == 1:
             plot_kind = "lineplot"
         elif varying_dims == 2:
+            # Keep contour as a sensible default in 2D when no explicit selection exists.
             plot_kind = "contour"
-        elif varying_dims == 0:
-            plot_kind = "collapsed"
         else:
             plot_kind = "unsupported"
 

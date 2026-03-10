@@ -22,9 +22,14 @@ import cfplot as cfp
 from matplotlib import pyplot as plt
 
 from . import xconv_cf_interface
+from . import lineplot as xconv_lineplot
 
 # cf-plot may still call show(); in Agg mode this is non-interactive and noisy.
 plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
+plt.ioff()
+# LinePlot imports pyplot in its own module namespace; disable there too.
+xconv_lineplot.plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
+xconv_lineplot.plt.ioff()
 warnings.filterwarnings(
     "ignore",
     message="FigureCanvasAgg is non-interactive, and thus cannot be shown",
@@ -103,24 +108,73 @@ def _build_saved_plot_script(exec_code: str) -> str:
         "import cf",
         "import cfplot as cfp",
         "from matplotlib import pyplot as plt",
-        "",
-        "# Inlined helpers from xconv2.xconv_cf_interface for standalone execution.",
-        "",
     ]
 
-    needed_helpers = [
-        name for name in INTERFACE_EXPORTS if re.search(rf"\b{re.escape(name)}\b", exec_code)
-    ]
-
-    for name in needed_helpers:
+    helper_sources: dict[str, str] = {}
+    for name in INTERFACE_EXPORTS:
         obj = getattr(xconv_cf_interface, name, None)
         if obj is None or not callable(obj):
             continue
         try:
-            lines.append(textwrap.dedent(inspect.getsource(obj)).rstrip())
-            lines.append("")
+            helper_sources[name] = textwrap.dedent(inspect.getsource(obj)).rstrip()
         except (OSError, TypeError):
             logger.exception("Unable to inline helper source for %s", name)
+
+    needed_helpers: set[str] = {
+        name for name in helper_sources if re.search(rf"\b{re.escape(name)}\b", exec_code)
+    }
+
+    # Include transitive helper references so inlined functions stay runnable.
+    queue = list(needed_helpers)
+    while queue:
+        name = queue.pop()
+        source = helper_sources.get(name, "")
+        for candidate in helper_sources:
+            if candidate == name or candidate in needed_helpers:
+                continue
+            if re.search(rf"\b{re.escape(candidate)}\b", source):
+                needed_helpers.add(candidate)
+                queue.append(candidate)
+
+    include_lineplot_class = (
+        "run_line_plot" in needed_helpers
+        or bool(re.search(r"\bLinePlot\b", exec_code))
+    )
+    if include_lineplot_class:
+        lines.extend([
+            "import numpy as np",
+            "import pandas as pd",
+            "",
+            "# Inlined LinePlot class from xconv2.lineplot for standalone execution.",
+            "",
+        ])
+        try:
+            lines.append(textwrap.dedent(inspect.getsource(xconv_lineplot.LinePlot)).rstrip())
+            lines.append("")
+        except (OSError, TypeError):
+            logger.exception("Unable to inline helper source for LinePlot")
+            lines.append("# NOTE: helper source unavailable for LinePlot")
+            lines.append("")
+
+    lines.extend([
+        "",
+        "# Inlined helpers from xconv2.xconv_cf_interface for standalone execution.",
+        "",
+    ])
+
+    for name in INTERFACE_EXPORTS:
+        if name not in needed_helpers:
+            continue
+        source = helper_sources.get(name)
+        if source is None:
+            lines.append(f"# NOTE: helper source unavailable for {name}")
+            lines.append("")
+            continue
+        try:
+            lines.append(source)
+            lines.append("")
+        except Exception:
+            logger.exception("Unable to append helper source for %s", name)
             lines.append(f"# NOTE: helper source unavailable for {name}")
             lines.append("")
 
