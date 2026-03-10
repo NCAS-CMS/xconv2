@@ -41,6 +41,15 @@ warnings.filterwarnings(
     category=UserWarning,
 )
 
+# Ensure cf-plot never tries to open an external viewer (e.g. ImageMagick
+# display) when running worker-generated contour plots.
+try:
+    cfp.setvars(viewer=None)
+    cfp.plotvars.viewer = None
+except Exception:
+    logger = logging.getLogger(__name__)
+    logger.exception("Failed to set cfplot viewer=None in worker")
+
 
 logger = logging.getLogger(__name__)
 SAVE_TASK_HEADER = "#SAVE_TASK_CODE_PATH_B64:"

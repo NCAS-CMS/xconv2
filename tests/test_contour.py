@@ -53,7 +53,7 @@ class _FakeCFPlot:
     levs_calls: list[dict[str, object]] = field(default_factory=list)
     con_calls: list[dict[str, object]] = field(default_factory=list)
     cscale_calls: list[dict[str, object]] = field(default_factory=list)
-    gopen_calls: list[str] = field(default_factory=list)
+    gopen_calls: list[dict[str, object]] = field(default_factory=list)
     gclose_calls: int = 0
 
     def levs(self, **kwargs: object) -> None:
@@ -65,8 +65,10 @@ class _FakeCFPlot:
     def cscale(self, **kwargs: object) -> None:
         self.cscale_calls.append(kwargs)
 
-    def gopen(self, file: str) -> None:
-        self.gopen_calls.append(file)
+    def gopen(self, file: str = "cfplot.png", **kwargs: object) -> None:
+        payload: dict[str, object] = {"file": file}
+        payload.update(kwargs)
+        self.gopen_calls.append(payload)
 
     def gclose(self) -> None:
         self.gclose_calls += 1
@@ -153,6 +155,7 @@ def test_plot_from_selection_contour_auto_options_executes_and_calls_con() -> No
     assert fld.collapse_calls == [("time: mean", True)]
     assert cfp.levs_calls
     assert cfp.cscale_calls == [{"scale": "magma"}]
+    assert cfp.gopen_calls == [{"file": "cfplot.png", "user_plot": 1}]
     assert cfp.con_calls
 
 
@@ -181,7 +184,7 @@ def test_plot_from_selection_contour_explicit_levels_and_save_file() -> None:
     cfp = _FakeCFPlot()
     messages = _run_generated(code, fld, cfp)
 
-    assert cfp.gopen_calls == [output_file]
+    assert cfp.gopen_calls == [{"file": output_file}]
     assert cfp.gclose_calls == 1
     assert cfp.cscale_calls == [{}]
     assert cfp.con_calls

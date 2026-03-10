@@ -138,7 +138,7 @@ class _FakeCFPlot:
         self.con_calls: list[dict[str, object]] = []
         self.lineplot_calls: list[dict[str, object]] = []
         self.cscale_calls: list[dict[str, object]] = []
-        self.gopen_calls: list[str] = []
+        self.gopen_calls: list[dict[str, object]] = []
         self.gclose_calls = 0
 
     def levs(self, **kwargs: object) -> None:
@@ -153,8 +153,10 @@ class _FakeCFPlot:
     def cscale(self, **kwargs: object) -> None:
         self.cscale_calls.append(kwargs)
 
-    def gopen(self, file: str) -> None:
-        self.gopen_calls.append(file)
+    def gopen(self, file: str = "cfplot.png", **kwargs: object) -> None:
+        payload: dict[str, object] = {"file": file}
+        payload.update(kwargs)
+        self.gopen_calls.append(payload)
 
     def gclose(self) -> None:
         self.gclose_calls += 1
@@ -198,7 +200,7 @@ def test_run_contour_plot_applies_levels_annotations_and_save(
     )
 
     assert cfp.cscale_calls == [{"scale": "magma"}]
-    assert cfp.gopen_calls == ["/tmp/mock.png"]
+    assert cfp.gopen_calls == [{"file": "/tmp/mock.png"}]
     assert cfp.levs_calls == [{"manual": [-1.0, 0.0, 1.0]}]
     assert cfp.con_calls
     assert cfp.gclose_calls == 1
@@ -221,6 +223,7 @@ def test_run_contour_plot_sets_title_from_singleton_selection(
         collapse_by_coord={},
     )
 
+    assert cfp.gopen_calls == [{"file": "cfplot.png", "user_plot": 1}]
     assert cfp.con_calls
     assert cfp.con_calls[-1]["title"] == "time=2000-01-01"
 
