@@ -102,3 +102,25 @@ def test_saved_contour_script_executes_without_missing_inlined_helpers(monkeypat
     exec(script, {})
 
     assert contour_calls["count"] >= 1
+
+
+def test_build_saved_plot_script_inlines_lineplot_class_for_line_tasks(monkeypatch) -> None:
+    monkeypatch.setitem(worker.worker_globals, "_cfview_file_path", "/tmp/in.nc")
+    monkeypatch.setitem(worker.worker_globals, "_cfview_field_index", 0)
+
+    exec_code = "\n".join(
+        [
+            "selection_spec = {'time': ('1', '2')}",
+            "collapse_by_coord = {}",
+            "pfld = get_data_for_plotting(fld, selection_spec, collapse_by_coord)",
+            "lineplot_options = {'title': 'line'}",
+            "run_line_plot(pfld=pfld, options=lineplot_options, selection_spec=selection_spec, collapse_by_coord=collapse_by_coord)",
+        ]
+    )
+
+    script = worker._build_saved_plot_script(exec_code)
+
+    assert "import numpy as np" in script
+    assert "import pandas as pd" in script
+    assert "class LinePlot:" in script
+    assert "def run_line_plot(" in script

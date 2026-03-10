@@ -22,6 +22,7 @@ import cfplot as cfp
 from matplotlib import pyplot as plt
 
 from . import xconv_cf_interface
+from . import lineplot as xconv_lineplot
 
 # cf-plot may still call show(); in Agg mode this is non-interactive and noisy.
 plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
@@ -103,9 +104,6 @@ def _build_saved_plot_script(exec_code: str) -> str:
         "import cf",
         "import cfplot as cfp",
         "from matplotlib import pyplot as plt",
-        "",
-        "# Inlined helpers from xconv2.xconv_cf_interface for standalone execution.",
-        "",
     ]
 
     helper_sources: dict[str, str] = {}
@@ -133,6 +131,32 @@ def _build_saved_plot_script(exec_code: str) -> str:
             if re.search(rf"\b{re.escape(candidate)}\b", source):
                 needed_helpers.add(candidate)
                 queue.append(candidate)
+
+    include_lineplot_class = (
+        "run_line_plot" in needed_helpers
+        or bool(re.search(r"\bLinePlot\b", exec_code))
+    )
+    if include_lineplot_class:
+        lines.extend([
+            "import numpy as np",
+            "import pandas as pd",
+            "",
+            "# Inlined LinePlot class from xconv2.lineplot for standalone execution.",
+            "",
+        ])
+        try:
+            lines.append(textwrap.dedent(inspect.getsource(xconv_lineplot.LinePlot)).rstrip())
+            lines.append("")
+        except (OSError, TypeError):
+            logger.exception("Unable to inline helper source for LinePlot")
+            lines.append("# NOTE: helper source unavailable for LinePlot")
+            lines.append("")
+
+    lines.extend([
+        "",
+        "# Inlined helpers from xconv2.xconv_cf_interface for standalone execution.",
+        "",
+    ])
 
     for name in INTERFACE_EXPORTS:
         if name not in needed_helpers:

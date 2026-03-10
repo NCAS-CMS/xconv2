@@ -263,17 +263,20 @@ def test_auto_contour_title_prefers_cell_method_for_collapse(
 
 
 def test_run_line_plot_uses_canonical_axes_and_wraps_file_output() -> None:
-   
-
-    import cf
-    
-    field_eg = cf.example_fields(7)[0].collapse("X: mean").squeeze()
-    cfp = _FakeCFPlot()
+    field_eg = object()
     monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(cf_interface, "cfp", cfp)
-    monkeypatch.setattr(cf_interface, "cf",cf)
 
-    print(field_eg)
+    captured: dict[str, object] = {}
+
+    class _FakeLinePlot:
+        def __init__(self, pfld: object, options: dict[str, object] | None) -> None:
+            captured["pfld"] = pfld
+            captured["options"] = options
+
+        def render(self) -> None:
+            captured["rendered"] = True
+
+    monkeypatch.setattr(cf_interface, "LinePlot", _FakeLinePlot)
 
     try:
         run_line_plot(
@@ -285,7 +288,7 @@ def test_run_line_plot_uses_canonical_axes_and_wraps_file_output() -> None:
     finally:
         monkeypatch.undo()
 
-    assert cfp.gopen_calls == ["/tmp/line.png"]
-    assert cfp.gclose_calls == 1
-    assert len(cfp.lineplot_calls) == 4
+    assert captured["pfld"] is field_eg
+    assert captured["options"] == {"filename": "/tmp/line.png", "title": "line"}
+    assert captured["rendered"] is True
  

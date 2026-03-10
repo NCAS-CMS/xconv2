@@ -8,12 +8,12 @@ code snippets in ``cf_templates.py`` can call them directly.
 from __future__ import annotations
 
 from collections.abc import Callable
-from itertools import product
 
 import cf
 import cfplot as cfp
 from matplotlib import pyplot as plt
 from xconv2.cell_method_handler import cell_methods_string_from_field
+from xconv2.lineplot import LinePlot
 
 
 __all__ = [
@@ -27,18 +27,6 @@ __all__ = [
     "run_contour_plot",
     "run_line_plot",
 ]
-
-
-class DebugFile:
-    def __init__(self, filename: str) -> None:
-        self.filename = filename
-
-    def write(self, data: str) -> None:
-        with open(self.filename, "a") as f:
-            f.write(data)
-
-
-        
 
 
 def field_info(fields: object) -> list[str]:
@@ -442,87 +430,27 @@ def run_contour_plot(
         cfp.gclose()
 
 
+
+
+
+    
+
+
+
+
+
+
+
 def run_line_plot(
     pfld: object,
     options: dict[str, object] | None,
     selection_spec: dict[str, tuple[object, object]] | None = None,
     collapse_by_coord: dict[str, str] | None = None,
 ) -> None:
-    """
-    Render line plots, using canonical CF axis metadata when available.
-    We default to using the first available axis in the order of T, X, Y, Z as the x-axis,
-    and use the other axes for iteration if they have more than one value. 
-    If no canonical axes are found, we use the first axis with more than one value as the x-axis 
-    and generate a line plot for each member of the other axis. 
-    """
+    """Render line plots via the dedicated LinePlot helper class."""
     _ = (selection_spec, collapse_by_coord)
-    options = options or {}
-
-    filename = options.get("filename")
-
-    lineplot_kwargs: dict[str, object] = {}
-    for key in (
-        "title",
-        "color",
-        "linewidth",
-        "linestyle",
-        "marker",
-        "markersize",
-        "xlabel",
-        "ylabel",
-        "xunits",
-        "yunits",
-        "label",
-    ):
-        value = options.get(key)
-        if value is not None:
-            lineplot_kwargs[key] = value
-
-    def get_axis_choice(field: object) -> object:
-        """Determine the most appropriate axis to use line-plot iteration"""
-        coordinates = field.dimension_coordinates(todict=True)
-        for axis in 'TZYX':
-            for key, c in coordinates.items():
-                if c.size > 1 and getattr(c, axis, False):
-                    line_item_axis = (key, c)
-        return line_item_axis
-
-
-    if filename is None:
-        cfp.gopen()
-    else:
-        cfp.gopen(file=filename)
-
-    
-    df = DebugFile('lineplot_debug_log.txt')
-    
-    try:
-        ndims = sum(1 for n in pfld.shape if n> 1)
-        if ndims == 1:
-            df.write("Detected 1D field, applying single line plot.\n")
-            cfp.lineplot(pfld, **lineplot_kwargs)
-        else:
-            df.write('Detected multi-dimensional field, determining axis choice for line plotting.\n')
-            k,c = get_axis_choice(pfld) 
-            df.write(f'\n({str(k)},{str(c)})\n')
-            from time import time
-            for series in range(c.size):
-                e1=time()
-                label = c.identity()
-                data = pfld.subspace(**{k: c[series]})
-                e2=time()-e1
-                df.write(f"\nSubspace data shape: {data.shape} ({e2:.3f} seconds)\n")
-                cfp.lineplot(data, label=label, linewidth=1)
-                e3=time()-e1-e2
-                df.write(f"Line plot took {e3:.3f} seconds.\n")
-
-    except Exception as e:
-        df.write(f"Error during line plot: {str(e)}\n")
-        df.write(str(pfld))
-        df.write(f'\nndims was {ndims}')
-        raise 
-
-    cfp.gclose()
+    plotter = LinePlot(pfld=pfld, options=options)
+    plotter.render()
 
 
 def auto_contour_title(
