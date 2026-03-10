@@ -43,6 +43,13 @@ class LinePlot:
         return kwargs
 
     @staticmethod
+    def _figure_settings(options: dict[str, object]) -> tuple[float, float, float]:
+        width = float(options.get("figure_width", 10.0) or 10.0)
+        height = float(options.get("figure_height", 6.0) or 6.0)
+        dpi = float(options.get("figure_dpi", 150.0) or 150.0)
+        return width, height, dpi
+
+    @staticmethod
     def _x_values_for_coord(coord: object) -> list[object]:
         if getattr(coord, "T", False):
             try:
@@ -84,7 +91,7 @@ class LinePlot:
         dim_keys = list(coords.keys())
         x_axis_idx = dim_keys.index(x_key)
         series_axis_idx = dim_keys.index(series_key)
-        values_2d = np.asarray(self.pfld.array)
+        values_2d = np.asarray(self.pfld.array).squeeze()
 
         if values_2d.ndim != 2:
             raise ValueError(f"Expected a 2D array for line plotting, got {values_2d.ndim}D")
@@ -109,6 +116,11 @@ class LinePlot:
 
         filename = merged_options.get("filename")
         lineplot_kwargs = self._lineplot_kwargs(merged_options)
+        fig_width, fig_height, fig_dpi = self._figure_settings(merged_options)
+
+        fig = plt.gcf()
+        fig.set_size_inches(fig_width, fig_height, forward=True)
+        fig.set_dpi(fig_dpi)
 
         ndims = self._varying_dims(self.pfld)
         ax = plt.gca()

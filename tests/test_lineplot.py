@@ -49,20 +49,17 @@ class _FakeField:
         return self._identity or default
 
 
-class _FakeCFP:
+class _FakeFigure:
     def __init__(self) -> None:
-        self.gopen_calls: list[object] = []
-        self.gclose_calls = 0
-        self.lineplot_calls: list[dict[str, object]] = []
+        self.size_inches: tuple[float, float] | None = None
+        self.dpi: float | None = None
 
-    def gopen(self, file: str | None = None) -> None:
-        self.gopen_calls.append(file)
+    def set_size_inches(self, width: float, height: float, forward: bool = True) -> None:
+        _ = forward
+        self.size_inches = (width, height)
 
-    def gclose(self) -> None:
-        self.gclose_calls += 1
-
-    def lineplot(self, _field: object, **kwargs: object) -> None:
-        self.lineplot_calls.append(kwargs)
+    def set_dpi(self, dpi: float) -> None:
+        self.dpi = dpi
 
 
 class _FakeAxes:
@@ -84,10 +81,14 @@ class _FakeAxes:
 class _FakePlt:
     def __init__(self, axes: _FakeAxes) -> None:
         self._axes = axes
+        self._figure = _FakeFigure()
         self.savefig_calls: list[str] = []
 
     def gca(self) -> _FakeAxes:
         return self._axes
+
+    def gcf(self) -> _FakeFigure:
+        return self._figure
 
     def savefig(self, filename: str) -> None:
         self.savefig_calls.append(filename)
@@ -133,6 +134,8 @@ def test_lineplot_render_1d_uses_pandas_series_and_savefig(monkeypatch: pytest.M
     assert captured["kwargs"] == {"color": "blue"}
     assert axes.title == "one-d"
     assert axes.ylabel == "air_temperature"
+    assert plt_obj._figure.size_inches == (10.0, 6.0)
+    assert plt_obj._figure.dpi == 150.0
     assert plt_obj.savefig_calls == ["/tmp/one.png"]
 
 
@@ -179,3 +182,25 @@ def test_lineplot_render_2d_builds_dataframe_with_iso_time(monkeypatch: pytest.M
 
     assert axes.xlabel == "time"
     assert axes.ylabel == "air_temperature"
+
+
+def test_lineplot_honors_custom_figure_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    axes = _FakeAxes()
+    plt_obj = _FakePlt(axes)
+
+    monkeypatch.setattr(lineplot_module, "plt", plt_obj)
+    monkeypatch.setattr(pd.Series, "plot", lambda self, ax=None, **kwargs: ax)
+
+    field = _FakeField(
+        shape=(3,),
+        coords={"x": _FakeCoord("x", [0, 1, 2])},
+        array=np.array([1.0, 2.0, 3.0]),
+    )
+
+    LinePlot(
+        field,
+        options={"figure_width": 12, "figure_height": 7, "figure_dpi": 200},
+    ).render()
+
+    assert plt_obj._figure.size_inches == (12.0, 7.0)
+    assert plt_obj._figure.dpi == 200.0
