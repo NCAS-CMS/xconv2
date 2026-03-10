@@ -16,8 +16,27 @@ field_list = textwrap.dedent(
 ).lstrip()
 
 # Shared collapse options for GUI selection and future worker command expansion.
-collapse_methods = ["mean", "range", "max", "min"]
-
+collapse_methods = (
+    'mean',
+    'minimum',
+    'maximum',
+    'root_mean_square',
+    'standard_deviation',
+    'integral',
+    'maximum_absolute_value',
+    'minimum_absolute_value',
+    'mean_absolute_value',
+    'mean_of_upper_decile',
+    'mid_range',
+    'median',
+    'range',
+    'sample_size',
+    'sum',
+    'sum_of_squares',
+    'sum_of_weights',
+    'sum_of_weights2',
+    'variance',
+)
 
 def coordinate_list(index: int) -> str:
     """Generate worker code that emits 1D dimension-coordinate values for a field."""

@@ -22,11 +22,23 @@ class _FakeField:
         self.subspace_calls.append(kwargs)
         return self
 
-    def collapse(self, method: str, axes: str, weights: bool = False) -> "_FakeField":
-        self.collapse_calls.append((method, axes, weights))
+    def collapse(self, instruction: str, weights: bool = False) -> "_FakeField":
+        self.collapse_calls.append((instruction, weights))
         return self
 
-    def cell_methods(self) -> None:
+    def cell_methods(self, **kwargs) -> None:
+        return {}
+
+    def dimension_coordinate(self, coord_name) -> None:
+        return np.array([0.0, 1.0])
+
+    def dimension_coordinates(self, **kwargs) -> None:
+        return {}
+
+    def domain_axes(self, **kwargs) -> None:
+        return {}
+
+    def _unique_domain_axis_identities(self, **kwargs) -> None:
         return None
 
 
@@ -138,7 +150,7 @@ def test_plot_from_selection_contour_auto_options_executes_and_calls_con() -> No
     _run_generated(code, fld, cfp)
 
     assert fld.subspace_calls
-    assert fld.collapse_calls == [("mean", "time", False)]
+    assert fld.collapse_calls == [("time: mean", True)]
     assert cfp.levs_calls
     assert cfp.cscale_calls == [{"scale": "magma"}]
     assert cfp.con_calls
