@@ -65,9 +65,6 @@ def plot_from_selection(
     if plot_kind not in {"lineplot", "contour"}:
         raise ValueError(f"Unsupported plot kind: {plot_kind}")
 
-    if plot_kind == "lineplot":
-        raise NotImplementedError
-
     prep_code = _pfld_from_selection_code(selections, collapse_by_coord)
 
     if plot_kind == "lineplot":
@@ -141,5 +138,17 @@ def contour(options: dict[str, object] | None) -> str:
 
 
 def lineplot(options: dict[str, object] | None) -> str:
-    raise NotImplementedError
+    """Generate worker code that delegates line-plot rendering to API helpers."""
+    payload_code = textwrap.dedent(
+        f"""
+        lineplot_options = {options!r}
+        run_line_plot(
+            pfld=pfld,
+            options=lineplot_options,
+            selection_spec=selection_spec,
+            collapse_by_coord=collapse_by_coord,
+        )
+        """
+    ).lstrip()
+    return payload_code
 

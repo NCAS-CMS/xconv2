@@ -9,6 +9,7 @@ from xconv2.xconv_cf_interface import (
     field_info,
     get_data_for_plotting,
     run_contour_plot,
+    run_line_plot,
 )
 
 import numpy as np
@@ -135,8 +136,9 @@ class _FakeCFPlot:
     def __init__(self) -> None:
         self.levs_calls: list[dict[str, object]] = []
         self.con_calls: list[dict[str, object]] = []
+        self.lineplot_calls: list[dict[str, object]] = []
         self.cscale_calls: list[dict[str, object]] = []
-        self.gopen_calls: list[str] = []
+        self.gopen_calls: list[dict[str, object]] = []
         self.gclose_calls = 0
 
     def levs(self, **kwargs: object) -> None:
@@ -145,11 +147,16 @@ class _FakeCFPlot:
     def con(self, _field: object, **kwargs: object) -> None:
         self.con_calls.append(kwargs)
 
+    def lineplot(self, _field: object, **kwargs: object) -> None:
+        self.lineplot_calls.append(kwargs)
+
     def cscale(self, **kwargs: object) -> None:
         self.cscale_calls.append(kwargs)
 
-    def gopen(self, file: str) -> None:
-        self.gopen_calls.append(file)
+    def gopen(self, file: str = "cfplot.png", **kwargs: object) -> None:
+        payload: dict[str, object] = {"file": file}
+        payload.update(kwargs)
+        self.gopen_calls.append(payload)
 
     def gclose(self) -> None:
         self.gclose_calls += 1
@@ -193,7 +200,7 @@ def test_run_contour_plot_applies_levels_annotations_and_save(
     )
 
     assert cfp.cscale_calls == [{"scale": "magma"}]
-    assert cfp.gopen_calls == ["/tmp/mock.png"]
+    assert cfp.gopen_calls == [{"file": "/tmp/mock.png"}]
     assert cfp.levs_calls == [{"manual": [-1.0, 0.0, 1.0]}]
     assert cfp.con_calls
     assert cfp.gclose_calls == 1
@@ -216,6 +223,7 @@ def test_run_contour_plot_sets_title_from_singleton_selection(
         collapse_by_coord={},
     )
 
+    assert cfp.gopen_calls == [{"file": "cfplot.png", "user_plot": 1}]
     assert cfp.con_calls
     assert cfp.con_calls[-1]["title"] == "time=2000-01-01"
 
@@ -260,3 +268,35 @@ def test_auto_contour_title_prefers_cell_method_for_collapse(
         collapse_by_coord={"time": "mean"},
     )
     assert title == "time: mean"
+
+
+def test_run_line_plot_uses_canonical_axes_and_wraps_file_output() -> None:
+    field_eg = object()
+    monkeypatch = pytest.MonkeyPatch()
+
+    captured: dict[str, object] = {}
+
+    class _FakeLinePlot:
+        def __init__(self, pfld: object, options: dict[str, object] | None) -> None:
+            captured["pfld"] = pfld
+            captured["options"] = options
+
+        def render(self) -> None:
+            captured["rendered"] = True
+
+    monkeypatch.setattr(cf_interface, "LinePlot", _FakeLinePlot)
+
+    try:
+        run_line_plot(
+            pfld=field_eg,
+            options={"filename": "/tmp/line.png", "title": "line"},
+            selection_spec={"time": ("1", "2")},
+            collapse_by_coord={},
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert captured["pfld"] is field_eg
+    assert captured["options"] == {"filename": "/tmp/line.png", "title": "line"}
+    assert captured["rendered"] is True
+ 
