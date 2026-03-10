@@ -494,7 +494,7 @@ def run_line_plot(
         cfp.gopen(file=filename)
 
     
-    df = DebugFile('my_debug_log.txt')
+    df = DebugFile('lineplot_debug_log.txt')
     
     try:
         ndims = sum(1 for n in pfld.shape if n> 1)
@@ -505,11 +505,16 @@ def run_line_plot(
             df.write('Detected multi-dimensional field, determining axis choice for line plotting.\n')
             k,c = get_axis_choice(pfld) 
             df.write(f'\n({str(k)},{str(c)})\n')
+            from time import time
             for series in range(c.size):
+                e1=time()
                 label = c.identity()
                 data = pfld.subspace(**{k: c[series]})
-                df.write(f"\nSubspace data shape: {data.shape}\n")
+                e2=time()-e1
+                df.write(f"\nSubspace data shape: {data.shape} ({e2:.3f} seconds)\n")
                 cfp.lineplot(data, label=label, linewidth=1)
+                e3=time()-e1-e2
+                df.write(f"Line plot took {e3:.3f} seconds.\n")
 
     except Exception as e:
         df.write(f"Error during line plot: {str(e)}\n")
