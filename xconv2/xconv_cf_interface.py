@@ -20,6 +20,7 @@ __all__ = [
     "run_contour_plot",
 ]
 
+cfp.setvars(title_fontsize=10.5)
 
 def field_info(fields: object) -> list[str]:
     """
