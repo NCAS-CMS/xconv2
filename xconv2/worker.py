@@ -1,4 +1,5 @@
 import sys
+import os
 import pickle
 import base64
 import traceback
@@ -208,12 +209,19 @@ def _build_saved_plot_script(exec_code: str) -> str:
 def _emit_latest_plot_image() -> None:
     """Send the latest matplotlib figure to GUI as PNG bytes, if available."""
     fig_numbers = plt.get_fignums()
+    logger.info(
+        "PLOT_DIAG worker_emit pid=%s backend=%s fig_count=%d",
+        os.getpid(),
+        matplotlib.get_backend(),
+        len(fig_numbers),
+    )
     if not fig_numbers:
         return
 
     fig = plt.figure(fig_numbers[-1])
     buffer = BytesIO()
-    fig.savefig(buffer, format="png", dpi=120)
+    dpi = fig.get_dpi() if hasattr(fig, "get_dpi") else 120
+    fig.savefig(buffer, format="png", dpi=dpi)
     buffer.seek(0)
     send_to_gui("IMG_READY", buffer.getvalue())
     buffer.close()
@@ -259,6 +267,12 @@ def main():
 
             try:
                 # Execute the code block in our persistent global namespace
+                logger.info(
+                    "PLOT_DIAG worker_exec_start pid=%s backend=%s emit_image=%s",
+                    os.getpid(),
+                    matplotlib.get_backend(),
+                    emit_image,
+                )
                 exec(exec_code, worker_globals)
                 if emit_image:
                     _emit_latest_plot_image()

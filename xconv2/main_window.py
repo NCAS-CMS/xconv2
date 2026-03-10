@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 import pickle
 from pathlib import Path
 
@@ -125,6 +126,11 @@ class CFVMain(CFVCore):
                     logger.warning("Unexpected metadata payload type: %s", type(metadata).__name__)
 
             elif line.startswith("IMG_READY:"):
+                logger.info(
+                    "PLOT_DIAG gui_img_ready pid=%s worker_pid=%s payload_kind=bytes",
+                    os.getpid(),
+                    self.worker.processId(),
+                )
                 raw_payload = line.split(":", 1)[1]
                 payload = pickle.loads(base64.b64decode(raw_payload))
                 if isinstance(payload, bytes):
@@ -388,6 +394,13 @@ class CFVMain(CFVCore):
             len(collapse_by_coord),
             bool(save_target),
             bool(save_plot_path),
+        )
+        logger.info(
+            "PLOT_DIAG gui_plot_request pid=%s worker_pid=%s kind=%s emit_image=%s",
+            os.getpid(),
+            self.worker.processId(),
+            plot_kind,
+            save_plot_path is None,
         )
 
         if save_plot_path:
