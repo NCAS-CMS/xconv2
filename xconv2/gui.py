@@ -7,11 +7,13 @@
 
 import logging
 import sys
+from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
 from .core_window import CFVCore
 from .main_window import CFVMain
+from . import __version__
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     logger.info("Launching cf-view GUI")
+    logger.info("PLOT_DIAG gui_runtime version=%s module_dir=%s", __version__, Path(__file__).resolve().parent)
 
     app = QApplication.instance() or QApplication(sys.argv)
 
