@@ -493,7 +493,7 @@ def run_line_plot(
 ) -> None:
     """Render line plots via the dedicated LinePlot helper class."""
     _ = (selection_spec, collapse_by_coord)
-    plotter = LinePlot(pfld=pfld, options=options)
+    plotter = LinePlot(pfld=pfld, options=options, collapse_by_coord=collapse_by_coord)
     plotter.render()
 
 

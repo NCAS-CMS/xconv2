@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 
+from xconv2.cell_method_handler import cell_methods_string_from_field
+
 
 class LinePlot:
     """Line-plot renderer supporting 1D cf-plot and 2D pandas-backed plotting."""
@@ -12,10 +14,11 @@ class LinePlot:
         self,
         pfld: object,
         options: dict[str, object] | None = None,
+        collapse_by_coord: dict[str, str] | None = None,
     ) -> None:
-        
         self.pfld = pfld
         self.default_options = options or {}
+        self.collapse_by_coord = collapse_by_coord or {}
         ndims = self._varying_dims(self.pfld)
         if ndims not in (1, 2):
             raise ValueError(f"Line plots only support 1D or 2D fields, got {ndims}D")
@@ -141,12 +144,22 @@ class LinePlot:
             frame.plot(ax=ax, **pandas_kwargs)
 
         if "title" in lineplot_kwargs:
-            ax.set_title(str(lineplot_kwargs["title"]))
+            title_text = str(lineplot_kwargs["title"])
         else:
             title_text = self.pfld.identity()
             if isinstance(title_text, str) and "long_name=" in title_text:
                 title_text = title_text.split("long_name=", 1)[1]
-            ax.set_title(str(title_text))
+                title_text = str(title_text)
+
+        # Add collapse ranges to to title
+        title2 = cell_methods_string_from_field(
+            self.pfld, self.collapse_by_coord
+        )
+        if title2:
+            title_text += f"\n{title2}"
+
+        ax.set_title(title_text)
+
         if "xlabel" in lineplot_kwargs:
             ax.set_xlabel(str(lineplot_kwargs["xlabel"]))
         else:

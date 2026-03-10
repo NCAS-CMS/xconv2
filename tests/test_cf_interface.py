@@ -277,7 +277,12 @@ def test_run_line_plot_uses_canonical_axes_and_wraps_file_output() -> None:
     captured: dict[str, object] = {}
 
     class _FakeLinePlot:
-        def __init__(self, pfld: object, options: dict[str, object] | None) -> None:
+        def __init__(
+                self,
+                pfld: object,
+                options: dict[str, object] | None,
+                collapse_by_coord: dict[str, str] | None
+        ) -> None:
             captured["pfld"] = pfld
             captured["options"] = options
 

@@ -52,7 +52,7 @@ def cell_methods_string_from_field(pfld: object, collapse_by_coord: tuple) -> st
         new_axes = []
         for axis in cm.get_axes():
             coord = pfld.coordinate(axis, default=None)
-            if coord is not None:
+            if coord is not None and collapse_by_coord:
                 # Add the coordinate range to the nice axis name
                 lower = coord.lower_bounds[0]
                 upper = coord.upper_bounds[-1]
