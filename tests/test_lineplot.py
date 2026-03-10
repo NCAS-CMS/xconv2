@@ -34,11 +34,13 @@ class _FakeField:
         coords: dict[str, _FakeCoord],
         array: np.ndarray,
         ident: str = "air_temperature",
+        units: str = "",
     ) -> None:
         self.shape = shape
         self._coords = coords
         self.array = array
         self._identity = ident
+        self.units = units
 
     def dimension_coordinates(self, todict: bool = False):
         if todict:
@@ -133,7 +135,7 @@ def test_lineplot_render_1d_uses_pandas_series_and_savefig(monkeypatch: pytest.M
     assert captured["series_values"] == [1.0, 2.0, 3.0, 4.0, 5.0]
     assert captured["kwargs"] == {"color": "blue"}
     assert axes.title == "one-d"
-    assert axes.ylabel == "air_temperature"
+    assert axes.ylabel == ""
     assert plt_obj._figure.size_inches == (10.0, 6.0)
     assert plt_obj._figure.dpi == 150.0
     assert plt_obj.savefig_calls == ["/tmp/one.png"]
@@ -170,18 +172,24 @@ def test_lineplot_render_2d_builds_dataframe_with_iso_time(monkeypatch: pytest.M
         shape=(3, 2),
         coords={"time": time_coord, "latitude": lat_coord},
         array=np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]),
+        units="m s-1",
     )
 
     LinePlot(field, options={"color": "red", "linewidth": 2}).render()
 
     assert plt_obj.savefig_calls == []
 
-    assert captured["index"] == ["2020-01-01", "2020-01-02", "2020-01-03"]
+    assert captured["index"] == [
+        pd.Timestamp("2020-01-01"),
+        pd.Timestamp("2020-01-02"),
+        pd.Timestamp("2020-01-03"),
+    ]
     assert captured["columns"] == ["latitude=-10.0", "latitude=10.0"]
     assert captured["kwargs"] == {"color": "red", "linewidth": 2}
 
     assert axes.xlabel == "time"
-    assert axes.ylabel == "air_temperature"
+    assert axes.ylabel == "m s-1"
+    assert axes.title == "air_temperature"
 
 
 def test_lineplot_honors_custom_figure_settings(monkeypatch: pytest.MonkeyPatch) -> None:
