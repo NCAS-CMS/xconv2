@@ -12,6 +12,7 @@ from pathlib import Path
 
 import matplotlib
 import numpy as np
+from matplotlib.backend_bases import FigureManagerBase
 
 # Worker renders to bytes/files only, so force a headless backend and
 # avoid spawning a separate matplotlib GUI app/window (e.g. extra dock icon).
@@ -27,6 +28,8 @@ from . import lineplot as xconv_lineplot
 # cf-plot may still call show(); in Agg mode this is non-interactive and noisy.
 plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
 plt.ioff()
+# Some plotting paths call the backend manager directly; force no-op.
+FigureManagerBase.show = lambda self: None  # type: ignore[assignment]
 # LinePlot imports pyplot in its own module namespace; disable there too.
 xconv_lineplot.plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
 xconv_lineplot.plt.ioff()
