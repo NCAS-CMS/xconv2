@@ -26,6 +26,10 @@ from . import lineplot as xconv_lineplot
 
 # cf-plot may still call show(); in Agg mode this is non-interactive and noisy.
 plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
+plt.ioff()
+# LinePlot imports pyplot in its own module namespace; disable there too.
+xconv_lineplot.plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
+xconv_lineplot.plt.ioff()
 warnings.filterwarnings(
     "ignore",
     message="FigureCanvasAgg is non-interactive, and thus cannot be shown",
