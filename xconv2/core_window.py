@@ -660,7 +660,7 @@ class CFVCore(QMainWindow):
         """Display selected field details in the output panel."""
         self.field_metadata_controller.on_field_clicked(item)
 
-    def build_dynamic_sliders(self, metadata: dict[str, list[object]]) -> None:
+    def build_dynamic_sliders(self, metadata: dict[str, object]) -> None:
         """Build compact dual-handle range sliders from coordinate metadata."""
         self.selection_controller.build_dynamic_sliders(metadata)
 

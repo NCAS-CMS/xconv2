@@ -86,8 +86,8 @@ def test_coordinate_info_filters_singletons_and_serializes_values() -> None:
     payload = coordinate_info(_MockCoordField())
 
     assert payload == [
-        ("time", ["1", "2", "3"]),
-        ("latitude", ["-90", "0", "90"]),
+        ("time", ["1", "2", "3"], ""),
+        ("latitude", ["-90", "0", "90"], ""),
     ]
 
 

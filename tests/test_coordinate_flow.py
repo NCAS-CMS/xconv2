@@ -10,9 +10,9 @@ from xconv2.main_window import CFVMain
 
 @dataclass
 class _DummyMain:
-    built_slider_payloads: list[dict[str, list[object]]] = field(default_factory=list)
+    built_slider_payloads: list[dict[str, object]] = field(default_factory=list)
 
-    def build_dynamic_sliders(self, metadata: dict[str, list[object]]) -> None:
+    def build_dynamic_sliders(self, metadata: dict[str, object]) -> None:
         self.built_slider_payloads.append(metadata)
 
     def _show_status_message(self, _message: str, is_error: bool = False) -> None:
@@ -123,7 +123,7 @@ class _DummyStaleErrorMain:
 
 def test_normalize_coordinate_metadata_filters_and_coerces() -> None:
     payload = [
-        ("time", ["1850-01-16", "1850-02-16"]),
+        ("time", ["1850-01-16", "1850-02-16"], "days since 1850-01-01 gregorian"),
         ("lat", ("-90", "0", "90")),
         ("empty", []),
         ("none", None),
@@ -134,13 +134,22 @@ def test_normalize_coordinate_metadata_filters_and_coerces() -> None:
     normalized = CFVMain._normalize_coordinate_metadata(None, payload)
 
     assert normalized == {
-        "time": ["1850-01-16", "1850-02-16"],
-        "lat": ["-90", "0", "90"],
+        "time": {
+            "values": ["1850-01-16", "1850-02-16"],
+            "units": "days since 1850-01-01 gregorian",
+        },
+        "lat": {
+            "values": ["-90", "0", "90"],
+            "units": "",
+        },
     }
 
 
 def test_handle_worker_output_coord_routes_to_slider_builder() -> None:
-    coord_payload = [("time", ["1850-01-16", "1850-02-16"]), ("lat", ["-90", "0", "90"])]
+    coord_payload = [
+        ("time", ["1850-01-16", "1850-02-16"], "days since 1850-01-01 gregorian"),
+        ("lat", ["-90", "0", "90"], "degrees_north"),
+    ]
     encoded = base64.b64encode(pickle.dumps(coord_payload)).decode()
     line = f"COORD:{encoded}\n"
 
@@ -152,8 +161,14 @@ def test_handle_worker_output_coord_routes_to_slider_builder() -> None:
 
     assert len(dummy.built_slider_payloads) == 1
     assert dummy.built_slider_payloads[0] == {
-        "time": ["1850-01-16", "1850-02-16"],
-        "lat": ["-90", "0", "90"],
+        "time": {
+            "values": ["1850-01-16", "1850-02-16"],
+            "units": "days since 1850-01-01 gregorian",
+        },
+        "lat": {
+            "values": ["-90", "0", "90"],
+            "units": "degrees_north",
+        },
     }
 
 

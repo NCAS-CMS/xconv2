@@ -80,7 +80,7 @@ def coordinate_info(field: object) -> list[tuple[str, list[str]]]:
         if len(arr) <= 1:
             continue
         vals = [str(x) for x in arr]
-        coords.append((c.identity(default="unknown"), vals))
+        coords.append((c.identity(default="unknown"), vals, str(getattr(c, "Units",""))))
 
     return coords
 

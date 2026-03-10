@@ -107,7 +107,8 @@ def test_coordinate_list_emits_coordinates_for_example_field() -> None:
     assert isinstance(payload, list)
     assert payload
     assert isinstance(payload[0], tuple)
-    assert len(payload[0]) == 2
+    assert len(payload[0]) == 3
     assert payload[0][0].startswith("latitude")
-    assert isinstance(payload[0][1], list)      
+    assert isinstance(payload[0][1], list)
+    assert isinstance(payload[0][2], str)
  
