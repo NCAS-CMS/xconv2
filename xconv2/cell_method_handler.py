@@ -1,16 +1,3 @@
-def cfdm_cell_method_to_string(cell_method: object, axis_names: dict) -> str:
-    """Build CF-like cell_methods text."""
-    cell_method = cell_method.copy()
-    cell_method.set_axes(
-        tuple(
-            [
-                axis_names.get(axis, axis)
-                for axis in cell_method.get_axes(())
-            ]
-        )
-    )
-    return str(cell_method)
-
 def cell_methods_string_from_field(pfld: object, collapse_by_coord: tuple) -> str:
     """Build a combined cell_methods string for all cell-method constructs in a field."""
     def _unique_domain_axis_identities(f, include_size=True):
@@ -51,11 +38,51 @@ def cell_methods_string_from_field(pfld: object, collapse_by_coord: tuple) -> st
     # at cf v3.20.0: axis_names = f._unique_domain_axis_identities(include_size=False)
     cell_methods = pfld.cell_methods(todict=True)
 
-    # Get the new cell methods created by the collapse
+    # Get the new cell methods created by the collapse, changing their
+    # axes to nice names with coordinate ranges.
+    #
+    # E.g. "domainaxis0" -> "time (1961-12-01 to 1990-12-01)"
+    # E.g. "domainaxis1" -> "air_pressure (250 to 750 hPa)"
     selection = []
     n = 0
     for cm in tuple(cell_methods.values())[::-1]:
-        selection.append(cfdm_cell_method_to_string(cm, axis_names))
+        # Change the domain axis identifiers to nice names
+        # (e.g. "domainaxis0" -> "time")
+        cm = cm.change_axes(axis_names)
+        new_axes = []
+        for axis in cm.get_axes():
+            coord = pfld.coordinate(axis, default=None)
+            if coord is not None:
+                # Add the coordinate range to the nice axis name
+                lower = coord.lower_bounds[0]
+                upper = coord.upper_bounds[-1]
+
+                if lower.Units.isreftime:
+                    # Convert to ISO8601 strings
+                    lower = str(lower.datetime_array[0])
+                    upper = str(upper.datetime_array[0])
+                    lower = lower.rstrip(":00").rstrip()
+                    upper = upper.rstrip(":00").rstrip()
+                    units = ""
+                else:
+                    # Convert to nicely formated numbers
+                    try:
+                        units = lower.Units.units
+                    except Exception:
+                        units = ""
+
+                    lower = f"{lower.datum():g}"
+                    upper = f"{upper.datum():g}"
+                    if units is not None:
+                        units = f" {units}"
+
+                axis = f"{axis} ({lower} to {upper}{units})"
+
+            new_axes.append(axis)
+
+        cm.set_axes(new_axes)
+
+        selection.append(str(cm))
         n += len(cm.get_axes())
         if n >= len(collapse_by_coord):
             break
