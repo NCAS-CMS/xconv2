@@ -319,8 +319,18 @@ class CFVMain(CFVCore):
             hi_idx = int(max(start_idx, end_idx))
             is_singleton = (hi_idx - lo_idx) <= 1
 
-            lo = values[lo_idx]
-            hi = values[lo_idx] if is_singleton else values[hi_idx]
+            if is_singleton:
+                if lo_idx == 0:
+                    singleton_idx = lo_idx
+                elif hi_idx == (len(values) - 1):
+                    singleton_idx = hi_idx
+                else:
+                    singleton_idx = lo_idx
+                lo = values[singleton_idx]
+                hi = values[singleton_idx]
+            else:
+                lo = values[lo_idx]
+                hi = values[hi_idx]
             selections[name] = (lo, hi)
 
             collapse_method = self.selected_collapse_methods.get(name)

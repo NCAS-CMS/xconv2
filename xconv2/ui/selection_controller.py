@@ -23,9 +23,19 @@ class SelectionController:
 
     def reset_all_sliders(self) -> None:
         """Reset all slider ranges to full extent and refresh summary state."""
+        self.host.selected_collapse_methods.clear()
+
         for name, control in self.host.controls.items():
             slider = control.get("range_slider")
+            collapse_checkbox = control.get("collapse_checkbox")
             values = control.get("values", [])
+
+            if collapse_checkbox is not None:
+                collapse_checkbox.blockSignals(True)
+                collapse_checkbox.setChecked(False)
+                collapse_checkbox.blockSignals(False)
+                collapse_checkbox.setText("")
+
             if slider is None or not values:
                 continue
 
@@ -189,11 +199,48 @@ class SelectionController:
         selected_count = hi_idx - lo_idx
         self.host.selected_counts[name] = selected_count
 
-        control["bounds_start_label"].setText(str(values[0]))
-        control["bounds_end_label"].setText(str(values[-1]))
+        singleton_idx = self._singleton_index(lo_idx, hi_idx, len(values))
+        if singleton_idx is not None:
+            lo_text = self._format_coord_value(values[singleton_idx])
+            hi_text = lo_text
+        else:
+            lo_text = self._format_coord_value(values[lo_idx])
+            hi_text = self._format_coord_value(values[hi_idx])
+
+        control["bounds_start_label"].setText(self._format_coord_value(values[0]))
+        control["bounds_end_label"].setText(self._format_coord_value(values[-1]))
         control["selection_label"].setText(
-            f"selected: {values[lo_idx]}..{values[hi_idx]} ({selected_count})"
+            f"selected: {lo_text}..{hi_text} ({selected_count})"
         )
+
+    @staticmethod
+    def _singleton_index(lo_idx: int, hi_idx: int, total_count: int) -> int | None:
+        """Pick a singleton index for near-collapsed handles (distance <= 1)."""
+        if (hi_idx - lo_idx) > 1:
+            return None
+
+        if lo_idx == 0:
+            return lo_idx
+        if hi_idx == (total_count - 1):
+            return hi_idx
+        return lo_idx
+
+    @staticmethod
+    def _format_coord_value(value: object) -> str:
+        """Format numeric coordinate labels compactly while preserving text values."""
+        if isinstance(value, bool):
+            return str(value)
+
+        if isinstance(value, (int, float)):
+            return f"{value:g}"
+
+        text = str(value)
+        try:
+            numeric = float(text)
+        except ValueError:
+            return text
+
+        return f"{numeric:g}"
 
     def refresh_plot_summary(self) -> None:
         """Update plot summary text and plot button availability."""

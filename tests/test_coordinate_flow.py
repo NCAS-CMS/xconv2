@@ -184,6 +184,30 @@ def test_build_plot_context_treats_adjacent_first_value_singletons_as_1d() -> No
     assert plot_kind == "contour"
 
 
+def test_build_plot_context_treats_adjacent_last_value_singletons_as_1d() -> None:
+    dummy = _DummyMain()
+    dummy.controls = {
+        "time": {
+            "values": [1, 2, 3],
+            "range_slider": _FakeRangeSlider((1, 2)),
+        },
+        "lat": {
+            "values": [-90, 0, 90],
+            "range_slider": _FakeRangeSlider((0, 2)),
+        },
+    }
+    dummy.selected_collapse_methods = {}
+
+    context = CFVMain._build_plot_context(dummy)
+
+    assert context is not None
+    selections, collapse_by_coord, plot_kind = context
+    assert selections["time"] == (3, 3)
+    assert selections["lat"] == (-90, 90)
+    assert collapse_by_coord == {}
+    assert plot_kind == "lineplot"
+
+
 def test_reset_ui_for_new_field_selection_clears_error_state() -> None:
     dummy = _DummyResetMain()
 
