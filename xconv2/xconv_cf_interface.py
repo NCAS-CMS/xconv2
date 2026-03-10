@@ -80,8 +80,7 @@ def coordinate_info(field: object) -> list[tuple[str, list[str]]]:
         list[tuple[str, list[str]]]: Coordinate identity with serialized values.
     """
     coords: list[tuple[str, list[str]]] = []
-    for key in field.dimension_coordinates():
-        c = field.coordinate(key)
+    for key, c in field.dimension_coordinates(todict=True).items():
         arr = getattr(c, "array", None)
         if arr is None:
             continue
@@ -89,6 +88,7 @@ def coordinate_info(field: object) -> list[tuple[str, list[str]]]:
             continue
         vals = [str(x) for x in arr]
         coords.append((c.identity(default="unknown"), vals))
+
     return coords
 
 
@@ -139,12 +139,51 @@ def get_data_for_plotting(
 
     pfld = field.subspace(**subspace_kwargs)
 
-    # Apply collapses based on GUI selections
-    for axis, method in collapse_by_coord.items():
-        if method == "mean":
-            pfld = pfld.collapse("mean", axes=axis, weights=False)
-        else:
-            pfld = pfld.collapse(method, axes=axis)
+    # Remove subspaced-down-to-size-1 axes from the collapse selection
+    # (if they're there it doesn't upset the collapse call, but it
+    # does make creating a sensible plot title tricker).
+    for coord_name in selection_spec:
+        if (coord_name in collapse_by_coord
+            and pfld.dimension_coordinate(coord_name).size <= 1):
+            del collapse_by_coord[coord_name]
+
+    # Apply collapses based on GUI selections.
+    #
+    # Build up a collapse string, e.g. "time: mean", or "time: height:
+    # mean", or "time: mean height: maximum", etc.
+    #
+    # Note: "time: height: mean" is not always the same as two
+    #       separate consectutive collapses of "time: mean" and then
+    #       "height: mean". It is presumed that when a user asks for a
+    #       collapse over two axes that they mean this to the
+    #       simulataneous collapse (i.e. "time: height: mean"), rather
+    #       than the two seperate collapses.
+    #
+    # Note to selves: It would be nice to replace "time", "height",
+    #                 etc. with domain axis keys "domainaxis0",
+    #                 "domainaxis2", etc.
+    if collapse_by_coord:
+        instruction = []
+
+        axes_methods = tuple(collapse_by_coord.items())
+        previous_method = axes_methods[0][1]
+        for axis, method in axes_methods:
+            if method != previous_method:
+                instruction.append(previous_method)
+
+            instruction.append(f"{axis}:")
+            previous_method = method
+
+        instruction.append(axes_methods[-1][1])
+
+        instruction = " ".join(instruction)
+
+        try:
+            # Try a weighted collapse
+            pfld = pfld.collapse(instruction, weights=True)
+        except ValueError:
+            # Could find appropriate weights, so collapse un-weighted.
+            pfld = pfld.collapse(instruction, weights=False)
 
     return pfld
 
@@ -467,7 +506,9 @@ def auto_contour_title(
     collapse_by_coord = collapse_by_coord or {}
 
     if collapse_by_coord:
-        collapse_title = cell_methods_string_from_field(pfld).strip()
+        collapse_title = cell_methods_string_from_field(
+            pfld, collapse_by_coord
+        ).strip()
         if collapse_title:
             return collapse_title
 
