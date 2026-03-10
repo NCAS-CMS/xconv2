@@ -408,7 +408,11 @@ def run_contour_plot(
     top_padding += page_margin_top
     bottom_padding += page_margin_bottom
 
-    if filename is not None:
+    # Force cf-plot into embedded mode for in-memory rendering. Without this,
+    # cfp.con() may implicitly call gclose() and trigger an external viewer.
+    if filename is None:
+        cfp.gopen(user_plot=1)
+    else:
         cfp.gopen(file=filename)
 
     _apply_levels()
