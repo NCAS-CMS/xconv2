@@ -221,8 +221,22 @@ class PlotViewController:
 
     def on_plot_button_clicked(self) -> None:
         """Request a plot refresh when the current selection is plottable."""
-        if not getattr(self.host, "plot_button", None) or not self.host.plot_button.isEnabled():
+        button = getattr(self.host, "plot_button", None)
+        if not button or not button.isEnabled():
+            logger.info(
+                "PLOT_DIAG plot_click_ignored enabled=%s controls=%d selected_kind=%s",
+                bool(button and button.isEnabled()),
+                len(getattr(self.host, "controls", {})),
+                getattr(self.host, "selected_plot_kind", None),
+            )
             return
+
+        logger.info(
+            "PLOT_DIAG plot_click enabled=%s controls=%d selected_kind=%s",
+            button.isEnabled(),
+            len(getattr(self.host, "controls", {})),
+            getattr(self.host, "selected_plot_kind", None),
+        )
         self.host._request_plot_update()
 
     def on_options_button_clicked(self) -> None:

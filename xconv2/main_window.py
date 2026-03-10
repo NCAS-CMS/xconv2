@@ -360,12 +360,17 @@ class CFVMain(CFVCore):
         """Build and send a plot task with optional code-save and plot-save paths."""
         context = self._build_plot_context()
         if context is None:
-            logger.debug("Skipped plot update request because no controls are available")
+            logger.info("PLOT_DIAG gui_plot_skip reason=no_controls")
             return
         selections, collapse_by_coord, plot_kind = context
 
         if plot_kind in {"collapsed", "unsupported"}:
-            logger.debug("Skipped plot request due to unsupported dimensionality kind=%s", plot_kind)
+            logger.info(
+                "PLOT_DIAG gui_plot_skip reason=dimensionality kind=%s coords=%d collapses=%d",
+                plot_kind,
+                len(selections),
+                len(collapse_by_coord),
+            )
             return
 
         plot_options = dict(self.plot_options_by_kind.get(plot_kind, {}))

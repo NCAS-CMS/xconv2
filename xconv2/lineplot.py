@@ -50,11 +50,14 @@ class LinePlot:
         return width, height, dpi
 
     @staticmethod
-    def _x_values_for_coord(coord: object) -> list[object]:
+    def _x_values_for_coord(coord: object) -> object:
         if getattr(coord, "T", False):
             try:
-                iso = np.vectorize(str, otypes=["U"])
-                return list(iso(coord.datetime_array))
+                iso = np.vectorize(str, otypes=["U"])(coord.datetime_array)
+                dt_index = pd.to_datetime(iso, errors="coerce")
+                if not dt_index.isna().any():
+                    return dt_index
+                return list(iso)
             except Exception:
                 return list(coord.array)
         return list(coord.array)
@@ -139,6 +142,11 @@ class LinePlot:
 
         if "title" in lineplot_kwargs:
             ax.set_title(str(lineplot_kwargs["title"]))
+        else:
+            title_text = self.pfld.identity()
+            if isinstance(title_text, str) and "long_name=" in title_text:
+                title_text = title_text.split("long_name=", 1)[1]
+            ax.set_title(str(title_text))
         if "xlabel" in lineplot_kwargs:
             ax.set_xlabel(str(lineplot_kwargs["xlabel"]))
         else:
@@ -147,7 +155,7 @@ class LinePlot:
         if "ylabel" in lineplot_kwargs:
             ax.set_ylabel(str(lineplot_kwargs["ylabel"]))
         else:
-            ax.set_ylabel(self.pfld.identity(default="value"))
+            ax.set_ylabel(str(getattr(self.pfld, "units", "")))
 
         if filename is not None:
             plt.savefig(str(filename))

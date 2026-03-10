@@ -25,6 +25,7 @@ from matplotlib import pyplot as plt
 
 from . import xconv_cf_interface
 from . import lineplot as xconv_lineplot
+from . import __version__
 
 # cf-plot may still call show(); in Agg mode this is non-interactive and noisy.
 plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
@@ -235,6 +236,12 @@ def main():
     )
 
     logger.info("Worker starting")
+    logger.info(
+        "PLOT_DIAG worker_runtime version=%s module_dir=%s backend=%s",
+        __version__,
+        Path(__file__).resolve().parent,
+        matplotlib.get_backend(),
+    )
 
     # Expose helper in the exec namespace so GUI-issued tasks can emit messages.
     worker_globals['send_to_gui'] = send_to_gui
