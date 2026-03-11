@@ -7,17 +7,25 @@ code snippets in ``cf_templates.py`` can call them directly.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import cf
 import cfplot as cfp
 from matplotlib import pyplot as plt
 from xconv2.cell_method_handler import cell_methods_string_from_field
+from xconv2.lineplot import LinePlot
+
 
 __all__ = [
     "field_info",
     "coordinate_info",
     "get_data_for_plotting",
+    "annotation_text",
+    "estimate_layout_padding",
+    "apply_vertical_padding",
     "auto_contour_title",
     "run_contour_plot",
+    "run_line_plot",
 ]
 
 cfp.setvars(title_fontsize=10.5)
@@ -181,6 +189,146 @@ def get_data_for_plotting(
     return pfld
 
 
+def annotation_text(
+    *,
+    annotation_display: bool,
+    annotation_properties: list[tuple[object, object]] | list[list[object]],
+    annotation_free_text: str,
+) -> str:
+    """Build a compact two-line annotation string from selected properties."""
+    if not annotation_display:
+        return ""
+
+    max_props = 3 if annotation_free_text else 4
+    annotation_items = [f"{key}: {value}" for key, value in annotation_properties[:max_props]]
+
+    entries: list[str] = []
+    if annotation_free_text:
+        entries.append(annotation_free_text)
+    entries.extend(annotation_items)
+
+    if not entries:
+        return ""
+
+    lines: list[str] = []
+    for idx in range(0, len(entries), 2):
+        lines.append(" | ".join(entries[idx : idx + 2]))
+
+    return "\n".join(lines)
+
+
+def estimate_layout_padding(
+    *,
+    page_title: str | None,
+    page_title_display: bool,
+    annotation_text: str,
+    run_prepass: Callable[[], None],
+) -> tuple[float, float]:
+    """
+    Estimate top and bottom padding required by page title and annotation text.
+
+    A lightweight prepass is executed by ``run_prepass`` so axis extents can be
+    measured before final rendering.
+    """
+    if (not page_title_display or not page_title) and not annotation_text:
+        return (0.0, 0.0)
+
+    fig = plt.gcf()
+    # If the canvas is not ready for drawing, return zero padding. This can
+    # happen if the figure has not been fully initialized.
+    canvas = getattr(fig, "canvas", None)
+    if canvas is None or not hasattr(canvas, "draw") or not hasattr(canvas, "get_renderer"):
+        return (0.0, 0.0)
+
+    run_prepass()
+
+    # Re-fetch figure/canvas after prepass because plotting backends may replace
+    # the current figure during rendering setup.
+    fig = plt.gcf()
+    canvas = getattr(fig, "canvas", None)
+    if canvas is None or not hasattr(canvas, "draw") or not hasattr(canvas, "get_renderer"):
+        return (0.0, 0.0)
+
+    title_artist = None
+    if page_title_display and page_title:
+        title_artist = fig.suptitle(str(page_title), y=0.995, fontsize=10)
+
+    annotation_artist = None
+    if annotation_text:
+        annotation_artist = fig.text(
+            0.5,
+            0.02,
+            annotation_text,
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
+
+    canvas.draw()
+    renderer = canvas.get_renderer()
+
+    axes_top = 0.0
+    axes_bottom = 1.0
+    for ax in fig.axes:
+        tight_bbox = ax.get_tightbbox(renderer)
+        if tight_bbox is None:
+            continue
+        fig_bbox = tight_bbox.transformed(fig.transFigure.inverted())
+        axes_top = max(axes_top, fig_bbox.y1)
+        axes_bottom = min(axes_bottom, fig_bbox.y0)
+
+    top_padding = 0.0
+    if title_artist is not None:
+        title_bbox = title_artist.get_window_extent(renderer).transformed(fig.transFigure.inverted())
+        title_bottom = title_bbox.y0
+        top_overlap = (axes_top + 0.01) - title_bottom
+        if top_overlap > 0:
+            top_padding = min(top_overlap + 0.01, 0.25)
+
+    bottom_padding = 0.0
+    if annotation_artist is not None:
+        annotation_bbox = annotation_artist.get_window_extent(renderer).transformed(
+            fig.transFigure.inverted()
+        )
+        annotation_top = annotation_bbox.y1
+        bottom_overlap = (annotation_top + 0.01) - axes_bottom
+        if bottom_overlap > 0:
+            bottom_padding = min(bottom_overlap + 0.01, 0.25)
+
+    if hasattr(plt, "close"):
+        plt.close(fig)
+
+    return (top_padding, bottom_padding)
+
+
+def apply_vertical_padding(fig: object, top_pad: float, bottom_pad: float) -> None:
+    """Resize and reposition all axes to reserve top and bottom headroom."""
+    if top_pad <= 0 and bottom_pad <= 0:
+        return
+
+    axes = list(getattr(fig, "axes", ()))
+    if not axes:
+        return
+
+    total_pad = top_pad + bottom_pad
+    if total_pad <= 0:
+        return
+
+    bottom_fraction = bottom_pad / total_pad
+    for ax in axes:
+        pos = ax.get_position()
+        # Apply per-axis clamping so short axes (e.g. colorbars) do not
+        # collapse the entire layout adjustment.
+        reduction = min(total_pad, max(pos.height - 0.01, 0.0))
+        if reduction <= 0:
+            continue
+
+        bottom_reduction = reduction * bottom_fraction
+        new_y0 = pos.y0 + bottom_reduction
+        new_height = pos.height - reduction
+        ax.set_position([pos.x0, new_y0, pos.width, new_height])
+
+
 def run_contour_plot(
     pfld: object,
     options: dict[str, object] | None,
@@ -283,44 +431,7 @@ def run_contour_plot(
         else:
             cfp.levs()
 
-    def _annotation_text() -> str:
-        """Build a compact two-line annotation string from selected properties."""
-        if not annotation_display:
-            return ""
-
-        max_props = 3 if annotation_free_text else 4
-        annotation_items = [f"{key}: {value}" for key, value in annotation_properties[:max_props]]
-
-        entries: list[str] = []
-        if annotation_free_text:
-            entries.append(annotation_free_text)
-        entries.extend(annotation_items)
-
-        if not entries:
-            return ""
-
-        lines: list[str] = []
-        for idx in range(0, len(entries), 2):
-            lines.append(" | ".join(entries[idx : idx + 2]))
-
-        return "\n".join(lines)
-
-    def _estimate_layout_padding() -> tuple[float, float]:
-        """
-        Estimate top and bottom padding from a cheap map-only prepass.
-        We need this before rendering the final plot so we can reserve headroom for the page title and annotations 
-        without overlapping the plot area. We basically do the simplest possible contour prepass with all styling 
-        cues turned off, and then measure the resulting title and annotation text extents against the axes to 
-        determine how much vertical padding to reserve.
-        """
-        if not page_title and not _annotation_text():
-            return (0.0, 0.0)
-
-        fig = plt.gcf()
-        canvas = getattr(fig, "canvas", None)
-        if canvas is None or not hasattr(canvas, "draw") or not hasattr(canvas, "get_renderer"):
-            return (0.0, 0.0)
-
+    def _run_contour_prepass() -> None:
         prepass_kwargs = dict(contour_kwargs)
         prepass_kwargs["fill"] = False
         prepass_kwargs["lines"] = False
@@ -331,91 +442,25 @@ def run_contour_plot(
         _apply_levels()
         cfp.con(pfld, **prepass_kwargs)
 
-        fig = plt.gcf()
-        title_artist = None
-        if page_title_display and page_title:
-            title_artist = fig.suptitle(str(page_title), y=0.995, fontsize=10)
-
-        annotation_artist = None
-        annotation_text = _annotation_text()
-        if annotation_text:
-            annotation_artist = fig.text(
-                0.5,
-                0.02,
-                annotation_text,
-                ha="center",
-                va="bottom",
-                fontsize=8,
-            )
-
-        canvas.draw()
-        renderer = canvas.get_renderer()
-
-        axes_top = 0.0
-        axes_bottom = 1.0
-        for ax in fig.axes:
-            tight_bbox = ax.get_tightbbox(renderer)
-            if tight_bbox is None:
-                continue
-            fig_bbox = tight_bbox.transformed(fig.transFigure.inverted())
-            axes_top = max(axes_top, fig_bbox.y1)
-            axes_bottom = min(axes_bottom, fig_bbox.y0)
-
-        top_padding = 0.0
-        if title_artist is not None:
-            title_bbox = title_artist.get_window_extent(renderer).transformed(fig.transFigure.inverted())
-            title_bottom = title_bbox.y0
-            top_overlap = (axes_top + 0.01) - title_bottom
-            if top_overlap > 0:
-                top_padding = min(top_overlap + 0.01, 0.25)
-
-        bottom_padding = 0.0
-        if annotation_artist is not None:
-            annotation_bbox = annotation_artist.get_window_extent(renderer).transformed(
-                fig.transFigure.inverted()
-            )
-            annotation_top = annotation_bbox.y1
-            bottom_overlap = (annotation_top + 0.01) - axes_bottom
-            if bottom_overlap > 0:
-                bottom_padding = min(bottom_overlap + 0.01, 0.25)
-
-        if hasattr(plt, "close"):
-            plt.close(fig)
-
-        return (top_padding, bottom_padding)
-
-    def _apply_vertical_padding(fig: object, top_pad: float, bottom_pad: float) -> None:
-        """Resize and reposition all axes to reserve top and bottom headroom."""
-        if top_pad <= 0 and bottom_pad <= 0:
-            return
-
-        axes = list(getattr(fig, "axes", ()))
-        if not axes:
-            return
-
-        total_pad = top_pad + bottom_pad
-        if total_pad <= 0:
-            return
-
-        bottom_fraction = bottom_pad / total_pad
-        for ax in axes:
-            pos = ax.get_position()
-            # Apply per-axis clamping so short axes (e.g. colorbars) do not
-            # collapse the entire layout adjustment.
-            reduction = min(total_pad, max(pos.height - 0.01, 0.0))
-            if reduction <= 0:
-                continue
-
-            bottom_reduction = reduction * bottom_fraction
-            new_y0 = pos.y0 + bottom_reduction
-            new_height = pos.height - reduction
-            ax.set_position([pos.x0, new_y0, pos.width, new_height])
-
-    top_padding, bottom_padding = _estimate_layout_padding()
+    annotation_text_value = annotation_text(
+        annotation_display=annotation_display,
+        annotation_properties=annotation_properties,
+        annotation_free_text=annotation_free_text,
+    )
+    top_padding, bottom_padding = estimate_layout_padding(
+        page_title=page_title,
+        page_title_display=page_title_display,
+        annotation_text=annotation_text_value,
+        run_prepass=_run_contour_prepass,
+    )
     top_padding += page_margin_top
     bottom_padding += page_margin_bottom
 
-    if filename is not None:
+    # Force cf-plot into embedded mode for in-memory rendering. Without this,
+    # cfp.con() may implicitly call gclose() and trigger an external viewer.
+    if filename is None:
+        cfp.gopen(user_plot=1)
+    else:
         cfp.gopen(file=filename)
 
     _apply_levels()
@@ -425,17 +470,27 @@ def run_contour_plot(
     if top_padding > 0 or bottom_padding > 0:
         # Reserve headroom for page title and bottom annotations even when
         # axes are not subplot-managed.
-        _apply_vertical_padding(mycanvas, top_padding, bottom_padding)
+        apply_vertical_padding(mycanvas, top_padding, bottom_padding)
 
     if page_title_display and page_title:
         mycanvas.suptitle(str(page_title), y=0.995, fontsize=10)
 
-    annotation_text = _annotation_text()
-    if annotation_text:
-        mycanvas.text(0.5, 0.02, annotation_text, ha="center", va="bottom", fontsize=8)
+    if annotation_text_value:
+        mycanvas.text(0.5, 0.02, annotation_text_value, ha="center", va="bottom", fontsize=8)
 
     if filename is not None:
         cfp.gclose()
+
+def run_line_plot(
+    pfld: object,
+    options: dict[str, object] | None,
+    selection_spec: dict[str, tuple[object, object]] | None = None,
+    collapse_by_coord: dict[str, str] | None = None,
+) -> None:
+    """Render line plots via the dedicated LinePlot helper class."""
+    _ = (selection_spec, collapse_by_coord)
+    plotter = LinePlot(pfld=pfld, options=options)
+    plotter.render()
 
 
 def auto_contour_title(

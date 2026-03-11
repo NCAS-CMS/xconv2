@@ -1,4 +1,5 @@
 import sys
+import os
 import pickle
 import base64
 import traceback
@@ -12,6 +13,7 @@ from pathlib import Path
 
 import matplotlib
 import numpy as np
+from matplotlib.backend_bases import FigureManagerBase
 
 # Worker renders to bytes/files only, so force a headless backend and
 # avoid spawning a separate matplotlib GUI app/window (e.g. extra dock icon).
@@ -22,14 +24,31 @@ import cfplot as cfp
 from matplotlib import pyplot as plt
 
 from . import xconv_cf_interface
+from . import lineplot as xconv_lineplot
+from . import __version__
 
 # cf-plot may still call show(); in Agg mode this is non-interactive and noisy.
 plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
+plt.ioff()
+# Some plotting paths call the backend manager directly; force no-op.
+FigureManagerBase.show = lambda self: None  # type: ignore[assignment]
+# LinePlot imports pyplot in its own module namespace; disable there too.
+xconv_lineplot.plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
+xconv_lineplot.plt.ioff()
 warnings.filterwarnings(
     "ignore",
     message="FigureCanvasAgg is non-interactive, and thus cannot be shown",
     category=UserWarning,
 )
+
+# Ensure cf-plot never tries to open an external viewer (e.g. ImageMagick
+# display) when running worker-generated contour plots.
+try:
+    cfp.setvars(viewer=None)
+    cfp.plotvars.viewer = None
+except Exception:
+    logger = logging.getLogger(__name__)
+    logger.exception("Failed to set cfplot viewer=None in worker")
 
 
 logger = logging.getLogger(__name__)
@@ -103,24 +122,73 @@ def _build_saved_plot_script(exec_code: str) -> str:
         "import cf",
         "import cfplot as cfp",
         "from matplotlib import pyplot as plt",
-        "",
-        "# Inlined helpers from xconv2.xconv_cf_interface for standalone execution.",
-        "",
     ]
 
-    needed_helpers = [
-        name for name in INTERFACE_EXPORTS if re.search(rf"\b{re.escape(name)}\b", exec_code)
-    ]
-
-    for name in needed_helpers:
+    helper_sources: dict[str, str] = {}
+    for name in INTERFACE_EXPORTS:
         obj = getattr(xconv_cf_interface, name, None)
         if obj is None or not callable(obj):
             continue
         try:
-            lines.append(textwrap.dedent(inspect.getsource(obj)).rstrip())
-            lines.append("")
+            helper_sources[name] = textwrap.dedent(inspect.getsource(obj)).rstrip()
         except (OSError, TypeError):
             logger.exception("Unable to inline helper source for %s", name)
+
+    needed_helpers: set[str] = {
+        name for name in helper_sources if re.search(rf"\b{re.escape(name)}\b", exec_code)
+    }
+
+    # Include transitive helper references so inlined functions stay runnable.
+    queue = list(needed_helpers)
+    while queue:
+        name = queue.pop()
+        source = helper_sources.get(name, "")
+        for candidate in helper_sources:
+            if candidate == name or candidate in needed_helpers:
+                continue
+            if re.search(rf"\b{re.escape(candidate)}\b", source):
+                needed_helpers.add(candidate)
+                queue.append(candidate)
+
+    include_lineplot_class = (
+        "run_line_plot" in needed_helpers
+        or bool(re.search(r"\bLinePlot\b", exec_code))
+    )
+    if include_lineplot_class:
+        lines.extend([
+            "import numpy as np",
+            "import pandas as pd",
+            "",
+            "# Inlined LinePlot class from xconv2.lineplot for standalone execution.",
+            "",
+        ])
+        try:
+            lines.append(textwrap.dedent(inspect.getsource(xconv_lineplot.LinePlot)).rstrip())
+            lines.append("")
+        except (OSError, TypeError):
+            logger.exception("Unable to inline helper source for LinePlot")
+            lines.append("# NOTE: helper source unavailable for LinePlot")
+            lines.append("")
+
+    lines.extend([
+        "",
+        "# Inlined helpers from xconv2.xconv_cf_interface for standalone execution.",
+        "",
+    ])
+
+    for name in INTERFACE_EXPORTS:
+        if name not in needed_helpers:
+            continue
+        source = helper_sources.get(name)
+        if source is None:
+            lines.append(f"# NOTE: helper source unavailable for {name}")
+            lines.append("")
+            continue
+        try:
+            lines.append(source)
+            lines.append("")
+        except Exception:
+            logger.exception("Unable to append helper source for %s", name)
             lines.append(f"# NOTE: helper source unavailable for {name}")
             lines.append("")
 
@@ -151,12 +219,19 @@ def _build_saved_plot_script(exec_code: str) -> str:
 def _emit_latest_plot_image() -> None:
     """Send the latest matplotlib figure to GUI as PNG bytes, if available."""
     fig_numbers = plt.get_fignums()
+    logger.info(
+        "PLOT_DIAG worker_emit pid=%s backend=%s fig_count=%d",
+        os.getpid(),
+        matplotlib.get_backend(),
+        len(fig_numbers),
+    )
     if not fig_numbers:
         return
 
     fig = plt.figure(fig_numbers[-1])
     buffer = BytesIO()
-    fig.savefig(buffer, format="png", dpi=120)
+    dpi = fig.get_dpi() if hasattr(fig, "get_dpi") else 120
+    fig.savefig(buffer, format="png", dpi=dpi)
     buffer.seek(0)
     send_to_gui("IMG_READY", buffer.getvalue())
     buffer.close()
@@ -170,6 +245,12 @@ def main():
     )
 
     logger.info("Worker starting")
+    logger.info(
+        "PLOT_DIAG worker_runtime version=%s module_dir=%s backend=%s",
+        __version__,
+        Path(__file__).resolve().parent,
+        matplotlib.get_backend(),
+    )
 
     # Expose helper in the exec namespace so GUI-issued tasks can emit messages.
     worker_globals['send_to_gui'] = send_to_gui
@@ -202,6 +283,12 @@ def main():
 
             try:
                 # Execute the code block in our persistent global namespace
+                logger.info(
+                    "PLOT_DIAG worker_exec_start pid=%s backend=%s emit_image=%s",
+                    os.getpid(),
+                    matplotlib.get_backend(),
+                    emit_image,
+                )
                 exec(exec_code, worker_globals)
                 if emit_image:
                     _emit_latest_plot_image()

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 import pickle
 from pathlib import Path
 
@@ -125,6 +126,11 @@ class CFVMain(CFVCore):
                     logger.warning("Unexpected metadata payload type: %s", type(metadata).__name__)
 
             elif line.startswith("IMG_READY:"):
+                logger.info(
+                    "PLOT_DIAG gui_img_ready pid=%s worker_pid=%s payload_kind=bytes",
+                    os.getpid(),
+                    self.worker.processId(),
+                )
                 raw_payload = line.split(":", 1)[1]
                 payload = pickle.loads(base64.b64decode(raw_payload))
                 if isinstance(payload, bytes):
@@ -348,12 +354,20 @@ class CFVMain(CFVCore):
                 dims.append(1 if is_singleton else 2)
 
         varying_dims = sum(1 for dim in dims if dim != 1)
-        if varying_dims == 1:
+        available_kinds = getattr(self, "available_plot_kinds", [])
+        selected_kind = getattr(self, "selected_plot_kind", None)
+
+        if varying_dims == 0:
+            plot_kind = "collapsed"
+        elif varying_dims > 2:
+            plot_kind = "unsupported"
+        elif isinstance(selected_kind, str) and selected_kind in available_kinds:
+            plot_kind = selected_kind
+        elif varying_dims == 1:
             plot_kind = "lineplot"
         elif varying_dims == 2:
+            # Keep contour as a sensible default in 2D when no explicit selection exists.
             plot_kind = "contour"
-        elif varying_dims == 0:
-            plot_kind = "collapsed"
         else:
             plot_kind = "unsupported"
 
@@ -363,12 +377,17 @@ class CFVMain(CFVCore):
         """Build and send a plot task with optional code-save and plot-save paths."""
         context = self._build_plot_context()
         if context is None:
-            logger.debug("Skipped plot update request because no controls are available")
+            logger.info("PLOT_DIAG gui_plot_skip reason=no_controls")
             return
         selections, collapse_by_coord, plot_kind = context
 
         if plot_kind in {"collapsed", "unsupported"}:
-            logger.debug("Skipped plot request due to unsupported dimensionality kind=%s", plot_kind)
+            logger.info(
+                "PLOT_DIAG gui_plot_skip reason=dimensionality kind=%s coords=%d collapses=%d",
+                plot_kind,
+                len(selections),
+                len(collapse_by_coord),
+            )
             return
 
         plot_options = dict(self.plot_options_by_kind.get(plot_kind, {}))
@@ -397,6 +416,13 @@ class CFVMain(CFVCore):
             len(collapse_by_coord),
             bool(save_target),
             bool(save_plot_path),
+        )
+        logger.info(
+            "PLOT_DIAG gui_plot_request pid=%s worker_pid=%s kind=%s emit_image=%s",
+            os.getpid(),
+            self.worker.processId(),
+            plot_kind,
+            save_plot_path is None,
         )
 
         if save_plot_path:
