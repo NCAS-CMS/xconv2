@@ -234,13 +234,21 @@ def estimate_layout_padding(
         return (0.0, 0.0)
 
     fig = plt.gcf()
+    # If the canvas is not ready for drawing, return zero padding. This can
+    # happen if the figure has not been fully initialized.
     canvas = getattr(fig, "canvas", None)
     if canvas is None or not hasattr(canvas, "draw") or not hasattr(canvas, "get_renderer"):
         return (0.0, 0.0)
 
     run_prepass()
 
+    # Re-fetch figure/canvas after prepass because plotting backends may replace
+    # the current figure during rendering setup.
     fig = plt.gcf()
+    canvas = getattr(fig, "canvas", None)
+    if canvas is None or not hasattr(canvas, "draw") or not hasattr(canvas, "get_renderer"):
+        return (0.0, 0.0)
+
     title_artist = None
     if page_title_display and page_title:
         title_artist = fig.suptitle(str(page_title), y=0.995, fontsize=10)
@@ -472,18 +480,6 @@ def run_contour_plot(
 
     if filename is not None:
         cfp.gclose()
-
-
-
-
-
-    
-
-
-
-
-
-
 
 def run_line_plot(
     pfld: object,
