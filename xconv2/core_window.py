@@ -304,6 +304,14 @@ class CFVCore(QMainWindow):
             self.status.showMessage("Unable to open issue tracker URL.")
             logger.warning("Failed to open issue tracker URL: %s", issues_url.toString())
 
+
+    def _open_roadmap(self) -> None:
+        """Open the project roadmap page in the default browser."""
+        roadmap_url = QUrl("https://github.com/NCAS-CMS/xconv2/milestones")
+        if not QDesktopServices.openUrl(roadmap_url):
+            self.status.showMessage("Unable to open roadmap URL.")
+            logger.warning("Failed to open roadmap URL: %s", roadmap_url.toString())
+
     def _refresh_recent_menu(self) -> None:
         """Refresh the Recent submenu from the persisted log file."""
         self.menu_controller.refresh_recent_menu()
@@ -690,19 +698,43 @@ class CFVCore(QMainWindow):
         self._request_plot_update()
 
     def _choose_file(self) -> None:
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Data File",
-            "",
-            "NetCDF files (*.nc *.nc4 *.cdf);;All files (*)",
-        )
-        if not file_path:
+        dialog = QFileDialog(self, "Select Data")
+        dialog.setFileMode(QFileDialog.AnyFile)
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+        dialog.setOption(QFileDialog.ShowDirsOnly, False)
+        dialog.setDirectory("")
+        dialog.setNameFilters([
+            "NetCDF files (*.nc *.nc4 *.cdf)",
+            "All files (*)"
+        ])
+        # Enable folder selection in the sidebar
+        for view in dialog.findChildren(QWidget):
+            if hasattr(view, "setAcceptDrops"):
+                view.setAcceptDrops(True)
+        if dialog.exec() != QDialog.Accepted:
             return
-
+        selected = dialog.selectedFiles()
+        if not selected:
+            return
+        file_path = selected[0]
         self._set_window_title_for_file(file_path)
-        logger.info("Selected file: %s", file_path)
+        logger.info("Selected file/folder: %s", file_path)
         self._record_recent_file(file_path)
         self.on_file_selected(file_path)
+
+
+    def _choose_folder(self) -> None:
+        folder_path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Data Folder",
+            ""
+        )
+        if not folder_path:
+            return
+        self._set_window_title_for_file(folder_path)
+        logger.info("Selected folder: %s", folder_path)
+        self._record_recent_file(folder_path)
+        self.on_file_selected(folder_path)
 
     def _set_window_title_for_file(self, file_path: str) -> None:
         """Update the window title to reflect the selected file."""
