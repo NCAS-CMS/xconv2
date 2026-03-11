@@ -47,6 +47,12 @@ class _FakeField:
             return self._coords
         return list(self._coords.values())
 
+    def cell_methods(self, **kwargs) -> None:
+        return {}
+
+    def domain_axes(self, **kwargs) -> None:
+        return {}
+
     def identity(self, default: str = "value") -> str:
         return self._identity or default
 
