@@ -45,10 +45,16 @@ class MenuController:
 
         file_menu = menu_bar.addMenu("&File")
 
-        open_action = QAction("Open...", self.host)
-        open_action.setShortcut(QKeySequence.StandardKey.Open)
-        open_action.triggered.connect(self.host._choose_file)
-        file_menu.addAction(open_action)
+
+        open_file_action = QAction("Open File... ", self.host)
+        open_file_action.setShortcut(QKeySequence.StandardKey.Open)
+        open_file_action.triggered.connect(self.host._choose_file)
+        file_menu.addAction(open_file_action)
+
+        open_zarr_action = QAction("Open Folder/Zarr...", self.host)
+        open_zarr_action.setShortcut("Ctrl+Shift+O")
+        open_zarr_action.triggered.connect(self.host._choose_folder)
+        file_menu.addAction(open_zarr_action)
 
         self.host.recent_menu = file_menu.addMenu("Recent")
         self.refresh_recent_menu()
@@ -79,6 +85,10 @@ class MenuController:
         report_issue_action = QAction("Report Issue", self.host)
         report_issue_action.triggered.connect(self.host._open_issue_tracker)
         help_menu.addAction(report_issue_action)
+
+        roadmap_action = QAction("xconv2 Roadmap", self.host)
+        roadmap_action.triggered.connect(self.host._open_roadmap)
+        help_menu.addAction(roadmap_action)
 
         help_button = QToolButton(menu_bar)
         help_button.setText("Help")
