@@ -12,6 +12,7 @@ dependencies = [
     "superqt",
     "cf-python",
     "cf-plot",
+    "zarr",
 ]
 
 [project.optional-dependencies]
