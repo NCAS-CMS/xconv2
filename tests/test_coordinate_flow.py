@@ -10,9 +10,9 @@ from xconv2.main_window import CFVMain
 
 @dataclass
 class _DummyMain:
-    built_slider_payloads: list[dict[str, list[object]]] = field(default_factory=list)
+    built_slider_payloads: list[dict[str, object]] = field(default_factory=list)
 
-    def build_dynamic_sliders(self, metadata: dict[str, list[object]]) -> None:
+    def build_dynamic_sliders(self, metadata: dict[str, object]) -> None:
         self.built_slider_payloads.append(metadata)
 
     def _show_status_message(self, _message: str, is_error: bool = False) -> None:
@@ -123,7 +123,7 @@ class _DummyStaleErrorMain:
 
 def test_normalize_coordinate_metadata_filters_and_coerces() -> None:
     payload = [
-        ("time", ["1850-01-16", "1850-02-16"]),
+        ("time", ["1850-01-16", "1850-02-16"], "days since 1850-01-01 gregorian"),
         ("lat", ("-90", "0", "90")),
         ("empty", []),
         ("none", None),
@@ -134,13 +134,22 @@ def test_normalize_coordinate_metadata_filters_and_coerces() -> None:
     normalized = CFVMain._normalize_coordinate_metadata(None, payload)
 
     assert normalized == {
-        "time": ["1850-01-16", "1850-02-16"],
-        "lat": ["-90", "0", "90"],
+        "time": {
+            "values": ["1850-01-16", "1850-02-16"],
+            "units": "days since 1850-01-01 gregorian",
+        },
+        "lat": {
+            "values": ["-90", "0", "90"],
+            "units": "",
+        },
     }
 
 
 def test_handle_worker_output_coord_routes_to_slider_builder() -> None:
-    coord_payload = [("time", ["1850-01-16", "1850-02-16"]), ("lat", ["-90", "0", "90"])]
+    coord_payload = [
+        ("time", ["1850-01-16", "1850-02-16"], "days since 1850-01-01 gregorian"),
+        ("lat", ["-90", "0", "90"], "degrees_north"),
+    ]
     encoded = base64.b64encode(pickle.dumps(coord_payload)).decode()
     line = f"COORD:{encoded}\n"
 
@@ -152,8 +161,14 @@ def test_handle_worker_output_coord_routes_to_slider_builder() -> None:
 
     assert len(dummy.built_slider_payloads) == 1
     assert dummy.built_slider_payloads[0] == {
-        "time": ["1850-01-16", "1850-02-16"],
-        "lat": ["-90", "0", "90"],
+        "time": {
+            "values": ["1850-01-16", "1850-02-16"],
+            "units": "days since 1850-01-01 gregorian",
+        },
+        "lat": {
+            "values": ["-90", "0", "90"],
+            "units": "degrees_north",
+        },
     }
 
 
@@ -182,6 +197,30 @@ def test_build_plot_context_treats_adjacent_first_value_singletons_as_1d() -> No
     assert selections["time"] == ("t0", "t0")
     assert collapse_by_coord == {}
     assert plot_kind == "contour"
+
+
+def test_build_plot_context_treats_adjacent_last_value_singletons_as_1d() -> None:
+    dummy = _DummyMain()
+    dummy.controls = {
+        "time": {
+            "values": [1, 2, 3],
+            "range_slider": _FakeRangeSlider((1, 2)),
+        },
+        "lat": {
+            "values": [-90, 0, 90],
+            "range_slider": _FakeRangeSlider((0, 2)),
+        },
+    }
+    dummy.selected_collapse_methods = {}
+
+    context = CFVMain._build_plot_context(dummy)
+
+    assert context is not None
+    selections, collapse_by_coord, plot_kind = context
+    assert selections["time"] == (3, 3)
+    assert selections["lat"] == (-90, 90)
+    assert collapse_by_coord == {}
+    assert plot_kind == "lineplot"
 
 
 def test_reset_ui_for_new_field_selection_clears_error_state() -> None:

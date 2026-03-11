@@ -247,9 +247,9 @@ class CFVMain(CFVCore):
             self._show_status_message(f"Loading coordinates for field index {index}...")
         self._send_worker_task(coordinate_list(index))
 
-    def _normalize_coordinate_metadata(self, payload: object) -> dict[str, list[object]]:
+    def _normalize_coordinate_metadata(self, payload: object) -> dict[str, dict[str, object]]:
         """Normalize worker coordinate payload into slider metadata mapping."""
-        metadata: dict[str, list[object]] = {}
+        metadata: dict[str, dict[str, object]] = {}
         name_counts: dict[str, int] = {}
         if not isinstance(payload, list):
             return metadata
@@ -278,7 +278,14 @@ class CFVMain(CFVCore):
                 name_counts[name] = 1
                 unique_name = name
 
-            metadata[unique_name] = normalized_values
+            units = ""
+            if len(entry) >= 3 and entry[2] is not None:
+                units = str(entry[2])
+
+            metadata[unique_name] = {
+                "values": normalized_values,
+                "units": units,
+            }
 
         return metadata
 
@@ -325,8 +332,18 @@ class CFVMain(CFVCore):
             hi_idx = int(max(start_idx, end_idx))
             is_singleton = (hi_idx - lo_idx) <= 1
 
-            lo = values[lo_idx]
-            hi = values[lo_idx] if is_singleton else values[hi_idx]
+            if is_singleton:
+                if lo_idx == 0:
+                    singleton_idx = lo_idx
+                elif hi_idx == (len(values) - 1):
+                    singleton_idx = hi_idx
+                else:
+                    singleton_idx = lo_idx
+                lo = values[singleton_idx]
+                hi = values[singleton_idx]
+            else:
+                lo = values[lo_idx]
+                hi = values[hi_idx]
             selections[name] = (lo, hi)
 
             collapse_method = self.selected_collapse_methods.get(name)

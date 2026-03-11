@@ -172,3 +172,4 @@ class LinePlot:
 
         if filename is not None:
             plt.savefig(str(filename))
+            plt.close(fig)
