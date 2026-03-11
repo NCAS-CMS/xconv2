@@ -95,6 +95,9 @@ class _FakePlt:
     def savefig(self, filename: str) -> None:
         self.savefig_calls.append(filename)
 
+    def close(self, _figure: object) -> None:
+        return
+
 
 def test_lineplot_rejects_more_than_2d() -> None:
     field = _FakeField(
