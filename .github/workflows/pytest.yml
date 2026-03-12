@@ -1,0 +1,55 @@
+name: xconv2 Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: '0 0 * * *'  # nightly
+
+# Required shell entrypoint to have properly configured bash shell
+defaults:
+  run:
+    shell: bash -l {0}
+
+jobs:
+  build:
+
+    name: Test Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          activate-environment: xconv2
+          environment-file: environment.yml
+          python-version: ${{ matrix.python-version }}
+          miniforge-version: "latest"
+          use-mamba: true
+      - name: Install xconv2
+        run: pip install -e .
+      - name: Run pip check
+        run: pip check
+      # - name: Run pre-commit with mypy
+      #   run: |
+      #     pre-commit install
+      #     pre-commit run -a
+      - name: Check environment contents
+        run: |
+          conda list
+          pip list
+      - name: Test xconv2
+        run: |
+          which xconv2
+      - name: Test with pytest
+        run: pytest

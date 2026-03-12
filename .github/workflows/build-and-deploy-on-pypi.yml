@@ -1,0 +1,52 @@
+name: PyPi Build and Deploy 🐍📦
+
+on:
+  release:
+    types: [published]
+  # use this for testing
+  push:
+    branches:
+      - main
+      - basic_package
+
+jobs:
+  build-n-publish:
+    name: Build and publish xconv2 on PyPi
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/xconv2/
+    permissions:
+      # IMPORTANT: this permission is mandatory for trusted publishing
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Install pep517
+        run: >-
+          python -m
+          pip install
+          pep517
+          --user
+      - name: Build a binary wheel and a source tarball
+        run: >-
+          python -m
+          pep517.build
+          --source
+          --binary
+          --out-dir dist/
+          .
+      ### test for Test PyPI
+      # - name: Publish distribution to Test PyPI
+      #   uses: pypa/gh-action-pypi-publish@release/v1
+      #   with:
+      #     repository-url: https://test.pypi.org/legacy/
+      ###
+      - name: Publish distribution 📦 to PyPI
+        if: startsWith(github.ref, 'refs/tags')
+        uses: pypa/gh-action-pypi-publish@release/v1
