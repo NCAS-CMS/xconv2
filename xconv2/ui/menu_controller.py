@@ -56,6 +56,14 @@ class MenuController:
         open_zarr_action.triggered.connect(self.host._choose_folder)
         file_menu.addAction(open_zarr_action)
 
+        open_glob_action = QAction("Open Glob...", self.host)
+        open_glob_action.triggered.connect(self.host._choose_glob)
+        file_menu.addAction(open_glob_action)
+
+        open_uris_action = QAction("Open URIs...", self.host)
+        open_uris_action.triggered.connect(self.host._choose_uris)
+        file_menu.addAction(open_uris_action)
+
         self.host.recent_menu = file_menu.addMenu("Recent")
         self.refresh_recent_menu()
 

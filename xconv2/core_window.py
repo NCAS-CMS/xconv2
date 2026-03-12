@@ -11,6 +11,7 @@ Worker orchestration and request/response handling live in `main_window.py`.
 
 from __future__ import annotations
 
+import glob
 from pathlib import Path
 import logging
 from typing import Sequence
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMenu,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -48,6 +50,7 @@ from .ui.field_metadata_controller import FieldMetadataController
 from .ui.menu_controller import MenuController
 from .ui.plot_view_controller import PlotViewController
 from .ui.selection_controller import SelectionController
+from .ui.dialogs import OpenGlobDialog
 from .ui.settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
@@ -698,27 +701,16 @@ class CFVCore(QMainWindow):
         self._request_plot_update()
 
     def _choose_file(self) -> None:
-        dialog = QFileDialog(self, "Select Data")
-        dialog.setFileMode(QFileDialog.AnyFile)
-        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
-        dialog.setOption(QFileDialog.ShowDirsOnly, False)
-        dialog.setDirectory("")
-        dialog.setNameFilters([
-            "NetCDF files (*.nc *.nc4 *.cdf)",
-            "All files (*)"
-        ])
-        # Enable folder selection in the sidebar
-        for view in dialog.findChildren(QWidget):
-            if hasattr(view, "setAcceptDrops"):
-                view.setAcceptDrops(True)
-        if dialog.exec() != QDialog.Accepted:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Data File",
+            "",
+            "NetCDF files (*.nc *.nc4 *.cdf);;All files (*)"
+        )
+        if not file_path:
             return
-        selected = dialog.selectedFiles()
-        if not selected:
-            return
-        file_path = selected[0]
         self._set_window_title_for_file(file_path)
-        logger.info("Selected file/folder: %s", file_path)
+        logger.info("Selected file: %s", file_path)
         self._record_recent_file(file_path)
         self.on_file_selected(file_path)
 
@@ -735,6 +727,43 @@ class CFVCore(QMainWindow):
         logger.info("Selected folder: %s", folder_path)
         self._record_recent_file(folder_path)
         self.on_file_selected(folder_path)
+
+    def _show_not_implemented_dialog(self, capability: str) -> None:
+        """Show a temporary placeholder dialog for unfinished open modes."""
+        QMessageBox.information(
+            self,
+            "Not implemented",
+            f"{capability} is not implemented yet.",
+        )
+
+    def _choose_glob(self) -> None:
+        """Open files using a user-provided local glob expression."""
+        initial_directory = str(Path.home())
+        if self.current_file_path:
+            current_path = Path(self.current_file_path).expanduser()
+            initial_directory = str(current_path if current_path.is_dir() else current_path.parent)
+
+        expression, ok = OpenGlobDialog.get_glob_expression(self, initial_directory)
+        if not ok:
+            return
+
+        matches = glob.glob(expression, recursive=True)
+        if not matches:
+            QMessageBox.warning(
+                self,
+                "No matches",
+                f"No files matched:\n{expression}",
+            )
+            return
+
+        self._set_window_title_for_file(expression)
+        logger.info("Selected glob expression: %s (%d matches)", expression, len(matches))
+        self._record_recent_file(expression)
+        self.on_file_selected(expression)
+
+    def _choose_uris(self) -> None:
+        """Placeholder for future multi-URI open flow."""
+        self._show_not_implemented_dialog("Open URIs")
 
     def _set_window_title_for_file(self, file_path: str) -> None:
         """Update the window title to reflect the selected file."""
