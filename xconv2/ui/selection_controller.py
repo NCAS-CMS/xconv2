@@ -4,11 +4,18 @@ import logging
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QInputDialog, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QHBoxLayout,
+    QLabel,
+    QVBoxLayout,
+    QWidget
+)
 from superqt import QRangeSlider
 
 from xconv2.cf_templates import collapse_methods
 from cftime import num2date 
+from .dialogs import InputDialogCustom
 
 if TYPE_CHECKING:
     from xconv2.core_window import CFVCore
@@ -133,6 +140,7 @@ class SelectionController:
 
             self.update_range_labels(name)
 
+        self.host._set_slider_scroll_visible_rows(len(self.host.controls))
         self.refresh_plot_summary()
         logger.info("Built %d dynamic sliders", len(self.host.controls))
 
@@ -172,13 +180,17 @@ class SelectionController:
                 if current_method in collapse_methods
                 else 0
             )
-            method, ok = QInputDialog.getItem(
+            method, ok = InputDialogCustom.getItem(
                 self.host,
                 "Collapse Method",
                 f"Select collapse method for {name}:",
                 collapse_methods,
                 current_index,
                 False,
+                doc_text=(
+                    'Documentation for collapse methods can be found '
+                    '<a href="https://ncas-cms.github.io/cf-python/analysis.html#collapse-methods">online</a>.'
+                ),
             )
             if ok and method:
                 self.host.selected_collapse_methods[name] = method

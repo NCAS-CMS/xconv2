@@ -11,6 +11,8 @@ Worker orchestration and request/response handling live in `main_window.py`.
 
 from __future__ import annotations
 
+from datetime import datetime
+import glob
 from pathlib import Path
 import logging
 from typing import Sequence
@@ -19,6 +21,7 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -30,7 +33,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMenu,
-    QPlainTextEdit,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -48,6 +51,7 @@ from .ui.field_metadata_controller import FieldMetadataController
 from .ui.menu_controller import MenuController
 from .ui.plot_view_controller import PlotViewController
 from .ui.selection_controller import SelectionController
+from .ui.dialogs import OpenGlobDialog
 from .ui.settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
@@ -98,6 +102,8 @@ class CFVCore(QMainWindow):
         self.selected_plot_kind: str | None = None
         self.plot_options_by_kind: dict[str, dict[str, object]] = {}
         self._plot_pixmap_original: QPixmap | None = None
+        self.current_selection_info_text = "No selection info available."
+        self.slider_scroll_area: QScrollArea | None = None
 
         self.setup_ui()
         self._setup_tray_icon()
@@ -106,6 +112,8 @@ class CFVCore(QMainWindow):
         """Create application icon with a stable fallback chain."""
         assets_dir = Path(__file__).resolve().parent / "assets"
         candidate_paths = [
+            assets_dir / "cf-logo-box.png",
+            assets_dir / "cf-logo-box.svg",
             assets_dir / "cf-logo.png",
             assets_dir / "cf-logo.svg",
         ]
@@ -362,11 +370,72 @@ class CFVCore(QMainWindow):
         """Return validated max recent-files value from settings."""
         return self.settings_store.max_recent_files(settings)
 
+    def _field_list_rows(self, settings: dict[str, object] | None = None) -> int:
+        """Return validated default visible row count for the fields list."""
+        source = settings if settings is not None else self._settings
+        raw = source.get("field_list_rows", 12)
+        if isinstance(raw, int) and raw > 0:
+            return raw
+        return 12
+
+    def _visible_coordinate_rows(self, settings: dict[str, object] | None = None) -> int:
+        """Return validated visible slider row cap for the selection frame."""
+        source = settings if settings is not None else self._settings
+        raw = source.get("visible_coordinate_rows", 4)
+        if isinstance(raw, int) and raw > 0:
+            return raw
+        return 4
+
+    @staticmethod
+    def _timestamp_plot_filename() -> str:
+        """Return default timestamp-based plot filename stem."""
+        return datetime.now().strftime("%y%m%d_%H%M")
+
+    @staticmethod
+    def _default_plot_filename_template() -> str:
+        """Return the dynamic template used for default plot filenames."""
+        return "xconv_{timestamp}"
+
+    @staticmethod
+    def _sanitize_plot_filename_stem(stem: str) -> str:
+        """Normalize a filename stem and strip supported plot extensions."""
+        normalized = stem.strip()
+        if not normalized:
+            return ""
+
+        suffix = Path(normalized).suffix.lower().lstrip(".")
+        if suffix in {"png", "svg", "pdf"}:
+            return Path(normalized).stem
+        return normalized
+
+    def _plot_filename_template(self, settings: dict[str, object] | None = None) -> str:
+        """Return configured filename template, defaulting to dynamic timestamp token."""
+        source = settings if settings is not None else self._settings
+        raw = source.get("default_plot_filename", "")
+        if isinstance(raw, str):
+            sanitized = self._sanitize_plot_filename_stem(raw)
+            if sanitized:
+                return sanitized
+        return self._default_plot_filename_template()
+
+    def _default_plot_filename(self, settings: dict[str, object] | None = None) -> str:
+        """Return resolved default plot filename stem for save operations."""
+        template = self._plot_filename_template(settings)
+        return template.replace("{timestamp}", self._timestamp_plot_filename())
+
+    def _default_plot_output_format(self, settings: dict[str, object] | None = None) -> str:
+        """Return configured default plot output format."""
+        source = settings if settings is not None else self._settings
+        raw = source.get("default_plot_format", "png")
+        if raw in {"png", "svg", "pdf"}:
+            return str(raw)
+        return "png"
+
     def _show_settings_dialog(self) -> None:
         """Show basic settings editor for persisted app preferences."""
         dialog = QDialog(self)
         dialog.setWindowTitle("Settings")
-        dialog.resize(640, 220)
+        dialog.resize(700, 380)
 
         layout = QVBoxLayout(dialog)
 
@@ -378,6 +447,48 @@ class CFVCore(QMainWindow):
         recent_row.addWidget(recent_label)
         recent_row.addStretch(1)
         recent_row.addWidget(recent_spin)
+
+        field_rows_row = QHBoxLayout()
+        field_rows_label = QLabel("Default visible rows in Fields list")
+        field_rows_spin = QSpinBox()
+        field_rows_spin.setRange(1, 50)
+        field_rows_spin.setValue(self._field_list_rows())
+        field_rows_row.addWidget(field_rows_label)
+        field_rows_row.addStretch(1)
+        field_rows_row.addWidget(field_rows_spin)
+
+        coord_rows_row = QHBoxLayout()
+        coord_rows_label = QLabel("Visible coordinate sliders before scrolling")
+        coord_rows_spin = QSpinBox()
+        coord_rows_spin.setRange(1, 12)
+        coord_rows_spin.setValue(self._visible_coordinate_rows())
+        coord_rows_row.addWidget(coord_rows_label)
+        coord_rows_row.addStretch(1)
+        coord_rows_row.addWidget(coord_rows_spin)
+
+        plot_filename_row = QHBoxLayout()
+        plot_filename_label = QLabel("Default plot filename")
+        plot_filename_edit = QLineEdit(self._plot_filename_template())
+        plot_filename_reset = QPushButton("Reset")
+
+        def _reset_plot_filename() -> None:
+            plot_filename_edit.setText(self._default_plot_filename_template())
+
+        plot_filename_reset.clicked.connect(_reset_plot_filename)
+        plot_filename_row.addWidget(plot_filename_label)
+        plot_filename_row.addWidget(plot_filename_edit, 1)
+        plot_filename_row.addWidget(plot_filename_reset)
+
+        plot_format_row = QHBoxLayout()
+        plot_format_label = QLabel("Default plot output format")
+        plot_format_combo = QComboBox()
+        plot_formats = ["png", "svg", "pdf"]
+        plot_format_combo.addItems(plot_formats)
+        default_plot_format = self._default_plot_output_format()
+        plot_format_combo.setCurrentIndex(plot_formats.index(default_plot_format))
+        plot_format_row.addWidget(plot_format_label)
+        plot_format_row.addStretch(1)
+        plot_format_row.addWidget(plot_format_combo)
 
         code_dir_row = QHBoxLayout()
         code_dir_label = QLabel("Default folder for Save Code")
@@ -421,9 +532,21 @@ class CFVCore(QMainWindow):
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
 
-        layout.addLayout(recent_row)
-        layout.addLayout(code_dir_row)
-        layout.addLayout(plot_dir_row)
+        gui_defaults_frame = QGroupBox("GUI Defaults")
+        gui_defaults_layout = QVBoxLayout(gui_defaults_frame)
+        gui_defaults_layout.addLayout(recent_row)
+        gui_defaults_layout.addLayout(field_rows_row)
+        gui_defaults_layout.addLayout(coord_rows_row)
+
+        output_frame = QGroupBox("Output")
+        output_layout = QVBoxLayout(output_frame)
+        output_layout.addLayout(plot_filename_row)
+        output_layout.addLayout(plot_format_row)
+        output_layout.addLayout(code_dir_row)
+        output_layout.addLayout(plot_dir_row)
+
+        layout.addWidget(gui_defaults_frame)
+        layout.addWidget(output_frame)
         layout.addStretch(1)
         layout.addWidget(buttons)
 
@@ -431,6 +554,12 @@ class CFVCore(QMainWindow):
             return
 
         self._settings["max_recent_files"] = int(recent_spin.value())
+        self._settings["field_list_rows"] = int(field_rows_spin.value())
+        self._settings["visible_coordinate_rows"] = int(coord_rows_spin.value())
+        self._settings["default_plot_filename"] = self._sanitize_plot_filename_stem(
+            plot_filename_edit.text()
+        )
+        self._settings["default_plot_format"] = plot_formats[plot_format_combo.currentIndex()]
 
         code_dir = Path(code_dir_edit.text().strip() or str(Path.home())).expanduser()
         if not code_dir.is_dir():
@@ -453,6 +582,8 @@ class CFVCore(QMainWindow):
             self.status.showMessage("Failed to save settings")
             return
 
+        self._set_field_list_visible_rows(self._field_list_rows())
+        self._set_slider_scroll_visible_rows(len(self.controls), self._visible_coordinate_rows())
         self._refresh_recent_menu()
         self.status.showMessage("Settings saved")
 
@@ -477,8 +608,14 @@ class CFVCore(QMainWindow):
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.addWidget(self._create_fields_frame())
-        left_layout.addWidget(self._create_selection_frame(), 1)
+
+        fields_frame = self._create_fields_frame()
+        selection_frame = self._create_selection_frame()
+        selection_frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+
+        left_layout.addWidget(fields_frame, 0, Qt.AlignTop)
+        left_layout.addStretch(1)
+        left_layout.addWidget(selection_frame, 0, Qt.AlignBottom)
         return left_panel
 
     def _create_fields_frame(self) -> QGroupBox:
@@ -488,7 +625,7 @@ class CFVCore(QMainWindow):
 
         self.field_list_widget = QListWidget()
         self.field_list_widget.itemClicked.connect(self.on_field_clicked)
-        self._set_field_list_visible_rows(5)
+        self._set_field_list_visible_rows(self._field_list_rows())
         self._set_field_list_hint("Open a file to see fields")
 
         layout.addWidget(self.field_list_widget)
@@ -498,17 +635,6 @@ class CFVCore(QMainWindow):
         """Create framed selection details and slider controls section."""
         frame = QGroupBox("Selection")
         layout = QVBoxLayout(frame)
-
-        self.selection_output = QPlainTextEdit()
-        self.selection_output.setReadOnly(True)
-        self.selection_output.setPlaceholderText("Click a field to see details...")
-        self.selection_output.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.selection_output.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-
-        line_height = self.selection_output.fontMetrics().lineSpacing()
-        frame_width = self.selection_output.frameWidth() * 2
-        margin = 10
-        self.selection_output.setFixedHeight((line_height * 6) + frame_width + margin)
 
         controls_row = QHBoxLayout()
         properties_button = QPushButton("Properties")
@@ -520,9 +646,8 @@ class CFVCore(QMainWindow):
         controls_row.addWidget(reset_button)
         controls_row.addStretch(1)
 
-        layout.addWidget(self.selection_output)
         layout.addLayout(controls_row)
-        layout.addWidget(self._create_slider_scroll_area(), 1)
+        layout.addWidget(self._create_slider_scroll_area())
         return frame
 
     def _create_field_list_area(self) -> QWidget:
@@ -535,7 +660,7 @@ class CFVCore(QMainWindow):
         title.setStyleSheet("color: #9a9a9a; font-weight: 600;")
         self.field_list_widget = QListWidget()
         self.field_list_widget.itemClicked.connect(self.on_field_clicked)
-        self._set_field_list_visible_rows(5)
+        self._set_field_list_visible_rows(self._field_list_rows())
         self._set_field_list_hint("Open a file to see fields")
 
         selection_header = QHBoxLayout()
@@ -548,21 +673,9 @@ class CFVCore(QMainWindow):
         selection_header.addStretch(1)
         selection_header.addWidget(properties_button)
 
-        self.selection_output = QPlainTextEdit()
-        self.selection_output.setReadOnly(True)
-        self.selection_output.setPlaceholderText("Click a field to see details...")
-        self.selection_output.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.selection_output.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-
-        line_height = self.selection_output.fontMetrics().lineSpacing()
-        frame = self.selection_output.frameWidth() * 2
-        margin = 10
-        self.selection_output.setFixedHeight((line_height * 6) + frame + margin)
-
         layout.addWidget(title)
         layout.addWidget(self.field_list_widget)
         layout.addLayout(selection_header)
-        layout.addWidget(self.selection_output)
         return container
 
     def _reset_all_sliders(self) -> None:
@@ -609,7 +722,42 @@ class CFVCore(QMainWindow):
         sidebar_container.setLayout(self.sidebar)
         scroll.setWidget(sidebar_container)
         scroll.setMinimumWidth(300)
+        scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self.slider_scroll_area = scroll
+        self._set_slider_scroll_visible_rows(1)
         return scroll
+
+    def _set_slider_scroll_visible_rows(self, total_rows: int, max_visible_rows: int | None = None) -> None:
+        """Size slider area to visible rows (up to ``max_visible_rows``), then scroll."""
+        if self.slider_scroll_area is None:
+            return
+
+        row_cap = max_visible_rows if max_visible_rows is not None else self._visible_coordinate_rows()
+        visible_rows = max(1, min(total_rows, row_cap))
+        row_heights: list[int] = []
+
+        for idx in range(visible_rows):
+            item = self.sidebar.itemAt(idx)
+            if item is None:
+                continue
+            widget = item.widget()
+            if widget is None:
+                continue
+            row_heights.append(widget.sizeHint().height())
+
+        if row_heights:
+            rows_height = sum(row_heights)
+        else:
+            # Fallback before any slider widgets exist.
+            rows_height = self.fontMetrics().lineSpacing() * 6
+
+        spacing = self.sidebar.spacing() * max(0, visible_rows - 1)
+        margins = self.sidebar.contentsMargins()
+        frame = self.slider_scroll_area.frameWidth() * 2
+        target_height = rows_height + spacing + margins.top() + margins.bottom() + frame
+
+        self.slider_scroll_area.setMinimumHeight(target_height)
+        self.slider_scroll_area.setMaximumHeight(target_height)
 
     def _create_plot_area(self) -> QWidget:
         """Create right-side plot frame plus plot-type summary and button."""
@@ -698,27 +846,16 @@ class CFVCore(QMainWindow):
         self._request_plot_update()
 
     def _choose_file(self) -> None:
-        dialog = QFileDialog(self, "Select Data")
-        dialog.setFileMode(QFileDialog.AnyFile)
-        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
-        dialog.setOption(QFileDialog.ShowDirsOnly, False)
-        dialog.setDirectory("")
-        dialog.setNameFilters([
-            "NetCDF files (*.nc *.nc4 *.cdf)",
-            "All files (*)"
-        ])
-        # Enable folder selection in the sidebar
-        for view in dialog.findChildren(QWidget):
-            if hasattr(view, "setAcceptDrops"):
-                view.setAcceptDrops(True)
-        if dialog.exec() != QDialog.Accepted:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Data File",
+            "",
+            "NetCDF files (*.nc *.nc4 *.cdf);;All files (*)"
+        )
+        if not file_path:
             return
-        selected = dialog.selectedFiles()
-        if not selected:
-            return
-        file_path = selected[0]
         self._set_window_title_for_file(file_path)
-        logger.info("Selected file/folder: %s", file_path)
+        logger.info("Selected file: %s", file_path)
         self._record_recent_file(file_path)
         self.on_file_selected(file_path)
 
@@ -735,6 +872,43 @@ class CFVCore(QMainWindow):
         logger.info("Selected folder: %s", folder_path)
         self._record_recent_file(folder_path)
         self.on_file_selected(folder_path)
+
+    def _show_not_implemented_dialog(self, capability: str) -> None:
+        """Show a temporary placeholder dialog for unfinished open modes."""
+        QMessageBox.information(
+            self,
+            "Not implemented",
+            f"{capability} is not implemented yet.",
+        )
+
+    def _choose_glob(self) -> None:
+        """Open files using a user-provided local glob expression."""
+        initial_directory = str(Path.home())
+        if self.current_file_path:
+            current_path = Path(self.current_file_path).expanduser()
+            initial_directory = str(current_path if current_path.is_dir() else current_path.parent)
+
+        expression, ok = OpenGlobDialog.get_glob_expression(self, initial_directory)
+        if not ok:
+            return
+
+        matches = glob.glob(expression, recursive=True)
+        if not matches:
+            QMessageBox.warning(
+                self,
+                "No matches",
+                f"No files matched:\n{expression}",
+            )
+            return
+
+        self._set_window_title_for_file(expression)
+        logger.info("Selected glob expression: %s (%d matches)", expression, len(matches))
+        self._record_recent_file(expression)
+        self.on_file_selected(expression)
+
+    def _choose_uris(self) -> None:
+        """Placeholder for future multi-URI open flow."""
+        self._show_not_implemented_dialog("Open URIs")
 
     def _set_window_title_for_file(self, file_path: str) -> None:
         """Update the window title to reflect the selected file."""

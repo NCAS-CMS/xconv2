@@ -30,6 +30,10 @@ class SettingsStore:
             "version": self.settings_version,
             "recent_files": [],
             "max_recent_files": self.default_max_recent_files,
+            "field_list_rows": 12,
+            "visible_coordinate_rows": 4,
+            "default_plot_filename": "xconv_{timestamp}",
+            "default_plot_format": "png",
             "last_save_code_dir": str(Path.home()),
             "last_save_plot_dir": str(Path.home()),
         }
@@ -90,6 +94,22 @@ class SettingsStore:
         max_recent = settings.get("max_recent_files")
         if not isinstance(max_recent, int) or max_recent < 1:
             settings["max_recent_files"] = self.default_max_recent_files
+
+        field_list_rows = settings.get("field_list_rows")
+        if not isinstance(field_list_rows, int) or field_list_rows < 1:
+            settings["field_list_rows"] = 12
+
+        visible_coordinate_rows = settings.get("visible_coordinate_rows")
+        if not isinstance(visible_coordinate_rows, int) or visible_coordinate_rows < 1:
+            settings["visible_coordinate_rows"] = 4
+
+        default_plot_filename = settings.get("default_plot_filename")
+        if not isinstance(default_plot_filename, str) or not default_plot_filename.strip():
+            settings["default_plot_filename"] = "xconv_{timestamp}"
+
+        default_plot_format = settings.get("default_plot_format")
+        if default_plot_format not in {"png", "svg", "pdf"}:
+            settings["default_plot_format"] = "png"
 
         self.data = settings
         try:
