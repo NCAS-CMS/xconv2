@@ -52,7 +52,5 @@ jobs:
       - name: Test xconv2
         run: |
           which xconv2
-      # - name: Test with pytest
-      #   run: |
-      #     pytest --cov --cov-branch --cov-report=xml
-      # - uses: codecov/codecov-action@v5
+      - name: Test with pytest
+        run: pytest
