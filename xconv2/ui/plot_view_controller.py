@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QPlainTextEdit,
     QPushButton,
     QSizePolicy,
     QStackedLayout,
@@ -99,6 +100,20 @@ class PlotViewController:
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
 
+        self.host.plot_info_output = QPlainTextEdit()
+        self.host.plot_info_output.setReadOnly(True)
+        self.host.plot_info_output.setPlaceholderText("Click a field to see details...")
+        self.host.plot_info_output.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.host.plot_info_output.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.host.plot_info_output.setPlainText(
+            getattr(self.host, "current_selection_info_text", "No selection info available.")
+        )
+
+        line_height = self.host.plot_info_output.fontMetrics().lineSpacing()
+        frame_width = self.host.plot_info_output.frameWidth() * 2
+        margin = 10
+        self.host.plot_info_output.setFixedHeight((line_height * 6) + frame_width + margin)
+
         self.host.plot_frame = QLabel("Waiting for data...")
         self.host.plot_frame.setAlignment(Qt.AlignCenter)
         self.host.plot_frame.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
@@ -162,6 +177,7 @@ class PlotViewController:
         summary_row.addWidget(self.host.save_code_button)
         summary_row.addWidget(self.host.save_plot_button)
 
+        layout.addWidget(self.host.plot_info_output)
         layout.addWidget(plot_stack_container, 1)
         layout.addLayout(summary_row)
         return container
@@ -334,18 +350,41 @@ class PlotViewController:
         if not getattr(self.host, "save_plot_button", None) or not self.host.save_plot_button.isEnabled():
             return
 
-        default_path = self.host._default_save_path("last_save_plot_dir", "cfview_plot.png")
-        file_path, _ = QFileDialog.getSaveFileName(
+        format_filters = {
+            "png": "PNG files (*.png)",
+            "svg": "SVG files (*.svg)",
+            "pdf": "PDF files (*.pdf)",
+        }
+        default_format = self.host._default_plot_output_format()
+        default_filename = self.host._default_plot_filename()
+        default_path = self.host._default_save_path(
+            "last_save_plot_dir",
+            f"{default_filename}.{default_format}",
+        )
+
+        ordered_formats = [default_format] + [fmt for fmt in ("png", "svg", "pdf") if fmt != default_format]
+        selected_filter = format_filters[default_format]
+        filters = ";;".join(format_filters[fmt] for fmt in ordered_formats)
+
+        file_path, selected_filter = QFileDialog.getSaveFileName(
             self.host,
             "Save Plot",
             default_path,
-            "PNG files (*.png);;PDF files (*.pdf);;PostScript files (*.ps);;All files (*)",
+            filters,
+            selected_filter,
         )
         if not file_path:
             return
 
+        if selected_filter == format_filters["svg"]:
+            selected_ext = "svg"
+        elif selected_filter == format_filters["pdf"]:
+            selected_ext = "pdf"
+        else:
+            selected_ext = default_format
+
         if not Path(file_path).suffix:
-            file_path += ".png"
+            file_path += f".{selected_ext}"
 
         self.host._remember_last_save_dir("last_save_plot_dir", file_path)
         self.host._request_plot_save(file_path)

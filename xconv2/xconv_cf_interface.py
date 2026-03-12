@@ -45,24 +45,11 @@ def field_info(fields: object) -> list[str]:
     """
     rows: list[str] = []
     for x in fields:
+        
         id_ = f"{x.identity().strip()}{x.shape}"
         props = x.properties()
-        info = [str(v) for _, v in x.coordinates().items()]
-
-        cell_methods = x.cell_methods()
-        if cell_methods:
-            info.append(str(cell_methods))
-        else:
-            info.append('No cell methods')
-
-        cell_measures = x.cell_measures()
-        if cell_measures:
-            info.append(str(cell_measures))
-        else:
-            info.append('No cell measures')
-
-        nl = "\n"
-        rows.append(f"{id_}\x1f{nl.join(info)}\x1f{str(props)}")
+        info  = str(x)
+        rows.append(f"{id_}\x1f{info}\x1f{str(props)}")
 
     return rows
 

@@ -40,6 +40,13 @@ class FieldMetadataController:
         hint_item.setFlags(Qt.NoItemFlags)
         self.host.field_list_widget.addItem(hint_item)
 
+    def set_selection_info_text(self, text: str) -> None:
+        """Update selection detail text in the right-hand info panel."""
+        self.host.current_selection_info_text = text
+        info_widget = getattr(self.host, "plot_info_output", None)
+        if info_widget is not None:
+            info_widget.setPlainText(text)
+
     def show_selection_properties(self) -> None:
         """Show properties for the currently selected field."""
         selected_item = self.host.field_list_widget.currentItem()
@@ -251,8 +258,8 @@ class FieldMetadataController:
             item.setData(Qt.UserRole + 1, properties)
             self.host.field_list_widget.addItem(item)
 
-        self.set_field_list_visible_rows(5)
-        self.host.selection_output.setPlainText(
+        self.set_field_list_visible_rows(self.host._field_list_rows())
+        self.set_selection_info_text(
             f"Loaded {self.host.field_list_widget.count()} fields.\n"
             "Click an entry to show field details."
         )
@@ -264,7 +271,7 @@ class FieldMetadataController:
         detail = item.data(Qt.UserRole)
         if detail:
             detail = "\n".join(detail.splitlines()[2:])
-            self.host.selection_output.setPlainText(detail)
+            self.set_selection_info_text(detail)
         else:
-            self.host.selection_output.setPlainText("No additional detail available.")
+            self.set_selection_info_text("No additional detail available.")
         logger.info("Field selected: %s", selected_field)

@@ -140,6 +140,7 @@ class SelectionController:
 
             self.update_range_labels(name)
 
+        self.host._set_slider_scroll_visible_rows(len(self.host.controls))
         self.refresh_plot_summary()
         logger.info("Built %d dynamic sliders", len(self.host.controls))
 
