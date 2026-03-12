@@ -26,6 +26,9 @@ class _MockCellMeasures:
 class _MockField:
     shape = (2, 3)
 
+    def __str__(self) -> str:
+        return "mock-field-summary"
+
     def identity(self) -> str:
         return "air_temperature"
 
@@ -55,7 +58,7 @@ def test_field_info_returns_serialized_rows() -> None:
     parts = payload[0].split("\x1f", 2)
     assert len(parts) == 3
     assert parts[0].startswith("air_temperature")
-    assert "latitude" in parts[1]
+    assert parts[1] == "mock-field-summary"
     assert "units" in parts[2]
 
 

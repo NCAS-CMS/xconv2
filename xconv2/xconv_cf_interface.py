@@ -45,10 +45,9 @@ def field_info(fields: object) -> list[str]:
     """
     rows: list[str] = []
     for x in fields:
-        
         id_ = f"{x.identity().strip()}{x.shape}"
         props = x.properties()
-        info  = str(x)
+        info = str(x)
         rows.append(f"{id_}\x1f{info}\x1f{str(props)}")
 
     return rows
