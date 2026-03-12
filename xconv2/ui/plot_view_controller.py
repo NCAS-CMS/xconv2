@@ -376,12 +376,11 @@ class PlotViewController:
         if not file_path:
             return
 
-        if selected_filter == format_filters["svg"]:
-            selected_ext = "svg"
-        elif selected_filter == format_filters["pdf"]:
-            selected_ext = "pdf"
-        else:
-            selected_ext = default_format
+        selected_ext = default_format
+        for ext, filt in format_filters.items():
+            if selected_filter == filt:
+                selected_ext = ext
+                break
 
         if not Path(file_path).suffix:
             file_path += f".{selected_ext}"
