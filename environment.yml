@@ -9,6 +9,9 @@ dependencies:
   - pip !=21.3
   - cf-plot
   - cf-python
+  - pandas
   - pyside6
   - superqt
   - zarr
+  # testing
+  - pytest
