@@ -17,11 +17,14 @@ xconv2 provides (or will provide) a graphical interface to local and remote weat
 
 ## Installation
 
-We intend to release this as a standalone executable for linux and macos, but for the moment you should use a Python 3.12 (or later) environment with
-udunits2 installed, then you can pip install from the source using one of these:
+We have released this as a standalone executable for Linux and MacOS on PyPI, and will do so on conda-forge too, for the moment you should use a Python 3.12 (or later) environment with `cartopy` and `udunits2` installed, then you can pip install from PyPI:
 
-`pip install "git+https://github.com/ncas-cms/xconv2.git"`
-`pip install "git+ssh://github.com/ncas-cms/xconv2.git"`
+```
+conda create -n xconv2
+conda activate xconv2
+mamba install -c conda-forge pip cartopy udunits2
+pip install xconv2
+```
 
 and then you should have `xconv2` available on your command line.
 
