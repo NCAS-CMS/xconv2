@@ -8,10 +8,12 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -152,3 +154,52 @@ class OpenGlobDialog(QDialog):
 
         expression = str((Path(base_dir).expanduser() / pattern))
         return expression, True
+
+
+class OpenURIDialog(QDialog):
+    """Dialog for collecting a URI and placeholder remote access options."""
+
+    _PROTOCOLS = ["S3", "HTTPS", "SSH"]
+
+    def __init__(self, parent: QWidget | None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Open URI")
+
+        layout = QVBoxLayout(self)
+
+        uri_label = QLabel("URI:")
+        layout.addWidget(uri_label)
+
+        self.uri_edit = QLineEdit("")
+        self.uri_edit.setPlaceholderText("Examples: s3://bucket/path, https://host/path, ssh://user@host/path")
+        layout.addWidget(self.uri_edit)
+
+        options_group = QGroupBox("Access options")
+        options_layout = QVBoxLayout(options_group)
+        self.protocol_tabs = QTabWidget()
+        for protocol in self._PROTOCOLS:
+            tab = QWidget()
+            tab_layout = QVBoxLayout(tab)
+            tab_layout.addWidget(QLabel(f"{protocol} access options are not implemented yet."))
+            tab_layout.addStretch(1)
+            self.protocol_tabs.addTab(tab, protocol)
+        options_layout.addWidget(self.protocol_tabs)
+        layout.addWidget(options_group)
+
+        buttons = QDialogButtonBox()
+        cancel_button = buttons.addButton(QDialogButtonBox.Cancel)
+        quit_button = buttons.addButton("Quit", QDialogButtonBox.AcceptRole)
+        cancel_button.clicked.connect(self.reject)
+        quit_button.clicked.connect(self.accept)
+        layout.addWidget(buttons)
+
+    @classmethod
+    def get_uri(cls, parent: QWidget | None) -> tuple[str, str, bool]:
+        """Return the entered URI, selected protocol, and acceptance state."""
+        dialog = cls(parent)
+        if dialog.exec() != QDialog.Accepted:
+            return "", "", False
+
+        uri = dialog.uri_edit.text().strip()
+        protocol = cls._PROTOCOLS[dialog.protocol_tabs.currentIndex()]
+        return uri, protocol, True

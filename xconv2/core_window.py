@@ -52,7 +52,7 @@ from .ui.field_metadata_controller import FieldMetadataController
 from .ui.menu_controller import MenuController
 from .ui.plot_view_controller import PlotViewController
 from .ui.selection_controller import SelectionController
-from .ui.dialogs import OpenGlobDialog
+from .ui.dialogs import OpenGlobDialog, OpenURIDialog
 from .ui.settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
@@ -971,8 +971,8 @@ class CFVCore(QMainWindow):
         self.on_file_selected(expression)
 
     def _choose_uris(self) -> None:
-        """Placeholder for future multi-URI open flow."""
-        self._show_not_implemented_dialog("Open URIs")
+        """Show URI dialog scaffold for future remote open support."""
+        OpenURIDialog.get_uri(self)
 
     def _set_window_title_for_file(self, file_path: str) -> None:
         """Update the window title to reflect the selected file."""
