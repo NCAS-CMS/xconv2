@@ -231,7 +231,7 @@ class CFVCore(QMainWindow):
         left_logo_column.addWidget(
             self._build_about_logo_label(
                 "cf-python",
-                ["cf-logo.png", "cf-logo.svg", "cf-python-logo.png", "cf-python-logo.svg"],
+                ["cf-logo-t.svg",],
                 112,
             ),
             alignment=Qt.AlignHCenter,
