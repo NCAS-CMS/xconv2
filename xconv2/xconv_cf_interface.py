@@ -28,7 +28,7 @@ __all__ = [
     "run_line_plot",
 ]
 
-cfp.setvars(title_fontsize=10.5)
+
 
 def field_info(fields: object) -> list[str]:
     """
@@ -207,7 +207,9 @@ def estimate_layout_padding(
     *,
     page_title: str | None,
     page_title_display: bool,
+    page_title_fontsize: float,
     annotation_text: str,
+    annotation_fontsize: float,
     run_prepass: Callable[[], None],
 ) -> tuple[float, float]:
     """
@@ -237,7 +239,7 @@ def estimate_layout_padding(
 
     title_artist = None
     if page_title_display and page_title:
-        title_artist = fig.suptitle(str(page_title), y=0.995, fontsize=10)
+        title_artist = fig.suptitle(str(page_title), y=0.995, fontsize=page_title_fontsize)
 
     annotation_artist = None
     if annotation_text:
@@ -247,7 +249,7 @@ def estimate_layout_padding(
             annotation_text,
             ha="center",
             va="bottom",
-            fontsize=8,
+            fontsize=annotation_fontsize,
         )
 
     canvas.draw()
@@ -347,6 +349,20 @@ def run_contour_plot(
     annotation_free_text = str(options.get("annotation_free_text", "") or "").strip()
     cscale = options.get("cscale")
 
+    def _positive_float_option(key: str, default: float) -> float:
+        raw = options.get(key, default)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return default
+        if value <= 0:
+            return default
+        return value
+
+    contour_title_fontsize = _positive_float_option("contour_title_fontsize", 10.5)
+    page_title_fontsize = _positive_float_option("page_title_fontsize", 10.0)
+    annotation_fontsize = _positive_float_option("annotation_fontsize", 8.0)
+
     fill = bool(options.get("fill", True))
     lines_enabled = bool(options.get("lines", False))
     line_labels = bool(options.get("line_labels", True))
@@ -365,6 +381,8 @@ def run_contour_plot(
 
     page_margin_top = max(0.0, min(page_margin_top, 0.25))
     page_margin_bottom = max(0.0, min(page_margin_bottom, 0.25))
+
+
 
     if cscale:
         cfp.cscale(scale=cscale)
@@ -436,7 +454,9 @@ def run_contour_plot(
     top_padding, bottom_padding = estimate_layout_padding(
         page_title=page_title,
         page_title_display=page_title_display,
+        page_title_fontsize=page_title_fontsize,
         annotation_text=annotation_text_value,
+        annotation_fontsize=annotation_fontsize,
         run_prepass=_run_contour_prepass,
     )
     top_padding += page_margin_top
@@ -450,6 +470,10 @@ def run_contour_plot(
         cfp.gopen(file=filename)
 
     _apply_levels()
+
+    if hasattr(cfp, "setvars"):
+        cfp.setvars(title_fontsize=contour_title_fontsize)
+
     cfp.con(pfld, **contour_kwargs)
     
     mycanvas = plt.gcf()
@@ -459,10 +483,17 @@ def run_contour_plot(
         apply_vertical_padding(mycanvas, top_padding, bottom_padding)
 
     if page_title_display and page_title:
-        mycanvas.suptitle(str(page_title), y=0.995, fontsize=10)
+        mycanvas.suptitle(str(page_title), y=0.995, fontsize=page_title_fontsize)
 
     if annotation_text_value:
-        mycanvas.text(0.5, 0.02, annotation_text_value, ha="center", va="bottom", fontsize=8)
+        mycanvas.text(
+            0.5,
+            0.02,
+            annotation_text_value,
+            ha="center",
+            va="bottom",
+            fontsize=annotation_fontsize,
+        )
 
     if filename is not None:
         cfp.gclose()
@@ -475,7 +506,8 @@ def run_line_plot(
 ) -> None:
     """Render line plots via the dedicated LinePlot helper class."""
     _ = (selection_spec, collapse_by_coord)
-    plotter = LinePlot(pfld=pfld, options=options, collapse_by_coord=collapse_by_coord)
+    plotter = LinePlot(pfld=pfld, options=options, 
+                       collapse_by_coord=collapse_by_coord)
     plotter.render()
 
 

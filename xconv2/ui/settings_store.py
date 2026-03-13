@@ -32,6 +32,9 @@ class SettingsStore:
             "max_recent_files": self.default_max_recent_files,
             "field_list_rows": 12,
             "visible_coordinate_rows": 4,
+            "contour_title_fontsize": 10.5,
+            "page_title_fontsize": 10.0,
+            "annotation_fontsize": 8.0,
             "default_plot_filename": "xconv_{timestamp}",
             "default_plot_format": "png",
             "last_save_code_dir": str(Path.home()),
@@ -102,6 +105,27 @@ class SettingsStore:
         visible_coordinate_rows = settings.get("visible_coordinate_rows")
         if not isinstance(visible_coordinate_rows, int) or visible_coordinate_rows < 1:
             settings["visible_coordinate_rows"] = 4
+
+        contour_title_fontsize = settings.get("contour_title_fontsize")
+        if (
+            not isinstance(contour_title_fontsize, (int, float))
+            or float(contour_title_fontsize) <= 0
+        ):
+            settings["contour_title_fontsize"] = 10.5
+
+        page_title_fontsize = settings.get("page_title_fontsize")
+        if (
+            not isinstance(page_title_fontsize, (int, float))
+            or float(page_title_fontsize) <= 0
+        ):
+            settings["page_title_fontsize"] = 10.0
+
+        annotation_fontsize = settings.get("annotation_fontsize")
+        if (
+            not isinstance(annotation_fontsize, (int, float))
+            or float(annotation_fontsize) <= 0
+        ):
+            settings["annotation_fontsize"] = 8.0
 
         default_plot_filename = settings.get("default_plot_filename")
         if not isinstance(default_plot_filename, str) or not default_plot_filename.strip():

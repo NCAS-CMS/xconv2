@@ -391,6 +391,11 @@ class CFVMain(CFVCore):
             return
 
         plot_options = dict(self.plot_options_by_kind.get(plot_kind, {}))
+        if plot_kind == "contour":
+            plot_options.setdefault("contour_title_fontsize", self._contour_title_fontsize())
+            plot_options.setdefault("page_title_fontsize", self._page_title_fontsize())
+            plot_options.setdefault("annotation_fontsize", self._annotation_fontsize())
+
         if save_plot_path:
             plot_options["filename"] = str(Path(save_plot_path).expanduser())
         elif not plot_options:

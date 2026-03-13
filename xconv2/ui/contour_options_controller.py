@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -49,7 +50,7 @@ class ContourOptionsController:
 
         dialog = QDialog(self.host)
         dialog.setWindowTitle("Contour Options")
-        dialog.resize(520, 280)
+        dialog.resize(540, 360)
 
         layout = QVBoxLayout(dialog)
 
@@ -258,9 +259,15 @@ class ContourOptionsController:
         explicit_radio.toggled.connect(_sync_mode)
         _sync_mode()
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        cancel_button = QPushButton("Cancel")
+        plot_button = QPushButton("Apply")
+        ok_button = QPushButton("Apply && Close")
+        button_row.addWidget(cancel_button)
+        button_row.addWidget(plot_button)
+        button_row.addWidget(ok_button)
+        cancel_button.clicked.connect(dialog.reject)
 
         levels_layout.addWidget(default_radio)
         levels_layout.addWidget(auto_radio)
@@ -365,89 +372,159 @@ class ContourOptionsController:
         style_top_row.addLayout(style_checks_col, 1)
         style_top_row.addLayout(style_cscale_col, 1)
 
+        style_detail_grid = QGridLayout()
+        style_detail_grid.setContentsMargins(0, 0, 0, 0)
+        style_detail_grid.setHorizontalSpacing(12)
+        style_detail_grid.addLayout(negative_row, 0, 0)
+        style_detail_grid.addLayout(zero_row, 0, 1)
+        style_detail_grid.addWidget(blockfill_fast_checkbox, 1, 0)
+        style_detail_grid.addWidget(blockfill_checkbox, 1, 1)
+        style_detail_grid.setColumnStretch(0, 1)
+        style_detail_grid.setColumnStretch(1, 1)
+
         style_layout.addLayout(style_top_row)
-        style_layout.addLayout(negative_row)
-        style_layout.addLayout(zero_row)
-        style_layout.addWidget(blockfill_checkbox)
-        style_layout.addWidget(blockfill_fast_checkbox)
+        style_layout.addLayout(style_detail_grid)
+
+        text_sizes_group = QGroupBox("Text Sizes")
+        text_sizes_layout = QGridLayout(text_sizes_group)
+        text_sizes_layout.setContentsMargins(9, 9, 9, 9)
+        text_sizes_layout.setHorizontalSpacing(12)
+        text_sizes_layout.setVerticalSpacing(6)
+
+        contour_title_fontsize_label = QLabel("contour title")
+        contour_title_fontsize_spin = QDoubleSpinBox()
+        contour_title_fontsize_spin.setRange(1.0, 48.0)
+        contour_title_fontsize_spin.setDecimals(1)
+        contour_title_fontsize_spin.setSingleStep(0.5)
+        contour_title_fontsize_spin.setValue(
+            float(existing.get("contour_title_fontsize", self.host._contour_title_fontsize()))
+        )
+
+        page_title_fontsize_label = QLabel("page title")
+        page_title_fontsize_spin = QDoubleSpinBox()
+        page_title_fontsize_spin.setRange(1.0, 48.0)
+        page_title_fontsize_spin.setDecimals(1)
+        page_title_fontsize_spin.setSingleStep(0.5)
+        page_title_fontsize_spin.setValue(
+            float(existing.get("page_title_fontsize", self.host._page_title_fontsize()))
+        )
+
+        annotation_fontsize_label = QLabel("annotations")
+        annotation_fontsize_spin = QDoubleSpinBox()
+        annotation_fontsize_spin.setRange(1.0, 48.0)
+        annotation_fontsize_spin.setDecimals(1)
+        annotation_fontsize_spin.setSingleStep(0.5)
+        annotation_fontsize_spin.setValue(
+            float(existing.get("annotation_fontsize", self.host._annotation_fontsize()))
+        )
+
+        reset_text_sizes_button = QPushButton("Reset to GUI defaults")
+
+        def _reset_text_sizes() -> None:
+            contour_title_fontsize_spin.setValue(self.host._contour_title_fontsize())
+            page_title_fontsize_spin.setValue(self.host._page_title_fontsize())
+            annotation_fontsize_spin.setValue(self.host._annotation_fontsize())
+
+        reset_text_sizes_button.clicked.connect(_reset_text_sizes)
+
+        text_sizes_layout.addWidget(contour_title_fontsize_label, 0, 0)
+        text_sizes_layout.addWidget(page_title_fontsize_label, 0, 1)
+        text_sizes_layout.addWidget(annotation_fontsize_label, 0, 2)
+        text_sizes_layout.addWidget(contour_title_fontsize_spin, 1, 0)
+        text_sizes_layout.addWidget(page_title_fontsize_spin, 1, 1)
+        text_sizes_layout.addWidget(annotation_fontsize_spin, 1, 2)
+        text_sizes_layout.addWidget(reset_text_sizes_button, 2, 0, 1, 3, Qt.AlignRight)
+        text_sizes_layout.setColumnStretch(0, 1)
+        text_sizes_layout.setColumnStretch(1, 1)
+        text_sizes_layout.setColumnStretch(2, 1)
 
         layout.addWidget(titles_group)
         layout.addWidget(annotations_group)
         layout.addWidget(levels_group)
         layout.addWidget(style_group)
-        layout.addWidget(buttons)
+        layout.addWidget(text_sizes_group)
+        layout.addLayout(button_row)
 
-        if dialog.exec() != QDialog.Accepted:
-            return
+        def _apply_options() -> bool:
+            if default_radio.isChecked():
+                options = {"mode": "default"}
+            elif explicit_radio.isChecked():
+                raw_levels = [piece.strip() for piece in explicit_edit.text().split(",") if piece.strip()]
+                try:
+                    levels = [float(piece) for piece in raw_levels]
+                except ValueError:
+                    self.host.status.showMessage(
+                        "Invalid explicit contour levels; expected comma-separated numbers"
+                    )
+                    return False
 
-        if default_radio.isChecked():
-            options = {"mode": "default"}
-        elif explicit_radio.isChecked():
-            raw_levels = [piece.strip() for piece in explicit_edit.text().split(",") if piece.strip()]
-            try:
-                levels = [float(piece) for piece in raw_levels]
-            except ValueError:
-                self.host.status.showMessage("Invalid explicit contour levels; expected comma-separated numbers")
-                return
+                if len(levels) < 2:
+                    self.host.status.showMessage("Please provide at least two contour levels")
+                    return False
 
-            if len(levels) < 2:
-                self.host.status.showMessage("Please provide at least two contour levels")
-                return
+                options = {
+                    "mode": "explicit",
+                    "levels": levels,
+                }
+            else:
+                try:
+                    user_min = float(min_edit.text().strip())
+                    user_max = float(max_edit.text().strip())
+                except ValueError:
+                    self.host.status.showMessage("Invalid contour min/max values")
+                    return False
 
-            options = {
-                "mode": "explicit",
-                "levels": levels,
-            }
-        else:
-            try:
-                user_min = float(min_edit.text().strip())
-                user_max = float(max_edit.text().strip())
-            except ValueError:
-                self.host.status.showMessage("Invalid contour min/max values")
-                return
+                if user_min == user_max:
+                    self.host.status.showMessage("Contour min and max must differ")
+                    return False
 
-            if user_min == user_max:
-                self.host.status.showMessage("Contour min and max must differ")
-                return
+                lo, hi = sorted((user_min, user_max))
+                options = {
+                    "mode": "auto",
+                    "min": lo,
+                    "max": hi,
+                    "intervals": int(intervals_spin.value()),
+                }
 
-            lo, hi = sorted((user_min, user_max))
-            options = {
-                "mode": "auto",
-                "min": lo,
-                "max": hi,
-                "intervals": int(intervals_spin.value()),
-            }
+            options["fill"] = bool(fill_checkbox.isChecked())
+            options["lines"] = bool(lines_checkbox.isChecked())
+            options["line_labels"] = bool(line_labels_checkbox.isChecked())
+            options["negative_linestyle"] = str(negative_style_combo.currentText())
+            zero_thick_value = float(zero_thick_spin.value())
+            options["zero_thick"] = zero_thick_value if zero_thick_value > 0 else False
+            options["blockfill"] = bool(blockfill_checkbox.isChecked())
+            options["blockfill_fast"] = True if blockfill_fast_checkbox.isChecked() else None
+            options["contour_title_fontsize"] = float(contour_title_fontsize_spin.value())
+            options["page_title_fontsize"] = float(page_title_fontsize_spin.value())
+            options["annotation_fontsize"] = float(annotation_fontsize_spin.value())
+            title_text = title_edit.text().strip()
+            if title_text:
+                options["title"] = title_text
+            page_title_text = page_title_edit.text().strip()
+            options["page_title_display"] = bool(page_title_display_checkbox.isChecked())
+            if options["page_title_display"] and page_title_text:
+                options["page_title"] = page_title_text
+            options["page_margin_top"] = float(top_margin_spin.value())
+            options["page_margin_bottom"] = float(bottom_margin_spin.value())
+            free_text = free_text_edit.text().strip()
+            if free_text:
+                options["annotation_free_text"] = free_text
+            options["annotation_display"] = bool(annotation_display_checkbox.isChecked())
+            if selected_annotation_props:
+                max_selected = 3 if free_text else 4
+                options["annotation_properties"] = selected_annotation_props[:max_selected]
+            if selected_cscale.get("value"):
+                options["cscale"] = selected_cscale["value"]
 
-        options["fill"] = bool(fill_checkbox.isChecked())
-        options["lines"] = bool(lines_checkbox.isChecked())
-        options["line_labels"] = bool(line_labels_checkbox.isChecked())
-        options["negative_linestyle"] = str(negative_style_combo.currentText())
-        zero_thick_value = float(zero_thick_spin.value())
-        options["zero_thick"] = zero_thick_value if zero_thick_value > 0 else False
-        options["blockfill"] = bool(blockfill_checkbox.isChecked())
-        options["blockfill_fast"] = True if blockfill_fast_checkbox.isChecked() else None
-        title_text = title_edit.text().strip()
-        if title_text:
-            options["title"] = title_text
-        page_title_text = page_title_edit.text().strip()
-        options["page_title_display"] = bool(page_title_display_checkbox.isChecked())
-        if options["page_title_display"] and page_title_text:
-            options["page_title"] = page_title_text
-        options["page_margin_top"] = float(top_margin_spin.value())
-        options["page_margin_bottom"] = float(bottom_margin_spin.value())
-        free_text = free_text_edit.text().strip()
-        if free_text:
-            options["annotation_free_text"] = free_text
-        options["annotation_display"] = bool(annotation_display_checkbox.isChecked())
-        if selected_annotation_props:
-            max_selected = 3 if free_text else 4
-            options["annotation_properties"] = selected_annotation_props[:max_selected]
-        if selected_cscale.get("value"):
-            options["cscale"] = selected_cscale["value"]
+            self.host.plot_options_by_kind["contour"] = options
+            self.host.status.showMessage("Updated contour options")
+            self.host._request_plot_update()
+            return True
 
-        self.host.plot_options_by_kind["contour"] = options
-        self.host.status.showMessage("Updated contour options")
-        self.host._request_plot_update()
+        ok_button.clicked.connect(lambda: dialog.accept() if _apply_options() else None)
+        plot_button.clicked.connect(_apply_options)
+
+        dialog.exec()
 
     def show_annotation_properties_chooser(
         self,

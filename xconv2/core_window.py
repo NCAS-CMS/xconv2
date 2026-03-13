@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -386,6 +387,30 @@ class CFVCore(QMainWindow):
             return raw
         return 4
 
+    def _contour_title_fontsize(self, settings: dict[str, object] | None = None) -> float:
+        """Return validated default contour title font size."""
+        source = settings if settings is not None else self._settings
+        raw = source.get("contour_title_fontsize", 10.5)
+        if isinstance(raw, (int, float)) and float(raw) > 0:
+            return float(raw)
+        return 10.5
+
+    def _page_title_fontsize(self, settings: dict[str, object] | None = None) -> float:
+        """Return validated default page title font size."""
+        source = settings if settings is not None else self._settings
+        raw = source.get("page_title_fontsize", 10.0)
+        if isinstance(raw, (int, float)) and float(raw) > 0:
+            return float(raw)
+        return 10.0
+
+    def _annotation_fontsize(self, settings: dict[str, object] | None = None) -> float:
+        """Return validated default annotation font size."""
+        source = settings if settings is not None else self._settings
+        raw = source.get("annotation_fontsize", 8.0)
+        if isinstance(raw, (int, float)) and float(raw) > 0:
+            return float(raw)
+        return 8.0
+
     @staticmethod
     def _timestamp_plot_filename() -> str:
         """Return default timestamp-based plot filename stem."""
@@ -466,6 +491,39 @@ class CFVCore(QMainWindow):
         coord_rows_row.addStretch(1)
         coord_rows_row.addWidget(coord_rows_spin)
 
+        contour_title_fontsize_row = QHBoxLayout()
+        contour_title_fontsize_label = QLabel("Default contour title font size")
+        contour_title_fontsize_spin = QDoubleSpinBox()
+        contour_title_fontsize_spin.setRange(1.0, 48.0)
+        contour_title_fontsize_spin.setDecimals(1)
+        contour_title_fontsize_spin.setSingleStep(0.5)
+        contour_title_fontsize_spin.setValue(self._contour_title_fontsize())
+        contour_title_fontsize_row.addWidget(contour_title_fontsize_label)
+        contour_title_fontsize_row.addStretch(1)
+        contour_title_fontsize_row.addWidget(contour_title_fontsize_spin)
+
+        page_title_fontsize_row = QHBoxLayout()
+        page_title_fontsize_label = QLabel("Default page title font size")
+        page_title_fontsize_spin = QDoubleSpinBox()
+        page_title_fontsize_spin.setRange(1.0, 48.0)
+        page_title_fontsize_spin.setDecimals(1)
+        page_title_fontsize_spin.setSingleStep(0.5)
+        page_title_fontsize_spin.setValue(self._page_title_fontsize())
+        page_title_fontsize_row.addWidget(page_title_fontsize_label)
+        page_title_fontsize_row.addStretch(1)
+        page_title_fontsize_row.addWidget(page_title_fontsize_spin)
+
+        annotation_fontsize_row = QHBoxLayout()
+        annotation_fontsize_label = QLabel("Default annotation font size")
+        annotation_fontsize_spin = QDoubleSpinBox()
+        annotation_fontsize_spin.setRange(1.0, 48.0)
+        annotation_fontsize_spin.setDecimals(1)
+        annotation_fontsize_spin.setSingleStep(0.5)
+        annotation_fontsize_spin.setValue(self._annotation_fontsize())
+        annotation_fontsize_row.addWidget(annotation_fontsize_label)
+        annotation_fontsize_row.addStretch(1)
+        annotation_fontsize_row.addWidget(annotation_fontsize_spin)
+
         plot_filename_row = QHBoxLayout()
         plot_filename_label = QLabel("Default plot filename")
         plot_filename_edit = QLineEdit(self._plot_filename_template())
@@ -537,6 +595,9 @@ class CFVCore(QMainWindow):
         gui_defaults_layout.addLayout(recent_row)
         gui_defaults_layout.addLayout(field_rows_row)
         gui_defaults_layout.addLayout(coord_rows_row)
+        gui_defaults_layout.addLayout(contour_title_fontsize_row)
+        gui_defaults_layout.addLayout(page_title_fontsize_row)
+        gui_defaults_layout.addLayout(annotation_fontsize_row)
 
         output_frame = QGroupBox("Output")
         output_layout = QVBoxLayout(output_frame)
@@ -556,6 +617,9 @@ class CFVCore(QMainWindow):
         self._settings["max_recent_files"] = int(recent_spin.value())
         self._settings["field_list_rows"] = int(field_rows_spin.value())
         self._settings["visible_coordinate_rows"] = int(coord_rows_spin.value())
+        self._settings["contour_title_fontsize"] = float(contour_title_fontsize_spin.value())
+        self._settings["page_title_fontsize"] = float(page_title_fontsize_spin.value())
+        self._settings["annotation_fontsize"] = float(annotation_fontsize_spin.value())
         self._settings["default_plot_filename"] = self._sanitize_plot_filename_stem(
             plot_filename_edit.text()
         )

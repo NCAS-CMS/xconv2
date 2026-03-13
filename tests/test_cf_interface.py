@@ -142,6 +142,7 @@ class _FakeCFPlot:
         self.lineplot_calls: list[dict[str, object]] = []
         self.cscale_calls: list[dict[str, object]] = []
         self.gopen_calls: list[dict[str, object]] = []
+        self.setvars_calls: list[dict[str, object]] = []
         self.gclose_calls = 0
 
     def levs(self, **kwargs: object) -> None:
@@ -161,6 +162,9 @@ class _FakeCFPlot:
         payload.update(kwargs)
         self.gopen_calls.append(payload)
 
+    def setvars(self, **kwargs: object) -> None:
+        self.setvars_calls.append(kwargs)
+
     def gclose(self) -> None:
         self.gclose_calls += 1
 
@@ -168,9 +172,13 @@ class _FakeCFPlot:
 class _FakeFigure:
     def __init__(self) -> None:
         self.text_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+        self.suptitle_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
     def text(self, *args: object, **kwargs: object) -> None:
         self.text_calls.append((args, kwargs))
+
+    def suptitle(self, *args: object, **kwargs: object) -> None:
+        self.suptitle_calls.append((args, kwargs))
 
 
 class _FakePlt:
@@ -205,9 +213,43 @@ def test_run_contour_plot_applies_levels_annotations_and_save(
     assert cfp.cscale_calls == [{"scale": "magma"}]
     assert cfp.gopen_calls == [{"file": "/tmp/mock.png"}]
     assert cfp.levs_calls == [{"manual": [-1.0, 0.0, 1.0]}]
+    assert cfp.setvars_calls == [{"title_fontsize": 10.5}]
     assert cfp.con_calls
     assert cfp.gclose_calls == 1
     assert plt_obj.figure.text_calls
+    assert plt_obj.figure.text_calls[-1][1]["fontsize"] == 8.0
+
+
+def test_run_contour_plot_uses_configured_title_font_sizes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfp = _FakeCFPlot()
+    plt_obj = _FakePlt()
+
+    monkeypatch.setattr(cf_interface, "cfp", cfp)
+    monkeypatch.setattr(cf_interface, "plt", plt_obj)
+
+    run_contour_plot(
+        pfld=object(),
+        options={
+            "mode": "default",
+            "page_title": "Overview",
+            "page_title_display": True,
+            "annotation_display": True,
+            "annotation_properties": [("units", "K")],
+            "contour_title_fontsize": 12.5,
+            "page_title_fontsize": 14.0,
+            "annotation_fontsize": 9.5,
+        },
+    )
+
+    assert cfp.setvars_calls == [{"title_fontsize": 12.5}]
+    assert plt_obj.figure.suptitle_calls == [
+        (("Overview",), {"y": 0.995, "fontsize": 14.0})
+    ]
+    assert plt_obj.figure.text_calls == [
+        ((0.5, 0.02, "units: K"), {"ha": "center", "va": "bottom", "fontsize": 9.5})
+    ]
 
 
 def test_run_contour_plot_sets_title_from_singleton_selection(

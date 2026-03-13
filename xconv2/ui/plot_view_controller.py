@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QFontDatabase, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -105,6 +105,7 @@ class PlotViewController:
         self.host.plot_info_output.setPlaceholderText("Click a field to see details...")
         self.host.plot_info_output.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.host.plot_info_output.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.host.plot_info_output.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
         self.host.plot_info_output.setPlainText(
             getattr(self.host, "current_selection_info_text", "No selection info available.")
         )
