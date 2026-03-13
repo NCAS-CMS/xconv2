@@ -1,0 +1,56 @@
+@startuml CoreWindowPhase3Class
+skinparam classAttributeIconSize 0
+hide empty methods
+hide empty fields
+skinparam CircleCharacterFontColor black
+skinparam CircleBackgroundColor white
+skinparam NoteBackgroundColor #FFFFE0
+skinparam NoteBorderColor black
+
+
+package "xconv2 (alpha)" {
+  class CFVCore
+  note "CFVCore is the main\ncontroller for the core\nwindow logic and state" as Note1
+CFVCore . Note1
+ note "CFVMain is the main window controller.\nIt handles the interactions with the worker,\nsending code and receiving results" as Note2
+
+class CFVMain
+CFVMain . Note2
+  
+frame "Worker Process" {
+  interface Worker
+  class "xconv_cf_interface" as CFInterface << (S,#FF7700) Science Code >>
+  Worker --> CFInterface : uses\nmethods\nfrom
+}
+
+
+
+ 
+
+
+
+CFVMain <-> Worker : uses\n    stdin/stdout for\n    communication
+
+
+package "xconv2 (alpha).ui" {
+  class Menu\nController
+  class Settings\nStore
+  class Selection\nController
+  class FieldMetadata\nController
+  class PlotView\nController
+  class ContourOptions\nController
+  
+
+}
+
+CFVMain --|> CFVCore
+CFVCore o-- Menu\nController : menu\norchestration
+CFVCore o-- Settings\nStore : settings\npersistence
+CFVCore o-- Selection\nController : slider\ncollapse state
+CFVCore o-- FieldMetadata\nController : field\nproperties UI
+CFVCore o-- PlotView\nController : plot panel\n+ save actions
+CFVCore o-- ContourOptions\nController : contour\ndialogs
+
+CFInterface <..> ContourOptions\nController : for\nexample 
+}
+@enduml
