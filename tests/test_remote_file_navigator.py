@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from xconv2.ui.remote_file_navigator import (
     RemoteFilesystemSpec,
     build_remote_filesystem_spec,
     build_remote_uri,
+    filter_hidden_entries,
     normalize_remote_entries,
 )
 
@@ -51,9 +54,9 @@ def test_build_ssh_filesystem_spec_uses_existing_host_details() -> None:
     assert spec.storage_options == {
         "host": "alpha.example.org",
         "username": "alice",
-        "key_filename": "~/.ssh/id_alpha",
+        "key_filename": str((Path.home() / ".ssh/id_alpha").expanduser()),
     }
-    assert spec.root_path == "/"
+    assert spec.root_path == "."
 
 
 def test_normalize_remote_entries_sorts_dirs_first() -> None:
@@ -65,6 +68,18 @@ def test_normalize_remote_entries_sorts_dirs_first() -> None:
     assert [entry.name for entry in entries] == ["folder", "file.nc"]
     assert entries[0].is_dir is True
     assert entries[1].size == 12
+
+
+def test_filter_hidden_entries_excludes_dot_prefixed_names_by_default() -> None:
+    entries = normalize_remote_entries([
+        {"name": ".ssh", "type": "directory", "size": 0},
+        {"name": "visible.txt", "type": "file", "size": 12},
+    ])
+
+    visible_entries = filter_hidden_entries(entries, show_hidden=False)
+
+    assert [entry.name for entry in visible_entries] == ["visible.txt"]
+    assert [entry.name for entry in filter_hidden_entries(entries, show_hidden=True)] == [".ssh", "visible.txt"]
 
 
 def test_build_remote_uri_for_s3_and_ssh() -> None:

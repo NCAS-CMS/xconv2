@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QHBoxLayout,
@@ -94,12 +96,12 @@ def build_remote_filesystem_spec(config: dict[str, Any]) -> RemoteFilesystemSpec
         if user:
             storage_options["username"] = user
         if identity_file:
-            storage_options["key_filename"] = identity_file
+            storage_options["key_filename"] = str(Path(identity_file).expanduser())
 
         return RemoteFilesystemSpec(
             protocol="sftp",
             storage_options=storage_options,
-            root_path="/",
+            root_path=".",
             display_name=alias,
             uri_scheme="ssh",
             uri_authority=hostname,
@@ -162,6 +164,13 @@ def normalize_remote_entries(entries: list[Any]) -> list[RemoteEntry]:
     return sorted(normalized, key=lambda item: (not item.is_dir, item.name.lower()))
 
 
+def filter_hidden_entries(entries: list[RemoteEntry], *, show_hidden: bool) -> list[RemoteEntry]:
+    """Optionally remove dot-prefixed entries from a normalized listing."""
+    if show_hidden:
+        return entries
+    return [entry for entry in entries if not entry.name.startswith(".")]
+
+
 def build_remote_uri(spec: RemoteFilesystemSpec, path: str) -> str:
     """Build a user-facing remote URI from a filesystem path."""
     cleaned = path.strip()
@@ -193,6 +202,12 @@ class RemoteFileNavigatorDialog(QDialog):
 
         header = QLabel(f"Browsing {self._spec.display_name}")
         layout.addWidget(header)
+
+        self.show_hidden_check = QCheckBox("Show hidden files")
+        self.show_hidden_check.setChecked(self._spec.protocol != "sftp")
+        self.show_hidden_check.setVisible(self._spec.protocol == "sftp")
+        self.show_hidden_check.toggled.connect(self._on_show_hidden_toggled)
+        layout.addWidget(self.show_hidden_check)
 
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Name", "Type", "Size"])
@@ -235,7 +250,15 @@ class RemoteFileNavigatorDialog(QDialog):
         listing = self._filesystem.ls(path, detail=True)
         if not isinstance(listing, list):
             raise RuntimeError(f"Unexpected listing result for {path!r}")
-        return normalize_remote_entries(listing)
+        entries = normalize_remote_entries(listing)
+        return filter_hidden_entries(entries, show_hidden=self.show_hidden_check.isChecked())
+
+    def _on_show_hidden_toggled(self, _checked: bool) -> None:
+        """Refresh the tree when hidden-file visibility changes."""
+        self._selected_uri = ""
+        self.selection_label.setText("No file selected")
+        self.open_button.setEnabled(False)
+        self._populate_root()
 
     def _create_item(self, entry: RemoteEntry) -> QTreeWidgetItem:
         """Create a tree item for a normalized remote entry."""
