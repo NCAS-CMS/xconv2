@@ -45,6 +45,7 @@ class SettingsStore:
                 "ssh_hostname": "",
                 "ssh_user": "",
                 "ssh_identity_file": "",
+                "ssh_proxy_jump": "",
                 "cache_blocksize_mb": 2,
                 "cache_ram_buffer_mb": 1024,
                 "cache_strategy": "Block",

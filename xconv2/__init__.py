@@ -21,4 +21,4 @@ def _project_version() -> str:
 	return "0.0.0"
 
 
-__version__ = f"pre-alpha-{_project_version()}"
+__version__ = f"pre-beta-{_project_version()}"

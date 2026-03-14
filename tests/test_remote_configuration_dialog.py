@@ -25,6 +25,7 @@ Host alpha
     HostName alpha.example.org
     User alice
     IdentityFile ~/.ssh/id_alpha
+    ProxyJump gateway.example.org
 
 Host *
     User ignored
@@ -42,6 +43,7 @@ Host beta gamma
         "hostname": "alpha.example.org",
         "user": "alice",
         "identityfile": "~/.ssh/id_alpha",
+        "proxyjump": "gateway.example.org",
     }
     assert hosts["beta"]["hostname"] == "shared.example.org"
     assert hosts["gamma"]["user"] == "bob"
@@ -100,11 +102,13 @@ Host beta
         "new.example.org",
         "alice",
         "~/.ssh/id_alpha",
+        "gateway.example.org",
     )
 
     assert "HostName new.example.org" in updated
     assert "User alice" in updated
     assert "IdentityFile ~/.ssh/id_alpha" in updated
+    assert "ProxyJump gateway.example.org" in updated
     assert "Host beta" in updated
 
 
@@ -116,6 +120,7 @@ def test_save_ssh_host_writes_config_file(tmp_path: Path) -> None:
         "alpha.example.org",
         "alice",
         "~/.ssh/id_alpha",
+        "gateway.example.org",
         config_path=config_path,
     )
 
@@ -125,3 +130,4 @@ def test_save_ssh_host_writes_config_file(tmp_path: Path) -> None:
     assert "Host alpha" in content
     assert "HostName alpha.example.org" in content
     assert "User alice" in content
+    assert "ProxyJump gateway.example.org" in content

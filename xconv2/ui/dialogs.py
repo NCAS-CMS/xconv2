@@ -356,7 +356,7 @@ class RemoteConfigurationDialog(QDialog):
             if not active_hosts:
                 continue
 
-            if key in {"hostname", "user", "identityfile"}:
+            if key in {"hostname", "user", "identityfile", "proxyjump"}:
                 for alias in active_hosts:
                     hosts.setdefault(alias, {})[key] = value
 
@@ -373,11 +373,14 @@ class RemoteConfigurationDialog(QDialog):
         hostname: str,
         user: str,
         identity_file: str,
+        proxy_jump: str,
     ) -> str:
         """Render an ssh config block for a single host alias."""
         lines = [f"Host {alias}", f"    HostName {hostname}", f"    User {user}"]
         if identity_file.strip():
             lines.append(f"    IdentityFile {identity_file.strip()}")
+        if proxy_jump.strip():
+            lines.append(f"    ProxyJump {proxy_jump.strip()}")
         return "\n".join(lines)
 
     @classmethod
@@ -388,10 +391,17 @@ class RemoteConfigurationDialog(QDialog):
         hostname: str,
         user: str,
         identity_file: str,
+        proxy_jump: str = "",
     ) -> str:
         """Insert or replace a named host block in ssh config text."""
         lines = existing_text.splitlines()
-        block_lines = cls._render_ssh_host_block(alias, hostname, user, identity_file).splitlines()
+        block_lines = cls._render_ssh_host_block(
+            alias,
+            hostname,
+            user,
+            identity_file,
+            proxy_jump,
+        ).splitlines()
 
         start_idx: int | None = None
         end_idx: int | None = None
@@ -428,13 +438,21 @@ class RemoteConfigurationDialog(QDialog):
         hostname: str,
         user: str,
         identity_file: str,
+        proxy_jump: str = "",
         *,
         config_path: Path | None = None,
     ) -> Path:
         """Persist an SSH host alias to the user's ssh config file."""
         target_path = config_path or (Path.home() / ".ssh/config")
         existing_text = target_path.read_text(encoding="utf-8") if target_path.is_file() else ""
-        updated_text = cls._upsert_ssh_config_text(existing_text, alias, hostname, user, identity_file)
+        updated_text = cls._upsert_ssh_config_text(
+            existing_text,
+            alias,
+            hostname,
+            user,
+            identity_file,
+            proxy_jump,
+        )
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_text(updated_text, encoding="utf-8")
         return target_path
@@ -578,10 +596,13 @@ class RemoteConfigurationDialog(QDialog):
         self.ssh_existing_user.setReadOnly(True)
         self.ssh_existing_identity = QLineEdit("")
         self.ssh_existing_identity.setReadOnly(True)
+        self.ssh_existing_proxyjump = QLineEdit("")
+        self.ssh_existing_proxyjump.setReadOnly(True)
         existing_layout.addRow("Host alias:", self.ssh_existing_combo)
         existing_layout.addRow("Hostname:", self.ssh_existing_hostname)
         existing_layout.addRow("User:", self.ssh_existing_user)
         existing_layout.addRow("Identity File:", self.ssh_existing_identity)
+        existing_layout.addRow("ProxyJump:", self.ssh_existing_proxyjump)
         layout.addWidget(self.ssh_existing_group)
 
         self.ssh_new_group = QGroupBox("Add new")
@@ -589,6 +610,7 @@ class RemoteConfigurationDialog(QDialog):
         self.ssh_alias_edit = QLineEdit("")
         self.ssh_hostname_edit = QLineEdit("")
         self.ssh_user_edit = QLineEdit("")
+        self.ssh_proxy_jump_edit = QLineEdit("")
         identity_row = QHBoxLayout()
         self.ssh_identity_file_edit = QLineEdit("")
         identity_browse = QPushButton("Browse...")
@@ -601,6 +623,7 @@ class RemoteConfigurationDialog(QDialog):
         new_layout.addRow("Hostname:", self.ssh_hostname_edit)
         new_layout.addRow("User:", self.ssh_user_edit)
         new_layout.addRow("Identity File:", identity_widget)
+        new_layout.addRow("ProxyJump (optional):", self.ssh_proxy_jump_edit)
         layout.addWidget(self.ssh_new_group)
 
         layout.addStretch(1)
@@ -619,6 +642,7 @@ class RemoteConfigurationDialog(QDialog):
         self.ssh_existing_hostname.setText(str(details.get("hostname", "")))
         self.ssh_existing_user.setText(str(details.get("user", "")))
         self.ssh_existing_identity.setText(str(details.get("identityfile", "")))
+        self.ssh_existing_proxyjump.setText(str(details.get("proxyjump", "")))
 
     def _select_saved_s3_alias(self, alias: str, details: dict[str, Any]) -> None:
         """Switch UI state to an existing S3 selection after saving a new alias."""
@@ -752,6 +776,7 @@ class RemoteConfigurationDialog(QDialog):
                     "hostname": self.ssh_hostname_edit.text().strip(),
                     "user": self.ssh_user_edit.text().strip(),
                     "identity_file": self.ssh_identity_file_edit.text().strip(),
+                    "proxyjump": self.ssh_proxy_jump_edit.text().strip(),
                 }
             else:
                 alias = self.ssh_existing_combo.currentText()
@@ -782,6 +807,7 @@ class RemoteConfigurationDialog(QDialog):
             "ssh_hostname": self.ssh_hostname_edit.text().strip(),
             "ssh_user": self.ssh_user_edit.text().strip(),
             "ssh_identity_file": self.ssh_identity_file_edit.text().strip(),
+            "ssh_proxy_jump": self.ssh_proxy_jump_edit.text().strip(),
             "cache_blocksize_mb": int(self.cache_blocksize_spin.value()),
             "cache_ram_buffer_mb": int(self.cache_ram_buffer_spin.value()),
             "cache_strategy": self.cache_strategy_combo.currentText(),
@@ -846,6 +872,8 @@ class RemoteConfigurationDialog(QDialog):
             self.ssh_user_edit.setText(str(state["ssh_user"]))
         if isinstance(state.get("ssh_identity_file"), str):
             self.ssh_identity_file_edit.setText(str(state["ssh_identity_file"]))
+        if isinstance(state.get("ssh_proxy_jump"), str):
+            self.ssh_proxy_jump_edit.setText(str(state["ssh_proxy_jump"]))
 
         blocksize = state.get("cache_blocksize_mb")
         if isinstance(blocksize, int):
@@ -936,12 +964,14 @@ class RemoteConfigurationDialog(QDialog):
                 "hostname": self.ssh_hostname_edit.text().strip(),
                 "user": self.ssh_user_edit.text().strip(),
                 "identityfile": self.ssh_identity_file_edit.text().strip(),
+                "proxyjump": self.ssh_proxy_jump_edit.text().strip(),
             }
             self._save_ssh_host(
                 alias,
                 details["hostname"],
                 details["user"],
                 details["identityfile"],
+                details["proxyjump"],
             )
             self._select_saved_ssh_alias(alias, details)
 
