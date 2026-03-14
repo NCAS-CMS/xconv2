@@ -52,7 +52,7 @@ from .ui.field_metadata_controller import FieldMetadataController
 from .ui.menu_controller import MenuController
 from .ui.plot_view_controller import PlotViewController
 from .ui.selection_controller import SelectionController
-from .ui.dialogs import OpenGlobDialog, OpenURIDialog
+from .ui.dialogs import OpenGlobDialog, OpenURIDialog, RemoteConfigurationDialog, RemoteFileNavigatorDialog
 from .ui.settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
@@ -973,6 +973,17 @@ class CFVCore(QMainWindow):
     def _choose_uris(self) -> None:
         """Show URI dialog scaffold for future remote open support."""
         OpenURIDialog.get_uri(self)
+
+    def _choose_remote(self) -> None:
+        """Show remote configuration dialog before remote navigation."""
+        raw_state = self._settings.get("last_remote_configuration", {})
+        state = raw_state if isinstance(raw_state, dict) else {}
+        config, ok, next_state = RemoteConfigurationDialog.get_configuration(self, state=state)
+        self._settings["last_remote_configuration"] = next_state
+        self._save_settings()
+        if not ok or config is None:
+            return
+        RemoteFileNavigatorDialog.show_placeholder(self, config)
 
     def _set_window_title_for_file(self, file_path: str) -> None:
         """Update the window title to reflect the selected file."""
