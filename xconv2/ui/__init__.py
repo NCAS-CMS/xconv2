@@ -5,8 +5,8 @@ from .dialogs import (
 	OpenGlobDialog,
 	OpenURIDialog,
 	RemoteConfigurationDialog,
-	RemoteFileNavigatorDialog,
 )
+from .remote_file_navigator import RemoteFileNavigatorDialog
 
 __all__ = [
 	"InputDialogCustom",

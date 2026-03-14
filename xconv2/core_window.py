@@ -52,7 +52,8 @@ from .ui.field_metadata_controller import FieldMetadataController
 from .ui.menu_controller import MenuController
 from .ui.plot_view_controller import PlotViewController
 from .ui.selection_controller import SelectionController
-from .ui.dialogs import OpenGlobDialog, OpenURIDialog, RemoteConfigurationDialog, RemoteFileNavigatorDialog
+from .ui.dialogs import OpenGlobDialog, OpenURIDialog, RemoteConfigurationDialog
+from .ui.remote_file_navigator import RemoteFileNavigatorDialog
 from .ui.settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
@@ -983,7 +984,11 @@ class CFVCore(QMainWindow):
         self._save_settings()
         if not ok or config is None:
             return
-        RemoteFileNavigatorDialog.show_placeholder(self, config)
+        selected_uri, selected_ok = RemoteFileNavigatorDialog.get_remote_selection(self, config)
+        if not selected_ok:
+            return
+        self._set_window_title_for_file(selected_uri)
+        self._show_status_message(f"Selected remote file: {selected_uri}")
 
     def _set_window_title_for_file(self, file_path: str) -> None:
         """Update the window title to reflect the selected file."""

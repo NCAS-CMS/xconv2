@@ -958,33 +958,3 @@ class RemoteConfigurationDialog(QDialog):
         if dialog.exec() != QDialog.Accepted:
             return None, False, dialog.state()
         return dialog.configuration(), True, dialog.state()
-
-
-class RemoteFileNavigatorDialog(QDialog):
-    """Placeholder remote file navigator dialog."""
-
-    def __init__(self, parent: QWidget | None, config: dict[str, Any]) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Remote File Navigator")
-        self.resize(520, 220)
-
-        layout = QVBoxLayout(self)
-        protocol = str(config.get("protocol", "remote"))
-        remote = config.get("remote", {})
-        summary = "Not Implemented Yet"
-        if isinstance(remote, dict):
-            summary = str(remote.get("alias") or remote.get("hostname") or remote.get("url") or "Not Implemented Yet")
-
-        layout.addWidget(QLabel(f"Remote file navigator is not implemented yet for {protocol}."))
-        layout.addWidget(QLabel(f"Current selection: {summary}"))
-        layout.addStretch(1)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok)
-        buttons.accepted.connect(self.accept)
-        layout.addWidget(buttons)
-
-    @classmethod
-    def show_placeholder(cls, parent: QWidget | None, config: dict[str, Any]) -> None:
-        """Show placeholder remote navigator dialog."""
-        dialog = cls(parent, config)
-        dialog.exec()
