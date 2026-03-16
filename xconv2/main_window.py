@@ -9,14 +9,16 @@ This module layers backend interaction onto `CFVCore`:
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
 import pickle
+import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QProcess
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QListWidgetItem
+from PySide6.QtWidgets import QListWidgetItem, QMessageBox
 
 from .cf_templates import (
     contour_range_from_selection,
@@ -25,6 +27,13 @@ from .cf_templates import (
     plot_from_selection,
 )
 from .core_window import CFVCore
+from .ui.dialogs import RemoteConfigurationDialog
+from .ui.remote_file_navigator import (
+    RemoteFileNavigatorDialog,
+    build_remote_filesystem_spec,
+    remote_descriptor_hash,
+    spec_to_descriptor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +46,9 @@ class CFVMain(CFVCore):
         self._plot_request_in_flight = False
         self._plot_request_expects_image = False
         self._suppress_stale_error_status = False
+        self._remote_session_id: str | None = None
+        self._remote_descriptor_hash: str | None = None
+        self._remote_descriptor: dict[str, object] | None = None
 
         self.worker = QProcess()
         self.worker.readyReadStandardOutput.connect(self.handle_worker_output)
@@ -80,7 +92,35 @@ class CFVMain(CFVCore):
 
             logger.debug("Worker stdout line: %s", line)
 
-            if line.startswith("STATUS:"):
+            if line.startswith("REMOTE_STATUS:"):
+                raw_payload = line.split(":", 1)[1]
+                payload = pickle.loads(base64.b64decode(raw_payload))
+                if not isinstance(payload, dict):
+                    logger.warning("Unexpected REMOTE_STATUS payload type: %s", type(payload).__name__)
+                    continue
+
+                phase = str(payload.get("phase", ""))
+                message = str(payload.get("message") or f"Remote worker phase: {phase}")
+                is_error = phase == "failed"
+                self._show_status_message(message, is_error=is_error)
+
+            elif line.startswith("REMOTE_OPEN_RESULT:"):
+                raw_payload = line.split(":", 1)[1]
+                payload = pickle.loads(base64.b64decode(raw_payload))
+                if not isinstance(payload, dict):
+                    logger.warning("Unexpected REMOTE_OPEN_RESULT payload type: %s", type(payload).__name__)
+                    continue
+
+                if payload.get("ok"):
+                    uri = str(payload.get("uri", ""))
+                    if uri:
+                        self._set_window_title_for_file(uri)
+                        self._show_status_message(f"Loaded remote file: {uri}")
+                else:
+                    error = str(payload.get("error") or "Remote open failed")
+                    self._show_status_message(error, is_error=True)
+
+            elif line.startswith("STATUS:"):
                 status_text = line.split(":", 1)[1]
                 is_error_status = status_text.startswith("Error -")
 
@@ -229,6 +269,9 @@ class CFVMain(CFVCore):
 
     def _load_selected_file(self, file_path: str) -> None:
         """Load selected file in worker and publish field metadata."""
+        release_remote = getattr(self, "_release_remote_session_if_active", None)
+        if callable(release_remote):
+            release_remote()
         self._show_status_message(f"Loading file: {file_path}")
         logger.info("Loading file in worker: %s", file_path)
 
@@ -240,6 +283,94 @@ class CFVMain(CFVCore):
             + "send_to_gui('METADATA', fields)"
         )
         self._send_worker_task(code)
+
+    def _load_remote_selected_file(self, uri: str, remote_path: str) -> None:
+        """Load a selected remote file through the worker remote session pool."""
+        if not self._remote_session_id or not self._remote_descriptor_hash or not self._remote_descriptor:
+            self._show_status_message("Remote worker session is not initialized.", is_error=True)
+            return
+
+        self._show_status_message(f"Loading remote file: {uri}")
+        self._send_worker_control_task(
+            "REMOTE_OPEN",
+            {
+                "session_id": self._remote_session_id,
+                "descriptor_hash": self._remote_descriptor_hash,
+                "descriptor": self._remote_descriptor,
+                "uri": uri,
+                "path": remote_path,
+            },
+        )
+
+    def _release_remote_session_if_active(self) -> None:
+        """Release any worker-side warm remote session currently tracked by the UI."""
+        if not self._remote_session_id or not self._remote_descriptor_hash:
+            return
+
+        self._send_worker_control_task(
+            "REMOTE_RELEASE",
+            {
+                "session_id": self._remote_session_id,
+                "descriptor_hash": self._remote_descriptor_hash,
+            },
+        )
+        self._remote_session_id = None
+        self._remote_descriptor_hash = None
+        self._remote_descriptor = None
+
+    def _choose_remote(self) -> None:
+        """Warm the worker-side remote session while the UI navigator browses remotely."""
+        raw_state = self._settings.get("last_remote_configuration", {})
+        state = raw_state if isinstance(raw_state, dict) else {}
+        config, ok, next_state = RemoteConfigurationDialog.get_configuration(self, state=state)
+        self._settings["last_remote_configuration"] = next_state
+        self._save_settings()
+        if not ok or config is None:
+            return
+
+        try:
+            spec = build_remote_filesystem_spec(config)
+        except Exception as exc:
+            QMessageBox.critical(self, "Remote configuration invalid", str(exc))
+            return
+
+        self._release_remote_session_if_active()
+
+        descriptor = spec_to_descriptor(spec, cache=config.get("cache") if isinstance(config, dict) else None)
+        session_id = uuid.uuid4().hex
+        descriptor_hash = remote_descriptor_hash(descriptor)
+        self._remote_session_id = session_id
+        self._remote_descriptor_hash = descriptor_hash
+        self._remote_descriptor = descriptor
+
+        self._send_worker_control_task(
+            "REMOTE_PREPARE",
+            {
+                "session_id": session_id,
+                "descriptor_hash": descriptor_hash,
+                "descriptor": descriptor,
+            },
+        )
+
+        selection, selected_ok = RemoteFileNavigatorDialog.get_remote_selection_details(
+            self,
+            config,
+            spec=spec,
+        )
+        if not selected_ok:
+            self._release_remote_session_if_active()
+            return
+
+        selected_uri = str(selection.get("uri", ""))
+        selected_path = str(selection.get("path", ""))
+        if not selected_uri or not selected_path:
+            self._show_status_message("Remote file selection was incomplete.", is_error=True)
+            self._release_remote_session_if_active()
+            return
+
+        self._set_window_title_for_file(selected_uri)
+        self._show_status_message(f"Selected remote file: {selected_uri}")
+        self._load_remote_selected_file(selected_uri, selected_path)
 
     def _request_coordinates_for_field(self, index: int, show_status: bool = True) -> None:
         """Request coordinate arrays for a selected field index."""
@@ -468,8 +599,21 @@ class CFVMain(CFVCore):
         logger.debug("Sending worker task (%d chars)", len(code))
         self.worker.write(payload.encode())
 
+    def _send_worker_control_task(self, kind: str, payload: dict[str, object]) -> None:
+        """Send a non-code control task to the worker using typed task headers."""
+        payload_text = json.dumps(payload, sort_keys=True)
+        encoded_payload = base64.b64encode(payload_text.encode("utf-8")).decode("ascii")
+        task = (
+            f"#TASK_KIND:{kind}\n"
+            f"#TASK_PAYLOAD_B64:{encoded_payload}\n"
+            "#END_TASK\n"
+        )
+        logger.debug("Sending worker control task %s", kind)
+        self.worker.write(task.encode())
+
     def closeEvent(self, event: QCloseEvent) -> None:
         """Ensure worker process is shut down cleanly when GUI exits."""
+        self._release_remote_session_if_active()
         if self.worker.state() != QProcess.NotRunning:
             logger.info("Terminating worker process")
             self.worker.terminate()

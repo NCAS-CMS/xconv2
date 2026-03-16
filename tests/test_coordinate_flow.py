@@ -307,3 +307,37 @@ def test_handle_worker_output_ignores_stale_error_after_coord_message() -> None:
 
     assert dummy.shown_statuses == []
     assert dummy._suppress_stale_error_status is True
+
+
+def test_handle_worker_output_remote_status_routes_message() -> None:
+    payload = {
+        "phase": "preparing",
+        "session_id": "abc",
+        "descriptor_hash": "hash",
+        "message": "Preparing remote worker session...",
+    }
+    encoded = base64.b64encode(pickle.dumps(payload)).decode()
+
+    dummy = _DummyStaleErrorMain()
+    dummy.worker = _FakeWorker([f"REMOTE_STATUS:{encoded}\n"])
+
+    CFVMain.handle_worker_output(dummy)
+
+    assert dummy.shown_statuses == [("Preparing remote worker session...", False)]
+
+
+def test_handle_worker_output_remote_open_failure_shows_error() -> None:
+    payload = {
+        "session_id": "abc",
+        "uri": "ssh://host/file.nc",
+        "ok": False,
+        "error": "Remote open failed",
+    }
+    encoded = base64.b64encode(pickle.dumps(payload)).decode()
+
+    dummy = _DummyStaleErrorMain()
+    dummy.worker = _FakeWorker([f"REMOTE_OPEN_RESULT:{encoded}\n"])
+
+    CFVMain.handle_worker_output(dummy)
+
+    assert dummy.shown_statuses == [("Remote open failed", True)]

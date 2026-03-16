@@ -40,6 +40,12 @@ limited to the following:
 - `docs/uml/alpha_core_window.puml`
 - `docs/uml/core_window_gui_worker_signals.puml`
 - `docs/uml/core_window_options_sequence.puml`
+- `docs/uml/remote_worker_warmup_sequence.puml`
+
+#### Architecture Notes
+
+- `docs/architecture/core_window_refactor.md`
+- `docs/architecture/remote_navigation_and_worker_warmup.md`
 
 ## License
 

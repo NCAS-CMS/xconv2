@@ -1,0 +1,69 @@
+@startuml RemoteWorkerWarmupSequence
+title Remote Warm-Up and Open Sequence (Implemented)
+
+actor User
+participant "CFVCore/CFVMain\n(UI process)" as UI
+participant "Remote Config\nDialog" as Config
+participant "Remote Navigator\nDialog" as Nav
+participant "QProcess\nstdin/stdout pipe" as Pipe
+participant "cf-worker\n(worker process)" as Worker
+participant "Worker Remote\nSession Pool" as Pool
+
+== Select Remote Configuration ==
+User -> UI : Open Remote...
+UI -> Config : show()
+User -> Config : choose protocol/auth + Save
+Config --> UI : configuration descriptor
+
+== Speculative Warm-Up ==
+UI -> Pipe : #TASK_KIND:REMOTE_PREPARE
+UI -> Pipe : #TASK_PAYLOAD_B64:{session_id, descriptor_hash, descriptor}
+Pipe -> Worker : parse task
+Worker -> Pool : prepare(descriptor_hash, descriptor)
+Pool --> Worker : connecting / reusing
+Worker -> Pipe : REMOTE_STATUS {phase=preparing,...}
+Pipe -> UI : status line
+
+== User Navigates While Worker Warms ==
+UI -> Nav : open navigator (UI-side connection)
+User -> Nav : browse directories
+Worker -> Pipe : REMOTE_STATUS {phase=ready,...}
+Pipe -> UI : status line
+
+== Open Selected Remote URI ==
+User -> Nav : select file + Open
+Nav --> UI : selected_uri + selected_path
+UI -> Pipe : #TASK_KIND:REMOTE_OPEN
+UI -> Pipe : #TASK_PAYLOAD_B64:{session_id, descriptor_hash, descriptor, uri, path}
+Pipe -> Worker : parse task
+Worker -> Pool : get(descriptor_hash)
+alt warm session exists
+  Pool --> Worker : ready session
+else no warm session
+  Worker -> Pool : prepare now (cold path)
+  Pool --> Worker : ready session
+end
+Worker -> Worker : open/read metadata for uri
+Worker -> Pipe : METADATA {field list payload}
+Pipe -> UI : populate field list
+Worker -> Pipe : REMOTE_OPEN_RESULT {ok=true, uri=...}
+Pipe -> UI : open result
+
+== Target Change / Cleanup ==
+User -> UI : choose a different remote target
+UI -> Pipe : #TASK_KIND:REMOTE_RELEASE
+UI -> Pipe : #TASK_PAYLOAD_B64:{session_id, descriptor_hash}
+Pipe -> Worker : parse task
+Worker -> Pool : release/evict matching entry
+Worker -> Pipe : REMOTE_STATUS {phase=released,...}
+Pipe -> UI : status line
+
+note right of Pool
+Implemented policy:
+- Key by descriptor_hash
+- TTL idle eviction
+- LRU cap
+- Most-recent session_id wins
+end note
+
+@enduml

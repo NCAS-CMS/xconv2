@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -44,6 +46,49 @@ class RemoteEntry:
     is_dir: bool
     size: int | None
     is_link: bool = False
+
+
+def spec_to_descriptor(
+    spec: RemoteFilesystemSpec,
+    *,
+    cache: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return a JSON-safe descriptor for worker-side warm-up/open tasks."""
+    descriptor = {
+        "protocol": spec.protocol,
+        "storage_options": dict(spec.storage_options),
+        "root_path": spec.root_path,
+        "display_name": spec.display_name,
+        "uri_scheme": spec.uri_scheme,
+        "uri_authority": spec.uri_authority,
+        "proxy_jump": spec.proxy_jump,
+    }
+    if cache is not None:
+        descriptor["cache"] = dict(cache)
+    return descriptor
+
+
+def descriptor_to_spec(descriptor: dict[str, Any]) -> RemoteFilesystemSpec:
+    """Rebuild a filesystem spec from a worker/UI transport descriptor."""
+    return RemoteFilesystemSpec(
+        protocol=str(descriptor.get("protocol", "")),
+        storage_options=dict(descriptor.get("storage_options", {})),
+        root_path=str(descriptor.get("root_path", "")),
+        display_name=str(descriptor.get("display_name", "Remote")),
+        uri_scheme=str(descriptor.get("uri_scheme", "")),
+        uri_authority=str(descriptor.get("uri_authority", "")),
+        proxy_jump=(
+            str(descriptor["proxy_jump"])
+            if descriptor.get("proxy_jump")
+            else None
+        ),
+    )
+
+
+def remote_descriptor_hash(descriptor: dict[str, Any]) -> str:
+    """Create a stable hash for descriptor-keyed worker session reuse."""
+    normalized = json.dumps(descriptor, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def _value_from_keys(details: dict[str, Any], *keys: str) -> str:
@@ -434,6 +479,7 @@ class RemoteFileNavigatorDialog(QDialog):
 
         self._config = config
         self._selected_uri = ""
+        self._selected_path = ""
         self._detected_zarr_paths: set[str] = set()
         self._spec = spec or build_remote_filesystem_spec(config)
         self._filesystem = filesystem or create_filesystem(self._spec)
@@ -662,6 +708,7 @@ class RemoteFileNavigatorDialog(QDialog):
         selected = self.tree.selectedItems()
         if not selected:
             self._selected_uri = ""
+            self._selected_path = ""
             self.selection_label.setText("No file selected")
             self.open_button.setEnabled(False)
             return
@@ -673,6 +720,7 @@ class RemoteFileNavigatorDialog(QDialog):
 
         path = str(data.get("path", ""))
         is_dir = bool(data.get("is_dir"))
+        self._selected_path = "" if is_dir else path
         self._selected_uri = "" if is_dir else build_remote_uri(self._spec, path)
         self.selection_label.setText(path or "No file selected")
         self.open_button.setEnabled(not is_dir and bool(path))
@@ -686,6 +734,10 @@ class RemoteFileNavigatorDialog(QDialog):
     def selected_uri(self) -> str:
         """Return the currently selected remote file URI."""
         return self._selected_uri
+
+    def selected_path(self) -> str:
+        """Return the currently selected filesystem path."""
+        return self._selected_path
 
     def accept(self) -> None:  # type: ignore[override]
         """Require a file selection before closing with success."""
@@ -705,17 +757,20 @@ class RemoteFileNavigatorDialog(QDialog):
         super().done(result)
 
     @classmethod
-    def get_remote_selection(
+    def get_remote_selection_details(
         cls,
         parent: QWidget | None,
         config: dict[str, Any],
-    ) -> tuple[str, bool]:
-        """Show the remote navigator and return the selected file URI."""
-        try:
-            spec = build_remote_filesystem_spec(config)
-        except Exception as exc:
-            QMessageBox.critical(parent, "Remote configuration invalid", str(exc))
-            return "", False
+        *,
+        spec: RemoteFilesystemSpec | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Show the remote navigator and return the selected URI and path."""
+        if spec is None:
+            try:
+                spec = build_remote_filesystem_spec(config)
+            except Exception as exc:
+                QMessageBox.critical(parent, "Remote configuration invalid", str(exc))
+                return {}, False
 
         log_dialog = RemoteLoginLogDialog(parent, spec.display_name)
         log_dialog.show()
@@ -749,5 +804,18 @@ class RemoteFileNavigatorDialog(QDialog):
         assert filesystem is not None
         dialog = cls(parent, config, spec=spec, filesystem=filesystem)
         if dialog.exec() != QDialog.Accepted:
-            return "", False
-        return dialog.selected_uri(), True
+            return {}, False
+        return {
+            "uri": dialog.selected_uri(),
+            "path": dialog.selected_path(),
+        }, True
+
+    @classmethod
+    def get_remote_selection(
+        cls,
+        parent: QWidget | None,
+        config: dict[str, Any],
+    ) -> tuple[str, bool]:
+        """Show the remote navigator and return the selected file URI."""
+        details, ok = cls.get_remote_selection_details(parent, config)
+        return str(details.get("uri", "")), ok
