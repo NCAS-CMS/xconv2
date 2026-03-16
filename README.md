@@ -17,7 +17,10 @@ xconv2 provides (or will provide) a graphical interface to local and remote weat
 
 ## Installation
 
-We have released this as a standalone executable for Linux and MacOS on PyPI, and will do so on conda-forge too, for the moment you should use a Python 3.12 (or later) environment with `cartopy` and `udunits2` installed, then you can pip install from PyPI:
+
+#### Alpha
+
+We intend to release this as a standalone application (an "app") eventually, but meanwhile, you will likely need a dedicated (or up-to-date) mamba environment with a Python 3.12 (or later) environment with `cartopy` and `udunits2` installed, then you can pip install from PyPI. Here's an example:
 
 ```
 conda create -n xconv2
@@ -26,7 +29,7 @@ mamba install -c conda-forge pip cartopy udunits2
 pip install xconv2
 ```
 
-and then you should have `xconv2` available on your command line.
+and then you should have `xconv2` available on your command line in that environment.  You could of course pip install into your own environment, but you will need to ensure it has cartopy and udunits2 in it (both via conda or mamba).
 
 ## Documentation
 
