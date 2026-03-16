@@ -103,6 +103,28 @@ class _DummyCoordRequestMain:
 
 
 @dataclass
+class _DummyPlotOptionsMain:
+    _context: tuple[dict[str, tuple[object, object]], dict[str, str], str] | None
+    lineplot_dialog_calls: int = 0
+    sent_tasks: list[str] = field(default_factory=list)
+    status_messages: list[str] = field(default_factory=list)
+
+    def _build_plot_context(self):
+        return self._context
+
+    def _show_lineplot_options_dialog(self) -> None:
+        self.lineplot_dialog_calls += 1
+
+    def _send_worker_task(self, code: str, emit_image: bool = True) -> None:
+        _ = emit_image
+        self.sent_tasks.append(code)
+
+    def _show_status_message(self, message: str, is_error: bool = False) -> None:
+        _ = is_error
+        self.status_messages.append(message)
+
+
+@dataclass
 class _DummyStaleErrorMain:
     _plot_request_in_flight: bool = False
     _plot_request_expects_image: bool = False
@@ -248,6 +270,22 @@ def test_request_coordinates_can_skip_status_message(monkeypatch) -> None:
 
     assert dummy.status_messages == []
     assert dummy.sent_tasks == ["TASK_FOR_4"]
+
+
+def test_request_plot_options_shows_lineplot_dialog_when_lineplot_selected() -> None:
+    dummy = _DummyPlotOptionsMain(
+        _context=(
+            {"time": (1, 2)},
+            {},
+            "lineplot",
+        )
+    )
+
+    CFVMain._request_plot_options(dummy)
+
+    assert dummy.lineplot_dialog_calls == 1
+    assert dummy.sent_tasks == []
+    assert dummy.status_messages == []
 
 
 def test_on_field_clicked_resets_ui_then_requests_coordinates() -> None:

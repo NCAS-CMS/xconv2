@@ -396,7 +396,7 @@ class SelectionController:
                 f"{dims_text} | Plot Type: {selected_kind.title() if selected_kind else 'N/A'}"
             )
             self.host.plot_button.setEnabled(True)
-            self.host.options_button.setEnabled(False)
+            self.host.options_button.setEnabled(selected_kind in {"contour", "lineplot"})
             self.host.save_code_button.setEnabled(True)
             self.host.save_plot_button.setEnabled(True)
         elif varying_dims == 2:
@@ -404,7 +404,7 @@ class SelectionController:
                 f"{dims_text} | Plot Type: {selected_kind.title() if selected_kind else 'N/A'}"
             )
             self.host.plot_button.setEnabled(True)
-            self.host.options_button.setEnabled(selected_kind == "contour")
+            self.host.options_button.setEnabled(selected_kind in {"contour", "lineplot"})
             self.host.save_code_button.setEnabled(True)
             self.host.save_plot_button.setEnabled(True)
         else:

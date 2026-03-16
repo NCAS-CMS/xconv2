@@ -451,6 +451,10 @@ class CFVMain(CFVCore):
             return
 
         selections, collapse_by_coord, plot_kind = context
+        if plot_kind == "lineplot":
+            self._show_lineplot_options_dialog()
+            return
+
         if plot_kind != "contour":
             self._show_status_message(f"No options dialog available for plot type: {plot_kind}")
             return
