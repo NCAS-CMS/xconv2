@@ -7,6 +7,7 @@ import numpy as np
 from xconv2.cf_templates import contour_range_from_selection, plot_from_selection
 import xconv2.xconv_cf_interface as cf_interface
 from xconv2.xconv_cf_interface import auto_contour_title, get_data_for_plotting, run_contour_plot
+from xconv2.ui.contour_options_controller import ContourOptionsController
 
 
 @dataclass
@@ -246,3 +247,9 @@ def test_plot_from_selection_lineplot_generates_worker_call() -> None:
 
     assert "run_line_plot(" in code
     assert "lineplot_options" in code
+
+
+def test_contour_property_text_normalization_compacts_linebreaks() -> None:
+    text = "alpha\r\n beta\n\ngamma\rdelta"
+    normalized = ContourOptionsController._normalize_property_cell_text(text)
+    assert normalized == "alpha beta gamma delta"

@@ -53,13 +53,12 @@ def test_field_info_returns_serialized_rows() -> None:
 
     assert isinstance(payload, list)
     assert len(payload) == 1
-    assert isinstance(payload[0], str)
+    assert isinstance(payload[0], dict)
 
-    parts = payload[0].split("\x1f", 2)
-    assert len(parts) == 3
-    assert parts[0].startswith("air_temperature")
-    assert parts[1] == "mock-field-summary"
-    assert "units" in parts[2]
+    row = payload[0]
+    assert str(row["identity"]).startswith("air_temperature")
+    assert row["detail"] == "mock-field-summary"
+    assert row["properties"] == {"units": "K", "standard_name": "air_temperature"}
 
 
 class _MockCoord:

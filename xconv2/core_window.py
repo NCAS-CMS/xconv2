@@ -60,7 +60,6 @@ from .ui.settings_store import SettingsStore
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-FIELD_METADATA_SEPARATOR = "\x1f"
 DEFAULT_MAX_RECENT_FILES = 10
 SETTINGS_VERSION = 1
 STATUSBAR_NORMAL_STYLE = ""
@@ -85,7 +84,7 @@ class CFVCore(QMainWindow):
         )
         self.menu_controller = MenuController(self)
         self.selection_controller = SelectionController(self)
-        self.field_metadata_controller = FieldMetadataController(self, FIELD_METADATA_SEPARATOR)
+        self.field_metadata_controller = FieldMetadataController(self)
         self.plot_view_controller = PlotViewController(self)
         self.contour_options_controller = ContourOptionsController(self)
         self.lineplot_options_controller = LineplotOptionsController(self)
@@ -769,10 +768,6 @@ class CFVCore(QMainWindow):
     def _parse_properties_dict(self, raw_properties: object) -> dict[object, object]:
         """Parse properties payload into a dictionary when possible."""
         return self.field_metadata_controller.parse_properties_dict(raw_properties)
-
-    def _parse_properties_lines(self, text: str) -> dict[str, str]:
-        """Parse key/value properties from multi-line text representations."""
-        return self.field_metadata_controller.parse_properties_lines(text)
 
     def _set_field_list_visible_rows(self, row_count: int) -> None:
         """Size the field list to show a target number of rows by default."""

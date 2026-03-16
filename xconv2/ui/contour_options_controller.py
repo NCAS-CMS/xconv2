@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
@@ -28,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from xconv2.colour_scales import cscales, get_colour_scale_hexes
+from xconv2.ui.plot_options_shared import build_common_options_sections
 
 if TYPE_CHECKING:
     from xconv2.core_window import CFVCore
@@ -38,6 +38,12 @@ class ContourOptionsController:
 
     def __init__(self, host: "CFVCore") -> None:
         self.host = host
+
+    @staticmethod
+    def _normalize_property_cell_text(value: object) -> str:
+        """Normalize property text for stable, single-line chooser table cells."""
+        text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+        return " ".join(text.split()).strip()
 
     def show_contour_options_dialog(
         self,
@@ -53,155 +59,13 @@ class ContourOptionsController:
         dialog.resize(540, 360)
 
         layout = QVBoxLayout(dialog)
-
-        default_title = existing.get("title")
-        if not default_title:
-            default_title = suggested_title
-        if not default_title:
-            default_title = Path(self.host.current_file_path).name if self.host.current_file_path else ""
-        default_page_title = existing.get("page_title")
-        if not default_page_title:
-            default_page_title = Path(self.host.current_file_path).name if self.host.current_file_path else ""
-
-        titles_group = QGroupBox("Titles")
-        titles_layout = QVBoxLayout(titles_group)
-
-        title_row = QHBoxLayout()
-        title_label = QLabel("contour title")
-        title_edit = QLineEdit(str(default_title))
-        title_edit.setPlaceholderText("Contour title")
-        title_row.addWidget(title_label)
-        title_row.addWidget(title_edit, 1)
-        titles_layout.addLayout(title_row)
-
-        page_title_row = QHBoxLayout()
-        page_title_label = QLabel("page title")
-        page_title_edit = QLineEdit(str(default_page_title))
-        page_title_edit.setPlaceholderText("Figure page title")
-        page_title_display_checkbox = QCheckBox("display")
-        page_title_display_checkbox.setChecked(bool(existing.get("page_title_display", False)))
-        page_title_row.addWidget(page_title_label)
-        page_title_row.addWidget(page_title_edit, 1)
-        page_title_row.addWidget(page_title_display_checkbox)
-        titles_layout.addLayout(page_title_row)
-
-        annotations_group = QGroupBox("Choose annotation properties")
-        annotations_layout = QVBoxLayout(annotations_group)
-
-        selected_annotation_props: list[tuple[str, str]] = []
-        existing_props = existing.get("annotation_properties", [])
-        if isinstance(existing_props, list):
-            for entry in existing_props:
-                if isinstance(entry, (tuple, list)) and len(entry) >= 2:
-                    selected_annotation_props.append((str(entry[0]), str(entry[1])))
-
-        free_text_row = QHBoxLayout()
-        free_text_label = QLabel("free text")
-        free_text_edit = QLineEdit(str(existing.get("annotation_free_text", "")))
-        free_text_edit.setPlaceholderText("Optional custom annotation text")
-        free_text_row.addWidget(free_text_label)
-        free_text_row.addWidget(free_text_edit, 1)
-        annotations_layout.addLayout(free_text_row)
-
-        annotation_limit_label = QLabel()
-        annotation_limit_label.setStyleSheet("color: #666;")
-
-        def _refresh_annotation_limit_hint() -> None:
-            max_selected = 3 if free_text_edit.text().strip() else 4
-            annotation_limit_label.setText(
-                f"Annotation property limit: {max_selected}"
-            )
-
-        free_text_edit.textChanged.connect(lambda _text: _refresh_annotation_limit_hint())
-        _refresh_annotation_limit_hint()
-        annotations_layout.addWidget(annotation_limit_label)
-
-        top_margin_spin = QDoubleSpinBox()
-        top_margin_spin.setRange(0.0, 0.20)
-        top_margin_spin.setDecimals(3)
-        top_margin_spin.setSingleStep(0.005)
-        top_margin_spin.setValue(float(existing.get("page_margin_top", 0.0) or 0.0))
-        top_margin_spin.setToolTip("Extra figure-fraction space above plot for page title")
-
-        bottom_margin_spin = QDoubleSpinBox()
-        bottom_margin_spin.setRange(0.0, 0.20)
-        bottom_margin_spin.setDecimals(3)
-        bottom_margin_spin.setSingleStep(0.005)
-        bottom_margin_spin.setValue(float(existing.get("page_margin_bottom", 0.0) or 0.0))
-        bottom_margin_spin.setToolTip("Extra figure-fraction space below plot for annotations")
-
-        annotation_row = QHBoxLayout()
-        choose_annotations_button = QPushButton("Select annotations from properties")
-        annotation_display_checkbox = QCheckBox("display annotations")
-        annotation_display_checkbox.setChecked(bool(existing.get("annotation_display", False)))
-
-        annotation_preview = QLabel()
-        annotation_preview.setWordWrap(True)
-        annotation_preview.setStyleSheet("color: #444;")
-
-        def _refresh_annotation_preview() -> None:
-            if not selected_annotation_props:
-                annotation_preview.setText("No annotation properties selected")
-                return
-            annotation_preview.setText(
-                "\n".join(f"{key}: {value}" for key, value in selected_annotation_props)
-            )
-
-        def _maybe_enable_annotation_display() -> None:
-            has_free_text = bool(free_text_edit.text().strip())
-            has_props = bool(selected_annotation_props)
-            if has_free_text or has_props:
-                annotation_display_checkbox.setChecked(True)
-
-        def _choose_annotation_properties() -> None:
-            selected_item = self.host.field_list_widget.currentItem()
-            if selected_item is None:
-                self.host.status.showMessage("Select a field before choosing annotation properties")
-                return
-
-            raw_properties = selected_item.data(Qt.UserRole + 1)
-            properties = self.host._parse_properties_dict(raw_properties)
-            if not properties:
-                self.host.status.showMessage("No properties available for annotation")
-                return
-
-            max_selected = 3 if free_text_edit.text().strip() else 4
-            if len(selected_annotation_props) > max_selected:
-                selected_annotation_props[:] = selected_annotation_props[:max_selected]
-
-            chosen = self.show_annotation_properties_chooser(
-                properties,
-                selected_annotation_props,
-                max_selected=max_selected,
-            )
-            if chosen is not None:
-                selected_annotation_props.clear()
-                selected_annotation_props.extend(chosen)
-                _refresh_annotation_preview()
-                _maybe_enable_annotation_display()
-
-        choose_annotations_button.clicked.connect(_choose_annotation_properties)
-        free_text_edit.textChanged.connect(lambda _text: _maybe_enable_annotation_display())
-        _refresh_annotation_preview()
-
-        annotation_row.addWidget(choose_annotations_button)
-        annotation_row.addStretch(1)
-        annotation_row.addWidget(annotation_display_checkbox)
-        annotations_layout.addLayout(annotation_row)
-        annotations_layout.addWidget(annotation_preview)
-
-        margin_row = QHBoxLayout()
-        layout_label = QLabel("Layout:")
-        top_margin_label = QLabel("top margin")
-        bottom_margin_label = QLabel("bottom margin")
-        margin_row.addWidget(layout_label)
-        margin_row.addWidget(top_margin_label)
-        margin_row.addWidget(top_margin_spin)
-        margin_row.addSpacing(10)
-        margin_row.addWidget(bottom_margin_label)
-        margin_row.addWidget(bottom_margin_spin)
-        margin_row.addStretch(1)
-        annotations_layout.addLayout(margin_row)
+        common = build_common_options_sections(
+            host=self.host,
+            existing=existing,
+            plot_title_label="contour title",
+            plot_title_placeholder="Contour title",
+            suggested_title=suggested_title,
+        )
 
         levels_group = QGroupBox("Contour levels")
         levels_layout = QVBoxLayout(levels_group)
@@ -285,6 +149,8 @@ class ContourOptionsController:
         cscale_label = QLabel("colour scale")
         cscale_value_label = QLabel()
         choose_cscale_button = QPushButton("Choose...")
+        choose_cscale_button.setAutoDefault(False)
+        choose_cscale_button.setDefault(False)
         cscale_value_label.setStyleSheet("font-weight: 700;")
         cscale_row.setContentsMargins(0, 0, 0, 0)
         cscale_row.setSpacing(2)
@@ -438,8 +304,8 @@ class ContourOptionsController:
         text_sizes_layout.setColumnStretch(1, 1)
         text_sizes_layout.setColumnStretch(2, 1)
 
-        layout.addWidget(titles_group)
-        layout.addWidget(annotations_group)
+        layout.addWidget(common.titles_group)
+        layout.addWidget(common.annotations_group)
         layout.addWidget(levels_group)
         layout.addWidget(style_group)
         layout.addWidget(text_sizes_group)
@@ -497,22 +363,7 @@ class ContourOptionsController:
             options["contour_title_fontsize"] = float(contour_title_fontsize_spin.value())
             options["page_title_fontsize"] = float(page_title_fontsize_spin.value())
             options["annotation_fontsize"] = float(annotation_fontsize_spin.value())
-            title_text = title_edit.text().strip()
-            if title_text:
-                options["title"] = title_text
-            page_title_text = page_title_edit.text().strip()
-            options["page_title_display"] = bool(page_title_display_checkbox.isChecked())
-            if options["page_title_display"] and page_title_text:
-                options["page_title"] = page_title_text
-            options["page_margin_top"] = float(top_margin_spin.value())
-            options["page_margin_bottom"] = float(bottom_margin_spin.value())
-            free_text = free_text_edit.text().strip()
-            if free_text:
-                options["annotation_free_text"] = free_text
-            options["annotation_display"] = bool(annotation_display_checkbox.isChecked())
-            if selected_annotation_props:
-                max_selected = 3 if free_text else 4
-                options["annotation_properties"] = selected_annotation_props[:max_selected]
+            options.update(common.as_options())
             if selected_cscale.get("value"):
                 options["cscale"] = selected_cscale["value"]
 
@@ -551,11 +402,17 @@ class ContourOptionsController:
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
 
-        selected_set = {(str(k), str(v)) for k, v in current_selected}
+        selected_set = {
+            (
+                self._normalize_property_cell_text(k),
+                self._normalize_property_cell_text(v),
+            )
+            for k, v in current_selected
+        }
 
         for row, (key, value) in enumerate(sorted(properties.items(), key=lambda kv: str(kv[0]).lower())):
-            key_text = str(key)
-            value_text = str(value)
+            key_text = self._normalize_property_cell_text(key)
+            value_text = self._normalize_property_cell_text(value)
 
             key_item = QTableWidgetItem(key_text)
             key_item.setFlags(key_item.flags() | Qt.ItemIsUserCheckable)

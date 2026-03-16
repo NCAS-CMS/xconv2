@@ -168,6 +168,11 @@ class CFVMain(CFVCore):
                 raw_payload = line.split(":", 1)[1]
                 metadata = pickle.loads(base64.b64decode(raw_payload))
                 if isinstance(metadata, list):
+                    if not all(isinstance(row, dict) for row in metadata):
+                        raise TypeError(
+                            "Field metadata payload must be a list of dict rows "
+                            "with identity/detail/properties"
+                        )
                     logger.info("Received metadata for %d fields", len(metadata))
                     self.populate_field_list(metadata)
                 elif isinstance(metadata, dict):

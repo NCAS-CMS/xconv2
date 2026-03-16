@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import base64
 import json
 from dataclasses import dataclass, field
@@ -94,15 +93,12 @@ def test_load_selected_file_task_executes_with_mock_cf_example_fields() -> None:
     assert prefix == "METADATA"
     assert isinstance(payload, list)
     assert len(payload) == 8
-    assert all(isinstance(item, str) for item in payload)
+    assert all(isinstance(item, dict) for item in payload)
 
-    parts = payload[0].split("\x1f", 2)
-    assert len(parts) == 3
-    assert parts[0].startswith("specific_humidity")
-    assert "latitude" in parts[1]
-
-    properties = ast.literal_eval(parts[2])
-    assert isinstance(properties, dict)
+    first = payload[0]
+    assert str(first["identity"]).startswith("specific_humidity")
+    assert "latitude" in str(first["detail"])
+    assert isinstance(first["properties"], dict)
 
 
 def test_coordinate_list_emits_coordinates_for_example_field() -> None:
