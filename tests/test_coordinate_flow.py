@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from collections import deque
 import pickle
 from dataclasses import dataclass, field
 import types
@@ -341,3 +342,16 @@ def test_handle_worker_output_remote_open_failure_shows_error() -> None:
     CFVMain.handle_worker_output(dummy)
 
     assert dummy.shown_statuses == [("Remote open failed", True)]
+
+
+def test_handle_worker_output_task_complete_includes_elapsed(monkeypatch) -> None:
+    dummy = _DummyStaleErrorMain()
+    dummy._pending_worker_task_starts = deque([10.0])
+    dummy.worker = _FakeWorker(["STATUS:Task Complete\n"])
+
+    monkeypatch.setattr("xconv2.main_window.time.monotonic", lambda: 12.5)
+
+    CFVMain.handle_worker_output(dummy)
+
+    assert dummy.shown_statuses == [("Task Complete (2.50s)", False)]
+    assert list(dummy._pending_worker_task_starts) == []

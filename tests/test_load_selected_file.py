@@ -165,6 +165,8 @@ def test_send_worker_control_task_writes_typed_headers() -> None:
     payload = fake_worker.payloads[0]
     assert payload.startswith("#TASK_KIND:REMOTE_PREPARE\n#TASK_PAYLOAD_B64:")
     assert payload.endswith("#END_TASK\n")
+    assert hasattr(window, "_pending_worker_task_starts")
+    assert len(window._pending_worker_task_starts) == 1
 
     encoded = payload.split("#TASK_PAYLOAD_B64:", 1)[1].split("\n", 1)[0]
     decoded = json.loads(base64.b64decode(encoded.encode("ascii")).decode("utf-8"))

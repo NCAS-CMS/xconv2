@@ -9,10 +9,12 @@ This module layers backend interaction onto `CFVCore`:
 from __future__ import annotations
 
 import base64
+from collections import deque
 import json
 import logging
 import os
 import pickle
+import time
 import uuid
 from pathlib import Path
 
@@ -49,6 +51,7 @@ class CFVMain(CFVCore):
         self._remote_session_id: str | None = None
         self._remote_descriptor_hash: str | None = None
         self._remote_descriptor: dict[str, object] | None = None
+        self._pending_worker_task_starts: deque[float] = deque()
 
         self.worker = QProcess()
         self.worker.readyReadStandardOutput.connect(self.handle_worker_output)
@@ -122,7 +125,15 @@ class CFVMain(CFVCore):
 
             elif line.startswith("STATUS:"):
                 status_text = line.split(":", 1)[1]
+                display_status_text = status_text
                 is_error_status = status_text.startswith("Error -")
+
+                if status_text == "Task Complete":
+                    elapsed = CFVMain._complete_pending_worker_task(self, consume=True)
+                    if elapsed is not None:
+                        display_status_text = f"Task Complete ({elapsed:.2f}s)"
+                elif is_error_status:
+                    CFVMain._complete_pending_worker_task(self, consume=True)
 
                 # Ignore delayed worker errors from a previous task right after field reselection.
                 if self._suppress_stale_error_status and is_error_status and not self._plot_request_in_flight:
@@ -130,7 +141,7 @@ class CFVMain(CFVCore):
                     continue
 
                 self._show_status_message(
-                    status_text,
+                    display_status_text,
                     is_error=is_error_status,
                 )
 
@@ -596,6 +607,7 @@ class CFVMain(CFVCore):
             header_block = "\n".join(headers) + "\n"
 
         payload = header_block + code + "#END_TASK\n"
+        CFVMain._record_pending_worker_task(self)
         logger.debug("Sending worker task (%d chars)", len(code))
         self.worker.write(payload.encode())
 
@@ -608,8 +620,26 @@ class CFVMain(CFVCore):
             f"#TASK_PAYLOAD_B64:{encoded_payload}\n"
             "#END_TASK\n"
         )
+        CFVMain._record_pending_worker_task(self)
         logger.debug("Sending worker control task %s", kind)
         self.worker.write(task.encode())
+
+    def _record_pending_worker_task(self) -> None:
+        """Store worker task start times so completion statuses can show elapsed time."""
+        starts = getattr(self, "_pending_worker_task_starts", None)
+        if starts is None:
+            starts = deque()
+            setattr(self, "_pending_worker_task_starts", starts)
+        starts.append(time.monotonic())
+
+    def _complete_pending_worker_task(self, consume: bool = True) -> float | None:
+        """Return elapsed seconds for the oldest pending worker task, if any."""
+        starts = getattr(self, "_pending_worker_task_starts", None)
+        if not starts:
+            return None
+
+        start = starts.popleft() if consume else starts[0]
+        return max(0.0, time.monotonic() - start)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Ensure worker process is shut down cleanly when GUI exits."""

@@ -578,17 +578,25 @@ def main():
             logger.info("Executing task block (%d lines, %d chars)", len(current_block), len(exec_code))
 
             if task_kind is not None:
+                task_start = time.monotonic()
                 try:
                     _handle_control_task(task_kind, task_payload)
+                    send_to_gui("STATUS:Task Complete")
+                    logger.info(
+                        "Control task complete kind=%s elapsed=%.3fs",
+                        task_kind,
+                        time.monotonic() - task_start,
+                    )
                 except Exception:
                     err = traceback.format_exc()
+                    error_line = err.splitlines()[-1]
                     send_to_gui(
                         "REMOTE_OPEN_RESULT",
                         {
                             "session_id": str((task_payload or {}).get("session_id", "")),
                             "uri": str((task_payload or {}).get("uri", "")),
                             "ok": False,
-                            "error": err.splitlines()[-1],
+                            "error": error_line,
                         },
                     )
                     descriptor_hash = str((task_payload or {}).get("descriptor_hash", ""))
@@ -598,8 +606,9 @@ def main():
                             "failed",
                             session_id=session_id,
                             descriptor_hash=descriptor_hash,
-                            message=err.splitlines()[-1],
+                            message=error_line,
                         )
+                    send_to_gui(f"STATUS:Error - {error_line}")
                     print(err, file=sys.stderr)
                     logger.exception("Control task failed: %s", task_kind)
                 current_block = []
