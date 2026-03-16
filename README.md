@@ -25,6 +25,11 @@ udunits2 installed, then you can pip install from the source using one of these:
 
 and then you should have `xconv2` available on your command line.
 
+### Conda Environments
+
+- `environment.yml`: base development/runtime environment (no Docker test dependencies).
+- `environment-integration.yml`: optional integration-test environment (includes Python `docker` and `minio` packages for Docker-backed MinIO tests).
+
 ## Documentation
 
 No user documentation is yet available, but it is designed to be intuitive

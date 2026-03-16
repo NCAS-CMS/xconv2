@@ -23,6 +23,8 @@ dependencies = [
 [project.optional-dependencies]
 test = [
     "pytest",
+    "docker",
+    "minio",
 ]
 
 [project.gui-scripts]
