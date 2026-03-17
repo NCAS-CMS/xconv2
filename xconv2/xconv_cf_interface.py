@@ -367,6 +367,18 @@ def run_contour_plot(
 
     if filename is not None:
         cfp.gclose()
+        output_path = str(filename)
+        output_exists = False
+        try:
+            with open(output_path, "rb"):
+                output_exists = True
+        except OSError:
+            output_exists = False
+
+        # Some cf-plot backends can silently skip writing the requested file.
+        # Fall back to matplotlib savefig to ensure the user-selected file is created.
+        if not output_exists and hasattr(plt, "savefig"):
+            plt.savefig(output_path)
 
 def run_line_plot(
     pfld: object,
