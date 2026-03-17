@@ -650,6 +650,26 @@ class CFVMain(CFVCore):
         start = starts.popleft() if consume else starts[0]
         return max(0.0, time.monotonic() - start)
 
+    def _set_window_title_for_file(self, file_path: str) -> None:
+        """Update window title, appending remote host label when a remote session is active."""
+        descriptor = getattr(self, "_remote_descriptor", None)
+        if not isinstance(descriptor, dict):
+            super()._set_window_title_for_file(file_path)
+            return
+
+        scheme = str(descriptor.get("uri_scheme", "") or descriptor.get("protocol", ""))
+        display = str(descriptor.get("display_name", ""))
+        if scheme and display:
+            remote_tag = f" ({scheme}:{display})"
+        elif display:
+            remote_tag = f" ({display})"
+        else:
+            remote_tag = ""
+
+        self.current_file_path = file_path
+        filename = Path(file_path).name
+        self.setWindowTitle(f"{self.base_window_title}: {filename}{remote_tag}")
+
     def closeEvent(self, event: QCloseEvent) -> None:
         """Ensure worker process is shut down cleanly when GUI exits."""
         self._release_remote_session_if_active()

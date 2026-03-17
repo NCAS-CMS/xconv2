@@ -69,18 +69,31 @@ def minio_service():
             "MINIO_ROOT_USER": MINIO_ACCESS_KEY,
             "MINIO_ROOT_PASSWORD": MINIO_SECRET_KEY,
         },
-        ports={f"{MINIO_PORT}/tcp": MINIO_PORT, f"{MINIO_CONSOLE_PORT}/tcp": MINIO_CONSOLE_PORT},
+        # Use ephemeral host ports to avoid conflicts with local services.
+        ports={f"{MINIO_PORT}/tcp": None, f"{MINIO_CONSOLE_PORT}/tcp": None},
         detach=True,
         remove=True,
         name=f"xconv2-minio-test-{uuid.uuid4()}",
     )
 
+    container.reload()
+    network_ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
+    api_mappings = network_ports.get(f"{MINIO_PORT}/tcp") or []
+    if not api_mappings:
+        container_logs = container.logs().decode(errors="replace")
+        container.stop()
+        pytest.fail(f"MinIO container did not expose API port mapping. Logs:\n{container_logs}")
+
+    host_port = int(api_mappings[0]["HostPort"])
+    endpoint_url = f"http://localhost:{host_port}"
+
     minio_client = Minio(
-        f"localhost:{MINIO_PORT}",
+        f"localhost:{host_port}",
         access_key=MINIO_ACCESS_KEY,
         secret_key=MINIO_SECRET_KEY,
         secure=False,
     )
+    setattr(minio_client, "endpoint_url", endpoint_url)
 
     try:
         for _ in range(30):
@@ -118,7 +131,7 @@ def temp_bucket(minio_service):
 
 
 @pytest.fixture
-def fake_mc_config(monkeypatch: pytest.MonkeyPatch) -> Path:
+def fake_mc_config(monkeypatch: pytest.MonkeyPatch, minio_service) -> Path:
     """Simulate a MinIO-style ~/.mc/config.json file for S3 configuration loading."""
     tmpdir = Path(tempfile.mkdtemp(prefix="mc_cfg_"))
     mc_dir = tmpdir / ".mc"
@@ -130,7 +143,7 @@ def fake_mc_config(monkeypatch: pytest.MonkeyPatch) -> Path:
                 "version": "10",
                 "aliases": {
                     "fake-alias": {
-                        "url": f"http://localhost:{MINIO_PORT}",
+                        "url": getattr(minio_service, "endpoint_url", f"http://localhost:{MINIO_PORT}"),
                         "accessKey": MINIO_ACCESS_KEY,
                         "secretKey": MINIO_SECRET_KEY,
                         "api": "S3v4",

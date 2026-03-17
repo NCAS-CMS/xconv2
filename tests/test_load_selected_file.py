@@ -167,4 +167,51 @@ def test_send_worker_control_task_writes_typed_headers() -> None:
     encoded = payload.split("#TASK_PAYLOAD_B64:", 1)[1].split("\n", 1)[0]
     decoded = json.loads(base64.b64decode(encoded.encode("ascii")).decode("utf-8"))
     assert decoded == {"session_id": "abc", "value": 2}
- 
+
+
+# ---------------------------------------------------------------------------
+# Window title tests
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _DummyTitleWindow:
+    base_window_title: str = "xconv2 (test)"
+    current_file_path: str = ""
+    _remote_descriptor: dict | None = None
+    titles: list[str] = field(default_factory=list)
+
+    def setWindowTitle(self, title: str) -> None:
+        self.titles.append(title)
+
+    def _set_window_title_for_file(self, file_path: str) -> None:  # super() fallback
+        from pathlib import Path
+        self.current_file_path = file_path
+        self.setWindowTitle(f"{self.base_window_title}: {Path(file_path).name}")
+
+
+def test_set_window_title_for_remote_file_includes_host_tag() -> None:
+    window = _DummyTitleWindow(
+        _remote_descriptor={
+            "protocol": "sftp",
+            "uri_scheme": "ssh",
+            "display_name": "sci1",
+        }
+    )
+
+    CFVMain._set_window_title_for_file(window, "/data/archive/model.nc")
+
+    assert window.titles == ["xconv2 (test): model.nc (ssh:sci1)"]
+    assert window.current_file_path == "/data/archive/model.nc"
+
+
+def test_set_window_title_for_local_file_no_tag() -> None:
+    # Without a remote descriptor the CFVMain override delegates to CFVCore,
+    # which just shows the bare filename. Test CFVCore directly.
+    from xconv2.core_window import CFVCore
+
+    window = _DummyTitleWindow()
+
+    CFVCore._set_window_title_for_file(window, "/home/user/data/local.nc")
+
+    assert window.titles == ["xconv2 (test): local.nc"]
+    assert window.current_file_path == "/home/user/data/local.nc"
