@@ -19,5 +19,3 @@ venv/
 .DS_Store
 .vscode/
 
-#data
-data/
