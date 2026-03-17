@@ -18,9 +18,9 @@ import time
 import uuid
 from pathlib import Path
 
-from PySide6.QtCore import QProcess
+from PySide6.QtCore import QEventLoop, QProcess
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QListWidgetItem, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QListWidgetItem, QMessageBox
 
 from .cf_templates import (
     contour_range_from_selection,
@@ -31,7 +31,9 @@ from .cf_templates import (
 from .core_window import CFVCore
 from .ui.dialogs import RemoteConfigurationDialog
 from .ui.remote_file_navigator import (
+    RemoteEntry,
     RemoteFileNavigatorDialog,
+    RemoteLoginLogDialog,
     build_remote_filesystem_spec,
     remote_descriptor_hash,
     spec_to_descriptor,
@@ -52,6 +54,11 @@ class CFVMain(CFVCore):
         self._remote_descriptor_hash: str | None = None
         self._remote_descriptor: dict[str, object] | None = None
         self._pending_worker_task_starts: deque[float] = deque()
+        self._pending_prepare_loop: QEventLoop | None = None
+        self._pending_prepare_loop_ok: bool = False
+        self._pending_prepare_log_dialog: RemoteLoginLogDialog | None = None
+        self._pending_list_loop: QEventLoop | None = None
+        self._pending_list_result: dict | None = None
 
         self.worker = QProcess()
         self.worker.readyReadStandardOutput.connect(self.handle_worker_output)
@@ -106,6 +113,31 @@ class CFVMain(CFVCore):
                 message = str(payload.get("message") or f"Remote worker phase: {phase}")
                 is_error = phase == "failed"
                 self._show_status_message(message, is_error=is_error)
+
+                log_dialog = getattr(self, "_pending_prepare_log_dialog", None)
+                if log_dialog is not None:
+                    log_dialog.append_line(message)
+                    if phase == "failed":
+                        log_dialog.mark_failed("")
+
+                if phase in ("ready", "failed"):
+                    loop = getattr(self, "_pending_prepare_loop", None)
+                    if loop is not None:
+                        self._pending_prepare_loop_ok = phase == "ready"
+                        self._pending_prepare_loop = None
+                        loop.quit()
+
+            elif line.startswith("REMOTE_LIST_RESULT:"):
+                raw_payload = line.split(":", 1)[1]
+                result = pickle.loads(base64.b64decode(raw_payload))
+                if isinstance(result, dict):
+                    self._pending_list_result = result
+                    loop = getattr(self, "_pending_list_loop", None)
+                    if loop is not None:
+                        self._pending_list_loop = None
+                        loop.quit()
+                else:
+                    logger.warning("Unexpected REMOTE_LIST_RESULT payload type: %s", type(result).__name__)
 
             elif line.startswith("REMOTE_OPEN_RESULT:"):
                 raw_payload = line.split(":", 1)[1]
@@ -335,7 +367,7 @@ class CFVMain(CFVCore):
         self._remote_descriptor = None
 
     def _choose_remote(self) -> None:
-        """Warm the worker-side remote session while the UI navigator browses remotely."""
+        """Perform remote login once in the worker, then navigate via IPC using a nested QEventLoop."""
         raw_state = self._settings.get("last_remote_configuration", {})
         state = raw_state if isinstance(raw_state, dict) else {}
         config, ok, next_state = RemoteConfigurationDialog.get_configuration(self, state=state)
@@ -359,6 +391,14 @@ class CFVMain(CFVCore):
         self._remote_descriptor_hash = descriptor_hash
         self._remote_descriptor = descriptor
 
+        # Show login progress dialog and spin a QEventLoop until the worker signals ready/failed.
+        log_dialog = RemoteLoginLogDialog(self, spec.display_name)
+        self._pending_prepare_log_dialog = log_dialog
+        self._pending_prepare_loop = QEventLoop()
+        self._pending_prepare_loop_ok = False
+        log_dialog.show()
+        QApplication.processEvents()
+
         self._send_worker_control_task(
             "REMOTE_PREPARE",
             {
@@ -367,18 +407,26 @@ class CFVMain(CFVCore):
                 "descriptor": descriptor,
             },
         )
+        self._pending_prepare_loop.exec()
+        self._pending_prepare_log_dialog = None
 
-        selection, selected_ok = RemoteFileNavigatorDialog.get_remote_selection_details(
-            self,
-            config,
-            spec=spec,
-        )
-        if not selected_ok:
+        if not self._pending_prepare_loop_ok:
+            # mark_failed was already called in handle_worker_output; show the dialog modally.
+            log_dialog.exec()
             self._release_remote_session_if_active()
             return
 
-        selected_uri = str(selection.get("uri", ""))
-        selected_path = str(selection.get("path", ""))
+        log_dialog.close()
+
+        # Open the navigator backed entirely by worker-side directory listing via IPC.
+        list_callback = self._make_worker_list_callback()
+        dialog = RemoteFileNavigatorDialog(self, config, spec=spec, list_callback=list_callback)
+        if dialog.exec() != QDialog.Accepted:
+            self._release_remote_session_if_active()
+            return
+
+        selected_uri = dialog.selected_uri()
+        selected_path = dialog.selected_path()
         if not selected_uri or not selected_path:
             self._show_status_message("Remote file selection was incomplete.", is_error=True)
             self._release_remote_session_if_active()
@@ -387,6 +435,34 @@ class CFVMain(CFVCore):
         self._set_window_title_for_file(selected_uri)
         self._show_status_message(f"Selected remote file: {selected_uri}")
         self._load_remote_selected_file(selected_uri, selected_path)
+
+    def _make_worker_list_callback(self):
+        """Return a callable that lists a remote directory via worker IPC using a nested QEventLoop."""
+        def list_dir(path: str) -> list[RemoteEntry]:
+            loop = QEventLoop()
+            self._pending_list_loop = loop
+            self._pending_list_result = None
+            self._send_worker_control_task(
+                "REMOTE_LIST",
+                {
+                    "session_id": self._remote_session_id,
+                    "descriptor_hash": self._remote_descriptor_hash,
+                    "descriptor": self._remote_descriptor,
+                    "path": path,
+                },
+            )
+            loop.exec()
+            result = self._pending_list_result
+            self._pending_list_loop = None
+            self._pending_list_result = None
+            if result is None:
+                raise RuntimeError(f"No response from worker for directory listing of {path!r}")
+            error = result.get("error")
+            if error:
+                raise RuntimeError(str(error))
+            return list(result.get("entries", []))
+
+        return list_dir
 
     def _request_coordinates_for_field(self, index: int, show_status: bool = True) -> None:
         """Request coordinate arrays for a selected field index."""

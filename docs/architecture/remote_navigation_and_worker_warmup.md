@@ -1,10 +1,10 @@
-# Remote Navigation and Worker Warm-Up Design
+# Remote Navigation and Worker Design
 
 This document captures:
 
 1. The current remote-navigation behavior implemented in xconv2.
-2. The currently observed constraints in a two-process architecture.
-3. The implemented UI-worker IPC contract for latency-hiding warm-up.
+2. The single-login architecture via worker-owned IPC.
+3. The UI-worker IPC contract for login, navigation, and file open.
 
 Related sequence diagram:
 
@@ -17,7 +17,7 @@ xconv2 runs as two processes:
 1. UI process (`CFVCore` / `CFVMain`), handling dialogs and interaction.
 2. Worker process (`cf-worker`), handling file/data operations and plotting.
 
-Remote navigation currently happens in the UI process via the Remote Configuration dialog and Remote File Navigator dialog.
+Remote login and navigation are owned exclusively by the worker process. The UI holds no live filesystem connection; all directory listing and file reading travel through the IPC pipe.
 
 ## Current Remote Navigation (Implemented)
 
@@ -63,13 +63,25 @@ Remote file navigator behavior includes:
 
 ## Connection/Login UX
 
-Before navigator opens, UI shows a login-progress dialog:
+After the configuration dialog is accepted:
 
-1. Displays connection progress text.
-2. Closes automatically on successful login and root listing validation.
-3. Stays open on failure until user closes it.
+1. A `RemoteLoginLogDialog` is shown immediately, displaying connection progress lines forwarded from the worker.
+2. `REMOTE_PREPARE` is sent to the worker and a `QEventLoop` in `CFVMain._choose_remote` blocks until the worker emits `REMOTE_STATUS {phase=ready}` or `REMOTE_STATUS {phase=failed}`.
+3. On success the login dialog closes automatically and the file navigator opens.
+4. On failure the login dialog remains open until the user closes it.
 
-SSH ProxyJump support is implemented in the UI-side remote connector and logs connection steps.
+No filesystem is ever created in the UI process. SSH ProxyJump tunnelling is handled entirely in the worker, which logs each connection step back to the login dialog via `REMOTE_STATUS` messages.
+
+## Worker-Backed Directory Listing
+
+`RemoteFileNavigatorDialog` accepts an optional `list_callback` parameter — a callable `(path: str) -> list[RemoteEntry]`. When provided:
+
+- The dialog does not create a local filesystem.
+- Each tree node expansion calls `list_callback(path)`.
+- `CFVMain._make_worker_list_callback()` returns a closure that issues `REMOTE_LIST` to the worker and waits on a nested `QEventLoop` until `REMOTE_LIST_RESULT` arrives.
+- The worker reuses the already-warm session from its pool, performs `fs.ls()`, normalizes entries, and resolves symlinks before replying.
+
+Round-trip IPC cost per `ls()` call is 0.1–2 ms, negligible against the 30–500 ms remote server latency.
 
 ## Stability Fixes for Deep Trees
 
@@ -79,48 +91,30 @@ For deep or large trees (especially S3):
 2. Context restore now targets only the active branch (selected item and ancestors), not every expanded node.
 3. Tree traversal for state restore uses iterative stack walking, avoiding recursion-depth failures.
 
-## Two-Process Constraint
+## IPC Task Headers (UI -> Worker)
 
-Open remote client/session objects are process-local and are not safely transferable between UI and worker.
-
-Practical implication:
-
-1. UI and worker must each establish their own connection state.
-2. Reuse across processes should be done by passing normalized connection descriptors, not live handles.
-
-## Worker Warm-Up via IPC (Implemented)
-
-Goal:
-
-1. Keep current UI browser responsiveness.
-2. Hide worker-side connect/auth latency by warming worker connection in parallel while user navigates.
-
-## High-Level Flow
-
-1. User accepts remote configuration in UI.
-2. UI sends `REMOTE_PREPARE` request to worker with normalized descriptor and session id.
-3. Worker starts/establishes filesystem connection and stores it in a descriptor-keyed pool.
-4. User continues browsing in UI.
-5. On final open, UI sends `REMOTE_OPEN` request with same descriptor hash/session id.
-6. Worker reuses warm connection when available.
-
-## Suggested Task Headers (UI -> Worker)
-
-Reuse current `#...` preamble convention:
+All tasks use the existing `#...` preamble convention:
 
 1. `#TASK_KIND:REMOTE_PREPARE`
-2. `#TASK_KIND:REMOTE_RELEASE`
+2. `#TASK_KIND:REMOTE_LIST`
 3. `#TASK_KIND:REMOTE_OPEN`
-4. `#TASK_PAYLOAD_B64:<base64-json>`
+4. `#TASK_KIND:REMOTE_RELEASE`
+5. `#TASK_PAYLOAD_B64:<base64-pickle>`
 
-Payload fields:
+Common payload fields:
 
 1. `session_id`
 2. `descriptor_hash`
 3. `descriptor`
-4. `uri` (for open)
-5. `path` (filesystem-native path for open)
-6. `hint_path` (optional)
+
+Additional fields for `REMOTE_LIST`:
+
+- `path` (filesystem-native path to list)
+
+Additional fields for `REMOTE_OPEN`:
+
+- `uri` (user-facing URI string)
+- `path` (filesystem-native path for open)
 
 Descriptor fields (normalized):
 
@@ -133,7 +127,7 @@ Descriptor fields (normalized):
 7. cache options
 8. root path
 
-## Suggested Worker Status Messages (Worker -> UI)
+## IPC Messages (Worker -> UI)
 
 1. `REMOTE_STATUS`:
 - `phase` in `{preparing, ready, failed, released}`
@@ -141,17 +135,22 @@ Descriptor fields (normalized):
 - `descriptor_hash`
 - `message`
 
-2. `REMOTE_OPEN_RESULT`:
+2. `REMOTE_LIST_RESULT`:
+- `path`
+- `entries` — `list[RemoteEntry]` (normalized, symlinks resolved)
+- `error` — error string or `None`
+
+3. `REMOTE_OPEN_RESULT`:
 - `session_id`
 - `uri`
 - `ok`
 - `error` (optional)
 
-3. Existing data-path messages reused during remote open:
+4. Existing data-path messages reused during remote open:
 - `METADATA` with the same field-list payload used by local file opens.
 - `STATUS` remains in use for legacy code-task completion and plotting updates.
 
-## Worker Session Pool Policy (Suggested)
+## Worker Session Pool Policy
 
 1. Key pool entries by `descriptor_hash`.
 2. Track `created_at`, `last_used`, and owning `session_id`.
@@ -159,20 +158,20 @@ Descriptor fields (normalized):
 4. Cap pool size (for example 2-4) and evict LRU.
 5. Use "most recent session id wins" to avoid stale races.
 
+By the time `REMOTE_OPEN` arrives, the session pool always contains a warm entry for the current descriptor (established during `REMOTE_PREPARE` and kept alive by the `REMOTE_LIST` calls during navigation). Cold-open fallback in `REMOTE_OPEN` remains as a safety net.
+
 ## URI-Open Path
 
 For direct URI open (without UI browsing):
 
 1. Parse URI into descriptor.
-2. Send `REMOTE_PREPARE` immediately.
+2. Send `REMOTE_PREPARE` and wait for `REMOTE_STATUS {phase=ready}`.
 3. Send `REMOTE_OPEN` using same descriptor hash/session id.
-4. Worker uses warm entry if ready, otherwise falls back to cold connect.
+4. Worker reuses warm entry.
 
 ## Worker Protocol Strategy Matrix
 
-When the worker receives a `REMOTE_OPEN` request it must ultimately call `cf.read()` (or equivalent) to load the file. The path to that call differs significantly by protocol.
-
-Investigation of the installed cf-python 3.19.0 + cfdm source confirmed the following dispatch behaviour for `cf.read(uri)`:
+When the worker receives a `REMOTE_OPEN` request it calls `cf.read()` (or equivalent). The path differs by protocol.
 
 | URI scheme | cf/cfdm handling | Outcome |
 |---|---|---|
@@ -224,9 +223,9 @@ cf.read(f"/tmp/xconv2-mounts/{hostname}{remote_path}")
 Pros: Transparent to cf-python; all cf features work.
 Cons: Requires `sshfs`/FUSE on the worker host; mount lifecycle must be managed; may not be available in all deployment environments.
 
-**Option B — fsspec streaming read + manual staging:**
+**Option B — fsspec streaming read + manual staging (implemented):**
 
-The worker opens the file via `fsspec`/`sshfs` and writes it to a temporary local file, then calls `cf.read()` on the temp path:
+The worker opens the file via `fsspec` and writes it to a temporary local file, then calls `cf.read()` on the temp path:
 
 ```python
 import fsspec, tempfile, os
@@ -245,24 +244,24 @@ finally:
 Pros: No FUSE dependency; works in any Python environment.
 Cons: Full file must be transferred before `cf.read()` begins; slow for large files.
 
-**Recommended approach:** Use Option B as a safe fallback (no system dependencies) and add Option A as an opt-in if `sshfs` is detected. The warm-up phase (`REMOTE_PREPARE`) is the natural point to authenticate and hold the `fsspec` SSH connection open so the staging transfer in Option B starts immediately on `REMOTE_OPEN`.
+Option B is currently in use as the default SSH/SFTP strategy.
 
 ## Current Status
 
 Implemented now:
 
-1. UI-side remote configuration and navigator (S3/SSH behavior above).
-2. UI-side login progress dialog and ProxyJump support.
-3. Filtering, symlink handling, Zarr labeling, and large-tree stability improvements.
-4. Worker connection warm-up and descriptor-keyed remote session reuse via typed IPC tasks.
-5. Remote file open path wired through `REMOTE_PREPARE` / `REMOTE_OPEN` / `REMOTE_RELEASE`.
+1. Remote configuration dialog (S3/SSH/HTTP-placeholder).
+2. Worker-owned login: single `REMOTE_PREPARE` establishes the session; login progress forwarded to UI via `REMOTE_STATUS` messages and a nested `QEventLoop`.
+3. Worker-backed directory listing via `REMOTE_LIST` / `REMOTE_LIST_RESULT` and a nested `QEventLoop` per tree node expansion in `RemoteFileNavigatorDialog`.
+4. Filtering, symlink handling, Zarr labeling, and large-tree stability improvements (all in the UI, applied to entries received from the worker).
+5. Remote file open path via `REMOTE_OPEN`; session always warm by the time open is requested.
 6. Worker open fallbacks by protocol:
 - S3: direct `cf.read(uri, storage_options=...)`
 - HTTP: direct URI open
 - SSH/SFTP: staged temporary local file when direct filesystem-based `cf.read` is unavailable
+7. `REMOTE_RELEASE` on target change or window close.
 
 Not yet implemented:
 
 1. Optional `sshfs`/FUSE mount path for SSH/SFTP as an alternative to staging.
-2. Optional migration of remote listing/open to worker-owned I/O for single-owner semantics.
-3. Any richer worker-side status timing/reporting beyond the current `REMOTE_STATUS` messages.
+2. Any richer worker-side status timing/reporting beyond the current `REMOTE_STATUS` messages.

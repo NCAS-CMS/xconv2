@@ -212,7 +212,7 @@ def test_run_contour_plot_applies_levels_annotations_and_save(
     assert cfp.cscale_calls == [{"scale": "magma"}]
     assert cfp.gopen_calls == [{"file": "/tmp/mock.png"}]
     assert cfp.levs_calls == [{"manual": [-1.0, 0.0, 1.0]}]
-    assert cfp.setvars_calls == [{"title_fontsize": 10.5}]
+    assert cfp.setvars_calls == [{"title_fontsize": 10.5, "viewer": None}]
     assert cfp.con_calls
     assert cfp.gclose_calls == 1
     assert plt_obj.figure.text_calls
@@ -242,7 +242,7 @@ def test_run_contour_plot_uses_configured_title_font_sizes(
         },
     )
 
-    assert cfp.setvars_calls == [{"title_fontsize": 12.5}]
+    assert cfp.setvars_calls == [{"title_fontsize": 12.5, "viewer": None}]
     assert plt_obj.figure.suptitle_calls == [
         (("Overview",), {"y": 0.995, "fontsize": 14.0})
     ]

@@ -30,8 +30,14 @@ from matplotlib import pyplot as plt
 
 from . import xconv_cf_interface
 from . import lineplot as xconv_lineplot
+from . import cell_method_handler as xconv_cell_method_handler
 from . import __version__
-from .ui.remote_file_navigator import create_filesystem, descriptor_to_spec
+from .ui.remote_file_navigator import (
+    create_filesystem,
+    descriptor_to_spec,
+    normalize_remote_entries,
+    resolve_link_entries,
+)
 
 # cf-plot may still call show(); in Agg mode this is non-interactive and noisy.
 plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
@@ -370,6 +376,39 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
         _release_remote_session(session_id=session_id, descriptor_hash=descriptor_hash)
         return
 
+    if task_kind == "REMOTE_LIST":
+        if not isinstance(descriptor, dict) or not session_id or not descriptor_hash:
+            raise ValueError("REMOTE_LIST requires session_id, descriptor_hash, and descriptor")
+        path = str(payload.get("path", ""))
+        # Reuse an already-warm session without sending redundant REMOTE_STATUS messages.
+        entry = remote_session_pool.get(descriptor_hash)
+        if entry is None:
+            entry = _prepare_remote_session(
+                session_id=session_id,
+                descriptor_hash=descriptor_hash,
+                descriptor=descriptor,
+            )
+        else:
+            entry.last_used = time.monotonic()
+        try:
+            raw = entry.filesystem.ls(path, detail=True)
+            if not isinstance(raw, list):
+                raw = []
+            entries = normalize_remote_entries(raw)
+            entries = resolve_link_entries(entries, entry.filesystem)
+            send_to_gui("REMOTE_LIST_RESULT", {
+                "path": path,
+                "entries": entries,
+                "error": None,
+            })
+        except Exception as exc:
+            send_to_gui("REMOTE_LIST_RESULT", {
+                "path": path,
+                "entries": [],
+                "error": str(exc),
+            })
+        return
+
     if task_kind == "REMOTE_OPEN":
         if not isinstance(descriptor, dict) or not session_id or not descriptor_hash:
             raise ValueError("REMOTE_OPEN requires session_id, descriptor_hash, and descriptor")
@@ -458,6 +497,32 @@ def _build_saved_plot_script(exec_code: str) -> str:
                 needed_helpers.add(candidate)
                 queue.append(candidate)
 
+    # Collect auxiliary functions from cell_method_handler that are referenced by
+    # inlined helpers but are not exported from xconv_cf_interface directly.
+    aux_module_funcs: list[tuple[str, object]] = [
+        (name, obj)
+        for name, obj in vars(xconv_cell_method_handler).items()
+        if callable(obj) and not name.startswith("_")
+    ]
+    aux_sources: dict[str, str] = {}
+    for name, obj in aux_module_funcs:
+        try:
+            aux_sources[name] = textwrap.dedent(inspect.getsource(obj)).rstrip()
+        except (OSError, TypeError):
+            pass
+
+    # Extend the transitive scan to also catch aux functions referenced by helpers.
+    queue = list(needed_helpers)
+    while queue:
+        name = queue.pop()
+        source = helper_sources.get(name, "")
+        for candidate in aux_sources:
+            if candidate in needed_helpers:
+                continue
+            if re.search(rf"\b{re.escape(candidate)}\b", source):
+                needed_helpers.add(candidate)
+                queue.append(candidate)
+
     include_lineplot_class = (
         "run_line_plot" in needed_helpers
         or bool(re.search(r"\bLinePlot\b", exec_code))
@@ -476,6 +541,19 @@ def _build_saved_plot_script(exec_code: str) -> str:
         except (OSError, TypeError):
             logger.exception("Unable to inline helper source for LinePlot")
             lines.append("# NOTE: helper source unavailable for LinePlot")
+            lines.append("")
+
+    # Inline auxiliary helpers (e.g. from cell_method_handler) referenced transitively.
+    needed_aux = {name for name in aux_sources if name in needed_helpers}
+    if needed_aux:
+        lines.extend([
+            "",
+            "# Inlined auxiliary helpers for standalone execution.",
+            "",
+        ])
+        for name in sorted(needed_aux):
+            source = aux_sources[name]
+            lines.append(source)
             lines.append("")
 
     lines.extend([
@@ -545,6 +623,7 @@ def _emit_latest_plot_image() -> None:
     buffer.close()
     plt.close("all")
 
+
 def main():
     """Entry point for the cf-worker command."""
     logging.basicConfig(
@@ -563,15 +642,15 @@ def main():
     # Expose helper in the exec namespace so GUI-issued tasks can emit messages.
     worker_globals['send_to_gui'] = send_to_gui
     send_to_gui("STATUS:Worker Initialized (Pure-Python/pyfive)")
-    
+
     current_block = []
-    
+
     while True:
         line = sys.stdin.readline()
         if not line:
             logger.info("Worker stdin closed; shutting down")
             break
-            
+
         if line.strip() == "#END_TASK":
             code = "".join(current_block)
             save_path, emit_image, task_kind, task_payload, exec_code = _extract_task_headers(code)
@@ -643,12 +722,13 @@ def main():
                 # Send the full error back to the GUI for debugging
                 err = traceback.format_exc()
                 send_to_gui(f"STATUS:Error - {err.splitlines()[-1]}")
-                print(err, file=sys.stderr) 
+                print(err, file=sys.stderr)
                 logger.exception("Task failed")
-            
-            current_block = [] # Reset for the next GUI command
+
+            current_block = []
         else:
             current_block.append(line)
+
 
 if __name__ == "__main__":
     main()

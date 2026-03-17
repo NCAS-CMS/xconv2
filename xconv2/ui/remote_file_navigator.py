@@ -472,6 +472,7 @@ class RemoteFileNavigatorDialog(QDialog):
         *,
         spec: RemoteFilesystemSpec | None = None,
         filesystem: Any | None = None,
+        list_callback: Callable[[str], list[RemoteEntry]] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Remote File Navigator")
@@ -482,7 +483,12 @@ class RemoteFileNavigatorDialog(QDialog):
         self._selected_path = ""
         self._detected_zarr_paths: set[str] = set()
         self._spec = spec or build_remote_filesystem_spec(config)
-        self._filesystem = filesystem or create_filesystem(self._spec)
+        if list_callback is not None:
+            self._filesystem: Any | None = None
+            self._list_callback: Callable[[str], list[RemoteEntry]] | None = list_callback
+        else:
+            self._filesystem = filesystem or create_filesystem(self._spec)
+            self._list_callback = None
 
         layout = QVBoxLayout(self)
 
@@ -626,6 +632,8 @@ class RemoteFileNavigatorDialog(QDialog):
 
     def _list_entries_unfiltered(self, path: str) -> list[RemoteEntry]:
         """Call filesystem ls and return normalized entries before UI filtering."""
+        if self._list_callback is not None:
+            return self._list_callback(path)
         listing = self._filesystem.ls(path, detail=True)
         if not isinstance(listing, list):
             raise RuntimeError(f"Unexpected listing result for {path!r}")

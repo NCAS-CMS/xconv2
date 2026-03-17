@@ -340,7 +340,9 @@ def run_contour_plot(
     _apply_levels()
 
     if hasattr(cfp, "setvars"):
-        cfp.setvars(title_fontsize=contour_title_fontsize)
+        # Always pass viewer=None to prevent cfplot from spawning an external
+        # image viewer (e.g. ImageMagick display) after gclose().
+        cfp.setvars(title_fontsize=contour_title_fontsize, viewer=None)
 
     cfp.con(pfld, **contour_kwargs)
     
