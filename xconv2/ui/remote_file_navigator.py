@@ -127,6 +127,70 @@ def _emit_log(log: Callable[[str], None] | None, message: str) -> None:
         log(message)
 
 
+class _XconvHostKeyPolicy:
+    """Trust-on-first-use host key policy for Paramiko SSH clients.
+
+    The client should call ``load_system_host_keys()`` before connecting so
+    that hosts already present in ``~/.ssh/known_hosts`` are accepted without
+    a prompt.  This policy is invoked only for hosts that are *not* in the
+    loaded store.  It shows a Qt confirmation dialog with the key fingerprint;
+    the key is accepted in-memory for the session if the user confirms, or
+    the connection is aborted if the user declines or no Qt UI is available.
+    """
+
+    def __init__(
+        self,
+        parent: Any = None,
+        log: Callable[[str], None] | None = None,
+    ) -> None:
+        self._parent = parent
+        self._log = log
+
+    def missing_host_key(self, client: Any, hostname: str, key: Any) -> None:
+        """Prompt the user to accept or reject an unknown host key."""
+        try:
+            import paramiko  # type: ignore
+            SSHException = paramiko.SSHException
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError("paramiko is required for SSH host key verification") from exc
+
+        try:
+            fingerprint = ":".join(f"{b:02x}" for b in key.get_fingerprint())
+            key_type = key.get_name()
+        except Exception:
+            fingerprint = "<unavailable>"
+            key_type = "<unavailable>"
+
+        _emit_log(self._log, f"Unknown host key for {hostname!r}: {key_type} {fingerprint}")
+
+        try:
+            from PySide6.QtWidgets import QMessageBox
+            answer = QMessageBox.question(
+                self._parent,
+                "Unknown Host Key",
+                f"The host {hostname!r} is not in known_hosts.\n\n"
+                f"Key type:    {key_type}\n"
+                f"Fingerprint: {fingerprint}\n\n"
+                "Verify this fingerprint out-of-band before accepting.\n\n"
+                "Trust this host key for the current session?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+        except Exception:
+            # Qt unavailable (headless / test context) — reject by default.
+            raise SSHException(
+                f"Host key for {hostname!r} not in known_hosts; rejected (no UI available)."
+            )
+
+        if answer == QMessageBox.Yes:
+            _emit_log(self._log, f"Host key for {hostname!r} accepted by user")
+            # Accept in-memory only; do not write back to ~/.ssh/known_hosts.
+            client._host_keys.add(hostname, key.get_name(), key)
+        else:
+            _emit_log(self._log, f"Host key for {hostname!r} rejected by user")
+            raise SSHException(f"Host key for {hostname!r} rejected by user.")
+
+
 def _create_sftp_via_jump(spec: RemoteFilesystemSpec, log: Callable[[str], None] | None = None) -> Any:
     """Build an SFTP filesystem tunnelled through a ProxyJump host."""
     try:
@@ -180,7 +244,8 @@ def _create_sftp_via_jump(spec: RemoteFilesystemSpec, log: Callable[[str], None]
 
     _emit_log(log, f"Connecting to jump host {jump_hostname}:{jump_port}")
     jump_client = paramiko.SSHClient()
-    jump_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    jump_client.load_system_host_keys()
+    jump_client.set_missing_host_key_policy(_XconvHostKeyPolicy(log=log))
     jump_client.connect(**jump_connect)
     _emit_log(log, "Connected to jump host")
 
@@ -820,7 +885,7 @@ class RemoteFileNavigatorDialog(QDialog):
                         client.close()
                     except Exception:
                         pass
-            return "", False
+            return {}, False
 
         assert filesystem is not None
         dialog = cls(parent, config, spec=spec, filesystem=filesystem)

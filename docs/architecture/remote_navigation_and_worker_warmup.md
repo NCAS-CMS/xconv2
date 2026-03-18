@@ -99,7 +99,7 @@ All tasks use the existing `#...` preamble convention:
 2. `#TASK_KIND:REMOTE_LIST`
 3. `#TASK_KIND:REMOTE_OPEN`
 4. `#TASK_KIND:REMOTE_RELEASE`
-5. `#TASK_PAYLOAD_B64:<base64-pickle>`
+5. `#TASK_PAYLOAD_B64:<base64-json>`
 
 Common payload fields:
 

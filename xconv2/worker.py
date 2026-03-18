@@ -14,7 +14,7 @@ import time
 from io import BytesIO
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any
+from typing import Any, NamedTuple
 
 import matplotlib
 import numpy as np
@@ -74,6 +74,16 @@ REMOTE_SESSION_TTL_SECONDS = 180.0
 REMOTE_SESSION_MAX = 4
 
 
+class TaskHeaders(NamedTuple):
+    """Parsed preamble headers extracted from a worker task code block."""
+
+    save_path: str | None
+    emit_image: bool
+    task_kind: str | None
+    task_payload: dict[str, Any] | None
+    code: str
+
+
 class RemoteSessionEntry:
     """Worker-side cached remote session state keyed by descriptor hash."""
 
@@ -123,8 +133,20 @@ def send_to_gui(prefix, data=None):
         logger.debug("Sent message to GUI: %s", prefix)
 
 
-def _extract_task_headers(code: str) -> tuple[str | None, bool, str]:
-    """Extract optional task headers and return save path, emit flag, and code."""
+def _extract_task_headers(code: str) -> TaskHeaders:
+    """Parse leading ``#``-prefixed control headers from a worker task block.
+
+    Headers are consumed one per line until the first non-header line.  The
+    remaining text is the executable code body.
+
+    Returns a :class:`TaskHeaders` named tuple with fields:
+
+    * ``save_path``   – destination path for ``#SAVE_TASK_CODE_PATH_B64:``
+    * ``emit_image``  – False when ``#EMIT_IMAGE:0`` is present
+    * ``task_kind``   – value of ``#TASK_KIND:`` (control tasks only)
+    * ``task_payload``– decoded JSON dict from ``#TASK_PAYLOAD_B64:``
+    * ``code``        – remaining executable code after all headers
+    """
     save_path: str | None = None
     emit_image = True
     task_kind: str | None = None
@@ -165,7 +187,13 @@ def _extract_task_headers(code: str) -> tuple[str | None, bool, str]:
             payload = header + "\n" + payload
             break
 
-    return save_path, emit_image, task_kind, task_payload, payload
+    return TaskHeaders(
+        save_path=save_path,
+        emit_image=emit_image,
+        task_kind=task_kind,
+        task_payload=task_payload,
+        code=payload,
+    )
 
 
 def _cf_read_supports_filesystem() -> bool:
@@ -653,7 +681,14 @@ def main():
 
         if line.strip() == "#END_TASK":
             code = "".join(current_block)
-            save_path, emit_image, task_kind, task_payload, exec_code = _extract_task_headers(code)
+            headers = _extract_task_headers(code)
+            save_path, emit_image, task_kind, task_payload, exec_code = (
+                headers.save_path,
+                headers.emit_image,
+                headers.task_kind,
+                headers.task_payload,
+                headers.code,
+            )
             logger.info("Executing task block (%d lines, %d chars)", len(current_block), len(exec_code))
 
             if task_kind is not None:

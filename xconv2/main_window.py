@@ -36,6 +36,7 @@ from .ui.remote_file_navigator import (
     RemoteEntry,
     RemoteFileNavigatorDialog,
     RemoteLoginLogDialog,
+    _XconvHostKeyPolicy,
     build_remote_filesystem_spec,
     remote_descriptor_hash,
     spec_to_descriptor,
@@ -206,10 +207,13 @@ class CFVMain(CFVCore):
                 metadata = pickle.loads(base64.b64decode(raw_payload))
                 if isinstance(metadata, list):
                     if not all(isinstance(row, dict) for row in metadata):
-                        raise TypeError(
-                            "Field metadata payload must be a list of dict rows "
-                            "with identity/detail/properties"
+                        logger.warning(
+                            "Malformed METADATA payload: expected list of dicts, got mixed types"
                         )
+                        self._show_status_message(
+                            "Received malformed field metadata from worker.", is_error=True
+                        )
+                        continue
                     logger.info("Received metadata for %d fields", len(metadata))
                     self.populate_field_list(metadata)
                 elif isinstance(metadata, dict):
@@ -787,7 +791,8 @@ class CFVMain(CFVCore):
             return None
 
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.load_system_host_keys()
+        client.set_missing_host_key_policy(_XconvHostKeyPolicy())
         try:
             client.connect(
                 hostname,
