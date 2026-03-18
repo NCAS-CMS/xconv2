@@ -216,10 +216,13 @@ class RemoteConfigurationDialog(QDialog):
     """Collect remote configuration details before opening a remote navigator."""
 
     _S3_MODES = ["Select from existing", "Add new"]
+    _HTTPS_MODES = ["Select from existing", "Add new"]
     _SSH_MODES = ["Select from existing", "Add new"]
     _CACHE_STRATEGIES = ["None", "Block", "Readahead", "Whole-File"]
     _DISK_CACHE_MODES = ["Disabled", "Blocks", "Files"]
     _EXPIRY_OPTIONS = ["Never", "1 day", "7 days", "30 days"]
+    _RESULT_SAVED_ONLY = 2
+    _WIDE_FIELD_CHARS = 50
 
     def __init__(self, parent: QWidget | None, state: dict[str, Any] | None = None) -> None:
         super().__init__(parent)
@@ -228,6 +231,7 @@ class RemoteConfigurationDialog(QDialog):
 
         self._s3_locations = self._load_s3_locations()
         self._ssh_hosts = self._load_ssh_hosts()
+        self._http_locations = self._load_http_locations(state)
 
         layout = QVBoxLayout(self)
 
@@ -236,18 +240,28 @@ class RemoteConfigurationDialog(QDialog):
 
         self.protocol_tabs = QTabWidget()
         self.protocol_tabs.addTab(self._build_s3_tab(), "S3")
-        self.protocol_tabs.addTab(self._build_http_tab(), "HTTP")
+        self.protocol_tabs.addTab(self._build_http_tab(), "HTTPS")
         self.protocol_tabs.addTab(self._build_ssh_tab(), "SSH")
         layout.addWidget(self.protocol_tabs)
 
         layout.addWidget(self._build_cache_group())
 
-        buttons = QDialogButtonBox()
-        cancel_button = buttons.addButton(QDialogButtonBox.Cancel)
-        save_button = buttons.addButton("Save", QDialogButtonBox.AcceptRole)
+        button_row = QWidget()
+        button_layout = QHBoxLayout(button_row)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.addStretch(1)
+
+        cancel_button = QPushButton("Cancel")
+        save_button = QPushButton("Save")
+        open_button = QPushButton("Open")
         cancel_button.clicked.connect(self.reject)
-        save_button.clicked.connect(self.accept)
-        layout.addWidget(buttons)
+        save_button.clicked.connect(self._save_and_close)
+        open_button.clicked.connect(self.accept)
+
+        button_layout.addWidget(cancel_button)
+        button_layout.addWidget(save_button)
+        button_layout.addWidget(open_button)
+        layout.addWidget(button_row)
 
         self._update_s3_mode()
         self._update_s3_selected_details()
@@ -265,6 +279,24 @@ class RemoteConfigurationDialog(QDialog):
             return {}
         locations, _ = options
         return dict(sorted(locations.items()))
+
+    @staticmethod
+    def _load_http_locations(state: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+        """Load persisted HTTP alias mapping from dialog state."""
+        if not isinstance(state, dict):
+            return {}
+        raw = state.get("http_locations")
+        if not isinstance(raw, dict):
+            return {}
+
+        cleaned: dict[str, dict[str, Any]] = {}
+        for alias, details in raw.items():
+            if not isinstance(alias, str) or not isinstance(details, dict):
+                continue
+            url = details.get("url") or details.get("base_url")
+            if isinstance(url, str) and url.strip():
+                cleaned[alias] = {"url": url.strip()}
+        return dict(sorted(cleaned.items()))
 
     @staticmethod
     def _default_s3_config_path() -> Path:
@@ -474,6 +506,12 @@ class RemoteConfigurationDialog(QDialog):
             combo.addItem(empty_label)
             combo.setEnabled(False)
 
+    @classmethod
+    def _set_line_edit_character_width(cls, widget: QLineEdit) -> None:
+        """Give line edits a practical width in character units."""
+        width_px = widget.fontMetrics().horizontalAdvance("M" * cls._WIDE_FIELD_CHARS)
+        widget.setMinimumWidth(width_px)
+
     def _build_s3_tab(self) -> QWidget:
         """Build S3 configuration controls."""
         tab = QWidget()
@@ -496,9 +534,10 @@ class RemoteConfigurationDialog(QDialog):
         self.s3_existing_combo.currentTextChanged.connect(self._update_s3_selected_details)
         self.s3_existing_url = QLineEdit("")
         self.s3_existing_url.setReadOnly(True)
+        self._set_line_edit_character_width(self.s3_existing_url)
         self.s3_existing_api = QLineEdit("")
         self.s3_existing_api.setReadOnly(True)
-        existing_layout.addRow("Configuration:", self.s3_existing_combo)
+        existing_layout.addRow("Host alias:", self.s3_existing_combo)
         existing_layout.addRow("URL:", self.s3_existing_url)
         existing_layout.addRow("API:", self.s3_existing_api)
         layout.addWidget(self.s3_existing_group)
@@ -510,6 +549,7 @@ class RemoteConfigurationDialog(QDialog):
         self.s3_config_combo.currentTextChanged.connect(self._update_s3_config_details)
         self.s3_config_url = QLineEdit("")
         self.s3_config_url.setReadOnly(True)
+        self._set_line_edit_character_width(self.s3_config_url)
         self.s3_config_api = QLineEdit("")
         self.s3_config_api.setReadOnly(True)
         config_layout.addRow("Config entry:", self.s3_config_combo)
@@ -521,6 +561,7 @@ class RemoteConfigurationDialog(QDialog):
         new_layout = QFormLayout(self.s3_new_group)
         self.s3_alias_edit = QLineEdit("")
         self.s3_url_edit = QLineEdit("")
+        self._set_line_edit_character_width(self.s3_url_edit)
         self.s3_access_key_edit = QLineEdit("")
         self.s3_secret_key_edit = QLineEdit("")
         self.s3_secret_key_edit.setEchoMode(QLineEdit.Password)
@@ -530,7 +571,7 @@ class RemoteConfigurationDialog(QDialog):
         self.s3_config_target_combo = QComboBox()
         self.s3_config_target_combo.addItems(["MinIO", "xconv"])
         self.s3_config_target_combo.setCurrentText("MinIO")
-        new_layout.addRow("Short name:", self.s3_alias_edit)
+        new_layout.addRow("Host alias:", self.s3_alias_edit)
         new_layout.addRow("URL:", self.s3_url_edit)
         new_layout.addRow("Access Key:", self.s3_access_key_edit)
         new_layout.addRow("Secret Key:", self.s3_secret_key_edit)
@@ -561,14 +602,79 @@ class RemoteConfigurationDialog(QDialog):
         self.s3_existing_group.setVisible(mode == "Select from existing")
         self.s3_new_group.setVisible(mode == "Add new")
         self.s3_config_group.setVisible(False)
+        if mode == "Add new":
+            self.s3_alias_edit.clear()
+            self.s3_url_edit.clear()
+            self.s3_access_key_edit.clear()
+            self.s3_secret_key_edit.clear()
 
     def _build_http_tab(self) -> QWidget:
-        """Build placeholder HTTP tab."""
+        """Build HTTPS configuration controls."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        layout.addWidget(QLabel("Not Implemented Yet"))
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("HTTPS setup:"))
+        self.http_mode_combo = QComboBox()
+        self.http_mode_combo.addItems(self._HTTPS_MODES)
+        self.http_mode_combo.currentTextChanged.connect(self._update_http_mode)
+        mode_row.addWidget(self.http_mode_combo, 1)
+        layout.addLayout(mode_row)
+
+        aliases = list(self._http_locations.keys())
+
+        self.http_existing_group = QGroupBox("Existing configuration")
+        existing_layout = QFormLayout(self.http_existing_group)
+        self.http_existing_combo = QComboBox()
+        self._set_combo_items(self.http_existing_combo, aliases, "No HTTPS configurations found")
+        self.http_existing_combo.currentTextChanged.connect(self._update_http_selected_details)
+        self.http_existing_url = QLineEdit("")
+        self.http_existing_url.setReadOnly(True)
+        self._set_line_edit_character_width(self.http_existing_url)
+        existing_layout.addRow("Host alias:", self.http_existing_combo)
+        existing_layout.addRow("URL:", self.http_existing_url)
+        layout.addWidget(self.http_existing_group)
+
+        self.http_new_group = QGroupBox("Add new")
+        new_layout = QFormLayout(self.http_new_group)
+        self.http_alias_edit = QLineEdit("")
+        self.http_url_edit = QLineEdit("")
+        self._set_line_edit_character_width(self.http_url_edit)
+        new_layout.addRow("Host alias:", self.http_alias_edit)
+        new_layout.addRow("Remote HTTPS URL:", self.http_url_edit)
+        layout.addWidget(self.http_new_group)
+
         layout.addStretch(1)
         return tab
+
+    def _update_http_mode(self) -> None:
+        """Show the relevant HTTPS subframe for the selected mode."""
+        mode = self.http_mode_combo.currentText()
+        self.http_existing_group.setVisible(mode == "Select from existing")
+        self.http_new_group.setVisible(mode == "Add new")
+        if mode == "Add new":
+            self.http_alias_edit.clear()
+            self.http_url_edit.clear()
+
+    def _update_http_selected_details(self) -> None:
+        """Refresh preview fields for an existing HTTPS alias."""
+        alias = self.http_existing_combo.currentText().strip()
+        details = self._http_locations.get(alias, {})
+        url = details.get("url") if isinstance(details, dict) else ""
+        if isinstance(url, str):
+            self.http_existing_url.setText(url)
+
+    def _select_saved_http_alias(self, alias: str, details: dict[str, str]) -> None:
+        """Switch UI state to an existing HTTPS selection after saving a new alias."""
+        self._http_locations[alias] = details
+        aliases = list(self._http_locations.keys())
+        self._set_combo_items(self.http_existing_combo, aliases, "No HTTPS configurations found")
+        index = self.http_existing_combo.findText(alias)
+        if index >= 0:
+            self.http_existing_combo.setCurrentIndex(index)
+        self.http_mode_combo.setCurrentText("Select from existing")
+        self._update_http_selected_details()
+        self._update_http_mode()
 
     def _build_ssh_tab(self) -> QWidget:
         """Build SSH configuration controls."""
@@ -592,10 +698,12 @@ class RemoteConfigurationDialog(QDialog):
         self.ssh_existing_combo.currentTextChanged.connect(self._update_ssh_selected_details)
         self.ssh_existing_hostname = QLineEdit("")
         self.ssh_existing_hostname.setReadOnly(True)
+        self._set_line_edit_character_width(self.ssh_existing_hostname)
         self.ssh_existing_user = QLineEdit("")
         self.ssh_existing_user.setReadOnly(True)
         self.ssh_existing_identity = QLineEdit("")
         self.ssh_existing_identity.setReadOnly(True)
+        self._set_line_edit_character_width(self.ssh_existing_identity)
         self.ssh_existing_proxyjump = QLineEdit("")
         self.ssh_existing_proxyjump.setReadOnly(True)
         existing_layout.addRow("Host alias:", self.ssh_existing_combo)
@@ -609,17 +717,19 @@ class RemoteConfigurationDialog(QDialog):
         new_layout = QFormLayout(self.ssh_new_group)
         self.ssh_alias_edit = QLineEdit("")
         self.ssh_hostname_edit = QLineEdit("")
+        self._set_line_edit_character_width(self.ssh_hostname_edit)
         self.ssh_user_edit = QLineEdit("")
         self.ssh_proxy_jump_edit = QLineEdit("")
         identity_row = QHBoxLayout()
         self.ssh_identity_file_edit = QLineEdit("")
+        self._set_line_edit_character_width(self.ssh_identity_file_edit)
         identity_browse = QPushButton("Browse...")
         identity_browse.clicked.connect(self._choose_ssh_identity_file)
         identity_row.addWidget(self.ssh_identity_file_edit, 1)
         identity_row.addWidget(identity_browse)
         identity_widget = QWidget()
         identity_widget.setLayout(identity_row)
-        new_layout.addRow("Short name:", self.ssh_alias_edit)
+        new_layout.addRow("Host alias:", self.ssh_alias_edit)
         new_layout.addRow("Hostname:", self.ssh_hostname_edit)
         new_layout.addRow("User:", self.ssh_user_edit)
         new_layout.addRow("Identity File:", identity_widget)
@@ -634,6 +744,12 @@ class RemoteConfigurationDialog(QDialog):
         mode = self.ssh_mode_combo.currentText()
         self.ssh_existing_group.setVisible(mode == "Select from existing")
         self.ssh_new_group.setVisible(mode == "Add new")
+        if mode == "Add new":
+            self.ssh_alias_edit.clear()
+            self.ssh_hostname_edit.clear()
+            self.ssh_user_edit.clear()
+            self.ssh_identity_file_edit.clear()
+            self.ssh_proxy_jump_edit.clear()
 
     def _update_ssh_selected_details(self) -> None:
         """Refresh preview fields for an existing SSH host alias."""
@@ -705,6 +821,8 @@ class RemoteConfigurationDialog(QDialog):
         self.disk_mode_combo.addItems(self._DISK_CACHE_MODES)
         self.disk_mode_combo.setCurrentText("Disabled")
         self.disk_location_edit = QLineEdit(str(Path.home() / ".cache/xconv2"))
+        disk_width_px = self.disk_location_edit.fontMetrics().horizontalAdvance("M" * (self._WIDE_FIELD_CHARS * 2))
+        self.disk_location_edit.setMinimumWidth(disk_width_px)
         self.disk_limit_spin = QSpinBox()
         self.disk_limit_spin.setRange(1, 4096)
         self.disk_limit_spin.setValue(10)
@@ -785,6 +903,27 @@ class RemoteConfigurationDialog(QDialog):
                     "alias": alias,
                     "details": self._ssh_hosts.get(alias, {}),
                 }
+        elif protocol == "HTTPS":
+            mode = self.http_mode_combo.currentText()
+            if mode == "Add new":
+                config["remote"] = {
+                    "mode": mode,
+                    "alias": self.http_alias_edit.text().strip(),
+                    "url": self.http_url_edit.text().strip(),
+                }
+            else:
+                alias = self.http_existing_combo.currentText().strip()
+                details = self._http_locations.get(alias, {})
+                if not isinstance(details, dict):
+                    details = {}
+                if "url" not in details and self.http_existing_url.text().strip():
+                    details = dict(details)
+                    details["url"] = self.http_existing_url.text().strip()
+                config["remote"] = {
+                    "mode": mode,
+                    "alias": alias,
+                    "details": details,
+                }
         else:
             config["remote"] = {"mode": "Not Implemented Yet"}
 
@@ -808,6 +947,11 @@ class RemoteConfigurationDialog(QDialog):
             "ssh_user": self.ssh_user_edit.text().strip(),
             "ssh_identity_file": self.ssh_identity_file_edit.text().strip(),
             "ssh_proxy_jump": self.ssh_proxy_jump_edit.text().strip(),
+            "https_mode": self.http_mode_combo.currentText(),
+            "https_existing_alias": self.http_existing_combo.currentText().strip(),
+            "https_alias": self.http_alias_edit.text().strip(),
+            "https_url": self.http_url_edit.text().strip(),
+            "https_locations": dict(self._http_locations),
             "cache_blocksize_mb": int(self.cache_blocksize_spin.value()),
             "cache_ram_buffer_mb": int(self.cache_ram_buffer_spin.value()),
             "cache_strategy": self.cache_strategy_combo.currentText(),
@@ -875,6 +1019,30 @@ class RemoteConfigurationDialog(QDialog):
         if isinstance(state.get("ssh_proxy_jump"), str):
             self.ssh_proxy_jump_edit.setText(str(state["ssh_proxy_jump"]))
 
+        https_mode = state.get("https_mode")
+        if isinstance(https_mode, str):
+            index = self.http_mode_combo.findText(https_mode)
+            if index >= 0:
+                self.http_mode_combo.setCurrentIndex(index)
+
+        https_existing_alias = state.get("https_existing_alias")
+        if isinstance(https_existing_alias, str):
+            index = self.http_existing_combo.findText(https_existing_alias)
+            if index >= 0:
+                self.http_existing_combo.setCurrentIndex(index)
+
+        http_alias = state.get("https_alias")
+        if not isinstance(http_alias, str):
+            http_alias = state.get("http_alias")
+        if isinstance(http_alias, str):
+            self.http_alias_edit.setText(http_alias)
+
+        https_url = state.get("https_url")
+        if not isinstance(https_url, str):
+            https_url = state.get("http_url")
+        if isinstance(https_url, str):
+            self.http_url_edit.setText(https_url)
+
         blocksize = state.get("cache_blocksize_mb")
         if isinstance(blocksize, int):
             self.cache_blocksize_spin.setValue(blocksize)
@@ -911,6 +1079,8 @@ class RemoteConfigurationDialog(QDialog):
         self._update_s3_selected_details()
         self._update_ssh_mode()
         self._update_ssh_selected_details()
+        self._update_http_mode()
+        self._update_http_selected_details()
         self._update_memory_cache_summary()
 
     def _validate_new_s3(self) -> bool:
@@ -931,13 +1101,31 @@ class RemoteConfigurationDialog(QDialog):
             return False
         return True
 
-    def accept(self) -> None:  # type: ignore[override]
-        """Persist new S3/SSH configurations before closing the dialog."""
+    def _validate_http(self) -> bool:
+        """Validate required fields for HTTPS configuration."""
+        mode = self.http_mode_combo.currentText()
+        if mode == "Add new":
+            if not self.http_alias_edit.text().strip() or not self.http_url_edit.text().strip():
+                QMessageBox.warning(self, "Missing HTTPS details", "HTTPS short name and remote URL are required.")
+                return False
+        elif not self.http_existing_combo.isEnabled() or not self.http_existing_combo.currentText().strip():
+            QMessageBox.warning(self, "Missing HTTPS details", "No existing HTTPS configuration is available.")
+            return False
+        else:
+            alias = self.http_existing_combo.currentText().strip()
+            details = self._http_locations.get(alias)
+            if not isinstance(details, dict) or not str(details.get("url", "")).strip():
+                QMessageBox.warning(self, "Missing HTTPS details", "Selected HTTPS alias has no URL configured.")
+                return False
+        return True
+
+    def _persist_current_protocol_configuration(self) -> bool:
+        """Persist any Add new entries for the currently selected protocol."""
         protocol = self.protocol_tabs.tabText(self.protocol_tabs.currentIndex())
 
         if protocol == "S3" and self.s3_mode_combo.currentText() == "Add new":
             if not self._validate_new_s3():
-                return
+                return False
             alias = self.s3_alias_edit.text().strip()
             details = {
                 "url": self.s3_url_edit.text().strip(),
@@ -958,7 +1146,7 @@ class RemoteConfigurationDialog(QDialog):
 
         if protocol == "SSH" and self.ssh_mode_combo.currentText() == "Add new":
             if not self._validate_new_ssh():
-                return
+                return False
             alias = self.ssh_alias_edit.text().strip()
             details = {
                 "hostname": self.ssh_hostname_edit.text().strip(),
@@ -975,6 +1163,27 @@ class RemoteConfigurationDialog(QDialog):
             )
             self._select_saved_ssh_alias(alias, details)
 
+        if protocol == "HTTPS":
+            if not self._validate_http():
+                return False
+            if self.http_mode_combo.currentText() == "Add new":
+                alias = self.http_alias_edit.text().strip()
+                url = self.http_url_edit.text().strip()
+                self._select_saved_http_alias(alias, {"url": url})
+
+        return True
+
+    def _save_and_close(self) -> None:
+        """Persist configuration changes and close without opening a remote file picker."""
+        if not self._persist_current_protocol_configuration():
+            return
+        self.done(self._RESULT_SAVED_ONLY)
+
+    def accept(self) -> None:  # type: ignore[override]
+        """Persist new S3/SSH configurations before opening with this selection."""
+        if not self._persist_current_protocol_configuration():
+            return
+
         super().accept()
 
     @classmethod
@@ -988,3 +1197,224 @@ class RemoteConfigurationDialog(QDialog):
         if dialog.exec() != QDialog.Accepted:
             return None, False, dialog.state()
         return dialog.configuration(), True, dialog.state()
+
+
+class RemoteOpenDialog(QDialog):
+    """Open an existing remote configuration by short name."""
+
+    _RESULT_CONFIGURE_NEW = 2
+
+    def __init__(self, parent: QWidget | None, state: dict[str, Any] | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Open Remote")
+        self.resize(560, 260)
+
+        self._s3_locations = RemoteConfigurationDialog._load_s3_locations()
+        self._ssh_hosts = RemoteConfigurationDialog._load_ssh_hosts()
+        self._http_locations = self._load_http_locations(state)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Choose a saved remote short name to open"))
+
+        self.protocol_tabs = QTabWidget()
+        self.protocol_tabs.addTab(self._build_s3_tab(), "S3")
+        self.protocol_tabs.addTab(self._build_http_tab(), "HTTPS")
+        self.protocol_tabs.addTab(self._build_ssh_tab(), "SSH")
+        layout.addWidget(self.protocol_tabs)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+        self.configure_button = buttons.addButton("Config New Remote", QDialogButtonBox.ActionRole)
+        self.open_button = buttons.addButton("Open", QDialogButtonBox.AcceptRole)
+        buttons.rejected.connect(self.reject)
+        self.configure_button.clicked.connect(self._configure_new_remote)
+        self.open_button.clicked.connect(self.accept)
+        layout.addWidget(buttons)
+
+        self._restore_state(state)
+        self._refresh_open_button()
+        self.protocol_tabs.currentChanged.connect(self._refresh_open_button)
+
+    @staticmethod
+    def _load_http_locations(state: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+        """Load optional HTTP aliases from persisted dialog state."""
+        if not isinstance(state, dict):
+            return {}
+        raw = state.get("https_locations")
+        if not isinstance(raw, dict):
+            raw = state.get("http_locations")
+        if not isinstance(raw, dict):
+            return {}
+        cleaned: dict[str, dict[str, Any]] = {}
+        for alias, details in raw.items():
+            if not isinstance(alias, str) or not isinstance(details, dict):
+                continue
+            url = details.get("url") or details.get("base_url")
+            if isinstance(url, str) and url.strip():
+                cleaned[alias] = {"url": url.strip()}
+        return dict(sorted(cleaned.items()))
+
+    @staticmethod
+    def _set_combo_items(combo: QComboBox, items: list[str], empty_label: str) -> None:
+        """Populate a combo and disable it when no entries exist."""
+        combo.clear()
+        if items:
+            combo.addItems(items)
+            combo.setEnabled(True)
+        else:
+            combo.addItem(empty_label)
+            combo.setEnabled(False)
+
+    def _build_s3_tab(self) -> QWidget:
+        """Build S3 open-by-alias tab."""
+        tab = QWidget()
+        layout = QFormLayout(tab)
+        self.s3_open_combo = QComboBox()
+        self._set_combo_items(self.s3_open_combo, list(self._s3_locations.keys()), "No S3 short names found")
+        layout.addRow("Host alias:", self.s3_open_combo)
+        return tab
+
+    def _build_http_tab(self) -> QWidget:
+        """Build HTTPS open-by-alias tab."""
+        tab = QWidget()
+        layout = QFormLayout(tab)
+        self.http_open_combo = QComboBox()
+        self._set_combo_items(self.http_open_combo, list(self._http_locations.keys()), "No HTTPS short names found")
+        layout.addRow("Host alias:", self.http_open_combo)
+        return tab
+
+    def _build_ssh_tab(self) -> QWidget:
+        """Build SSH open-by-alias tab."""
+        tab = QWidget()
+        layout = QFormLayout(tab)
+        self.ssh_open_combo = QComboBox()
+        self._set_combo_items(self.ssh_open_combo, list(self._ssh_hosts.keys()), "No SSH short names found")
+        layout.addRow("Host alias:", self.ssh_open_combo)
+        return tab
+
+    def _active_alias_combo(self) -> QComboBox:
+        """Return the alias combo for the currently selected protocol tab."""
+        protocol = self.protocol_tabs.tabText(self.protocol_tabs.currentIndex())
+        if protocol == "S3":
+            return self.s3_open_combo
+        if protocol == "HTTPS":
+            return self.http_open_combo
+        return self.ssh_open_combo
+
+    def _refresh_open_button(self) -> None:
+        """Enable open only when the active protocol has at least one saved alias."""
+        self.open_button.setEnabled(self._active_alias_combo().isEnabled())
+
+    def _configure_new_remote(self) -> None:
+        """Close this dialog and request opening the full configuration dialog."""
+        self.done(self._RESULT_CONFIGURE_NEW)
+
+    def _restore_state(self, state: dict[str, Any] | None) -> None:
+        """Restore previous open-dialog protocol and alias choices."""
+        if not isinstance(state, dict):
+            return
+
+        protocol = state.get("protocol")
+        if isinstance(protocol, str):
+            for index in range(self.protocol_tabs.count()):
+                if self.protocol_tabs.tabText(index) == protocol:
+                    self.protocol_tabs.setCurrentIndex(index)
+                    break
+
+        s3_alias = state.get("s3_alias")
+        if isinstance(s3_alias, str):
+            index = self.s3_open_combo.findText(s3_alias)
+            if index >= 0:
+                self.s3_open_combo.setCurrentIndex(index)
+
+        http_alias = state.get("https_alias")
+        if not isinstance(http_alias, str):
+            http_alias = state.get("http_alias")
+        if isinstance(http_alias, str):
+            index = self.http_open_combo.findText(http_alias)
+            if index >= 0:
+                self.http_open_combo.setCurrentIndex(index)
+
+        ssh_alias = state.get("ssh_alias")
+        if isinstance(ssh_alias, str):
+            index = self.ssh_open_combo.findText(ssh_alias)
+            if index >= 0:
+                self.ssh_open_combo.setCurrentIndex(index)
+
+    def state(self) -> dict[str, Any]:
+        """Return open-dialog state for persistence."""
+        return {
+            "protocol": self.protocol_tabs.tabText(self.protocol_tabs.currentIndex()),
+            "s3_alias": self.s3_open_combo.currentText(),
+            "https_alias": self.http_open_combo.currentText(),
+            "ssh_alias": self.ssh_open_combo.currentText(),
+            "https_locations": dict(self._http_locations),
+        }
+
+    def configuration(self) -> dict[str, Any] | None:
+        """Build a remote configuration payload from the selected short name."""
+        protocol = self.protocol_tabs.tabText(self.protocol_tabs.currentIndex())
+
+        if protocol == "S3":
+            alias = self.s3_open_combo.currentText()
+            details = self._s3_locations.get(alias)
+            if not isinstance(details, dict):
+                return None
+            return {
+                "protocol": "S3",
+                "remote": {
+                    "mode": "Select from existing",
+                    "alias": alias,
+                    "details": details,
+                },
+            }
+
+        if protocol == "HTTPS":
+            alias = self.http_open_combo.currentText()
+            details = self._http_locations.get(alias)
+            if not isinstance(details, dict):
+                return None
+            return {
+                "protocol": "HTTPS",
+                "remote": {
+                    "mode": "Select from existing",
+                    "alias": alias,
+                    "details": details,
+                },
+            }
+
+        alias = self.ssh_open_combo.currentText()
+        details = self._ssh_hosts.get(alias)
+        if not isinstance(details, dict):
+            return None
+        return {
+            "protocol": "SSH",
+            "remote": {
+                "mode": "Select from existing",
+                "alias": alias,
+                "details": details,
+            },
+        }
+
+    @classmethod
+    def get_configuration(
+        cls,
+        parent: QWidget | None,
+        state: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any] | None, bool, dict[str, Any]]:
+        """Show the remote-open dialog and return selected configuration."""
+        dialog = cls(parent, state=state)
+        result = dialog.exec()
+        next_state = dialog.state()
+        if result == cls._RESULT_CONFIGURE_NEW:
+            next_state["configure_new_remote"] = True
+            return None, False, next_state
+
+        if result != QDialog.Accepted:
+            return None, False, dialog.state()
+
+        config = dialog.configuration()
+        if config is None:
+            QMessageBox.warning(parent, "No remote configured", "No saved short name is available for this protocol.")
+            return None, False, next_state
+        next_state["configure_new_remote"] = False
+        return config, True, next_state

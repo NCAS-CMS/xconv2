@@ -29,7 +29,7 @@ from .cf_templates import (
     plot_from_selection,
 )
 from .core_window import CFVCore
-from .ui.dialogs import RemoteConfigurationDialog
+from .ui.dialogs import RemoteConfigurationDialog, RemoteOpenDialog
 from .ui.remote_file_navigator import (
     RemoteEntry,
     RemoteFileNavigatorDialog,
@@ -366,15 +366,30 @@ class CFVMain(CFVCore):
         self._remote_descriptor_hash = None
         self._remote_descriptor = None
 
-    def _choose_remote(self) -> None:
+    def _open_remote_from_config(self, config: dict[str, object]) -> None:
         """Perform remote login once in the worker, then navigate via IPC using a nested QEventLoop."""
-        raw_state = self._settings.get("last_remote_configuration", {})
-        state = raw_state if isinstance(raw_state, dict) else {}
-        config, ok, next_state = RemoteConfigurationDialog.get_configuration(self, state=state)
-        self._settings["last_remote_configuration"] = next_state
-        self._save_settings()
-        if not ok or config is None:
+        if not isinstance(config, dict):
             return
+
+        if str(config.get("protocol", "")).upper() in {"HTTP", "HTTPS"}:
+            http_locations = self._settings.get("remote_https_locations")
+            if not isinstance(http_locations, dict):
+                http_locations = self._settings.get("remote_http_locations")
+            if isinstance(http_locations, dict):
+                updated = dict(http_locations)
+            else:
+                updated = {}
+
+            remote = config.get("remote")
+            if isinstance(remote, dict):
+                alias = str(remote.get("alias", "")).strip()
+                details = remote.get("details")
+                if alias and isinstance(details, dict):
+                    url = details.get("url") or details.get("base_url")
+                    if isinstance(url, str) and url.strip():
+                        updated[alias] = {"url": url.strip()}
+
+            self._settings["remote_https_locations"] = updated
 
         try:
             spec = build_remote_filesystem_spec(config)
@@ -435,6 +450,63 @@ class CFVMain(CFVCore):
         self._set_window_title_for_file(selected_uri)
         self._show_status_message(f"Selected remote file: {selected_uri}")
         self._load_remote_selected_file(selected_uri, selected_path)
+
+    def _configure_remote(self) -> None:
+        """Open the full remote configuration dialog; Open proceeds to worker-backed navigation."""
+        raw_state = self._settings.get("last_remote_configuration", {})
+        state = dict(raw_state) if isinstance(raw_state, dict) else {}
+        https_locations = self._settings.get("remote_https_locations")
+        if not isinstance(https_locations, dict):
+            https_locations = self._settings.get("remote_http_locations")
+        if isinstance(https_locations, dict) and https_locations:
+            state["https_locations"] = dict(https_locations)
+        config, ok, next_state = RemoteConfigurationDialog.get_configuration(self, state=state)
+        self._settings["last_remote_configuration"] = next_state
+        if isinstance(next_state, dict):
+            persisted_https = next_state.get("https_locations")
+            if not isinstance(persisted_https, dict):
+                persisted_https = next_state.get("http_locations")
+            if isinstance(persisted_https, dict):
+                self._settings["remote_https_locations"] = dict(persisted_https)
+        self._save_settings()
+        if not ok or config is None:
+            return
+        self._open_remote_from_config(config)
+
+    def _choose_remote(self) -> None:
+        """Open using existing short names via a streamlined protocol picker dialog."""
+        raw_state = self._settings.get("last_remote_open", {})
+        state = raw_state if isinstance(raw_state, dict) else {}
+        if isinstance(state, dict):
+            merged_http: dict[str, object] = {}
+
+            configured_state = self._settings.get("last_remote_configuration")
+            if isinstance(configured_state, dict):
+                cfg_http = configured_state.get("https_locations")
+                if not isinstance(cfg_http, dict):
+                    cfg_http = configured_state.get("http_locations")
+                if isinstance(cfg_http, dict):
+                    merged_http.update(cfg_http)
+
+            http_locations = self._settings.get("remote_https_locations")
+            if not isinstance(http_locations, dict):
+                http_locations = self._settings.get("remote_http_locations")
+            if isinstance(http_locations, dict):
+                merged_http.update(http_locations)
+
+            if merged_http:
+                state = dict(state)
+                state["https_locations"] = dict(merged_http)
+
+        config, ok, next_state = RemoteOpenDialog.get_configuration(self, state=state)
+        self._settings["last_remote_open"] = next_state
+        self._save_settings()
+        if isinstance(next_state, dict) and bool(next_state.get("configure_new_remote")):
+            self._configure_remote()
+            return
+        if not ok or config is None:
+            return
+        self._open_remote_from_config(config)
 
     def _make_worker_list_callback(self):
         """Return a callable that lists a remote directory via worker IPC using a nested QEventLoop."""

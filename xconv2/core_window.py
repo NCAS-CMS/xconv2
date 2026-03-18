@@ -53,7 +53,7 @@ from .ui.lineplot_options_controller import LineplotOptionsController
 from .ui.menu_controller import MenuController
 from .ui.plot_view_controller import PlotViewController
 from .ui.selection_controller import SelectionController
-from .ui.dialogs import OpenGlobDialog, OpenURIDialog, RemoteConfigurationDialog
+from .ui.dialogs import OpenGlobDialog, OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog
 from .ui.remote_file_navigator import RemoteFileNavigatorDialog
 from .ui.settings_store import SettingsStore
 
@@ -972,13 +972,63 @@ class CFVCore(QMainWindow):
         """Show URI dialog scaffold for future remote open support."""
         OpenURIDialog.get_uri(self)
 
-    def _choose_remote(self) -> None:
-        """Show remote configuration dialog before remote navigation."""
+    def _configure_remote(self) -> None:
+        """Show remote configuration dialog and optionally open with the chosen config."""
         raw_state = self._settings.get("last_remote_configuration", {})
-        state = raw_state if isinstance(raw_state, dict) else {}
+        state = dict(raw_state) if isinstance(raw_state, dict) else {}
+        https_locations = self._settings.get("remote_https_locations")
+        if not isinstance(https_locations, dict):
+            https_locations = self._settings.get("remote_http_locations")
+        if isinstance(https_locations, dict) and https_locations:
+            state["https_locations"] = dict(https_locations)
         config, ok, next_state = RemoteConfigurationDialog.get_configuration(self, state=state)
         self._settings["last_remote_configuration"] = next_state
+        if isinstance(next_state, dict):
+            persisted_https = next_state.get("https_locations")
+            if not isinstance(persisted_https, dict):
+                persisted_https = next_state.get("http_locations")
+            if isinstance(persisted_https, dict):
+                self._settings["remote_https_locations"] = dict(persisted_https)
         self._save_settings()
+        if not ok or config is None:
+            return
+        selected_uri, selected_ok = RemoteFileNavigatorDialog.get_remote_selection(self, config)
+        if not selected_ok:
+            return
+        self._set_window_title_for_file(selected_uri)
+        self._show_status_message(f"Selected remote file: {selected_uri}")
+
+    def _choose_remote(self) -> None:
+        """Show open-remote dialog and open using the selected saved short name."""
+        raw_state = self._settings.get("last_remote_open", {})
+        state = raw_state if isinstance(raw_state, dict) else {}
+        if isinstance(state, dict):
+            merged_http: dict[str, object] = {}
+
+            configured_state = self._settings.get("last_remote_configuration")
+            if isinstance(configured_state, dict):
+                cfg_http = configured_state.get("https_locations")
+                if not isinstance(cfg_http, dict):
+                    cfg_http = configured_state.get("http_locations")
+                if isinstance(cfg_http, dict):
+                    merged_http.update(cfg_http)
+
+            http_locations = self._settings.get("remote_https_locations")
+            if not isinstance(http_locations, dict):
+                http_locations = self._settings.get("remote_http_locations")
+            if isinstance(http_locations, dict):
+                merged_http.update(http_locations)
+
+            if merged_http:
+                state = dict(state)
+                state["https_locations"] = dict(merged_http)
+
+        config, ok, next_state = RemoteOpenDialog.get_configuration(self, state=state)
+        self._settings["last_remote_open"] = next_state
+        self._save_settings()
+        if isinstance(next_state, dict) and bool(next_state.get("configure_new_remote")):
+            self._configure_remote()
+            return
         if not ok or config is None:
             return
         selected_uri, selected_ok = RemoteFileNavigatorDialog.get_remote_selection(self, config)

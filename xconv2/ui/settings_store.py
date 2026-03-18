@@ -159,6 +159,8 @@ class SettingsStore:
         if default_plot_format not in {"png", "svg", "pdf"}:
             settings["default_plot_format"] = "png"
 
+        self._migrate_https_settings(settings)
+
         self.data = settings
         try:
             self.save()
@@ -166,6 +168,45 @@ class SettingsStore:
             logger.exception("Failed to persist settings JSON after load")
 
         return self.data
+
+    @staticmethod
+    def _migrate_https_state_dict(payload: dict[str, object]) -> None:
+        """Upgrade legacy http_* dialog-state keys to https_* equivalents."""
+        if not isinstance(payload, dict):
+            return
+
+        protocol = payload.get("protocol")
+        if isinstance(protocol, str) and protocol.upper() == "HTTP":
+            payload["protocol"] = "HTTPS"
+
+        protocol_index = payload.get("protocol_index")
+        if isinstance(protocol_index, int) and protocol_index == 1:
+            # Tab index remains 1; this simply documents that index 1 is now HTTPS.
+            payload["protocol_index"] = 1
+
+        http_locations = payload.get("http_locations")
+        if isinstance(http_locations, dict) and not isinstance(payload.get("https_locations"), dict):
+            payload["https_locations"] = dict(http_locations)
+
+        http_alias = payload.get("http_alias")
+        if isinstance(http_alias, str) and "https_alias" not in payload:
+            payload["https_alias"] = http_alias
+
+        payload.pop("http_locations", None)
+        payload.pop("http_alias", None)
+
+    def _migrate_https_settings(self, settings: dict[str, object]) -> None:
+        """Apply one-way migration from legacy http_* persisted keys."""
+        remote_http_locations = settings.get("remote_http_locations")
+        remote_https_locations = settings.get("remote_https_locations")
+        if isinstance(remote_http_locations, dict) and not isinstance(remote_https_locations, dict):
+            settings["remote_https_locations"] = dict(remote_http_locations)
+        settings.pop("remote_http_locations", None)
+
+        for key in ("last_remote_configuration", "last_remote_open"):
+            value = settings.get(key)
+            if isinstance(value, dict):
+                self._migrate_https_state_dict(value)
 
     def save(self) -> None:
         """Persist settings dictionary to disk as JSON."""

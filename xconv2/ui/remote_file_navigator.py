@@ -260,15 +260,15 @@ def build_remote_filesystem_spec(config: dict[str, Any]) -> RemoteFilesystemSpec
             proxy_jump=proxy_jump_raw or None,
         )
 
-    if protocol == "HTTP":
+    if protocol in {"HTTP", "HTTPS"}:
         url = _value_from_keys(details, "url", "base_url") or _value_from_keys(remote, "url", "base_url")
         if not url:
-            raise ValueError("HTTP remote navigation is not configured yet")
+            raise ValueError("HTTPS remote navigation is not configured yet")
         return RemoteFilesystemSpec(
             protocol="http",
             storage_options={},
             root_path=url,
-            display_name="HTTP",
+            display_name="HTTPS",
             uri_scheme="",
             uri_authority="",
         )
