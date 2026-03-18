@@ -17,6 +17,7 @@ import pickle
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from PySide6.QtCore import QEventLoop, QProcess
 from PySide6.QtGui import QCloseEvent
@@ -29,7 +30,7 @@ from .cf_templates import (
     plot_from_selection,
 )
 from .core_window import CFVCore
-from .ui.dialogs import RemoteConfigurationDialog, RemoteOpenDialog
+from .ui.dialogs import OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog
 from .ui.remote_file_navigator import (
     RemoteEntry,
     RemoteFileNavigatorDialog,
@@ -447,9 +448,278 @@ class CFVMain(CFVCore):
             self._release_remote_session_if_active()
             return
 
+        remote = config.get("remote") if isinstance(config, dict) else None
+        host_alias = str(remote.get("alias", "")).strip() if isinstance(remote, dict) else ""
         self._set_window_title_for_file(selected_uri)
         self._show_status_message(f"Selected remote file: {selected_uri}")
+        if host_alias:
+            self._record_recent_uri(selected_uri, host_alias)
+        else:
+            self._record_recent_file(selected_uri)
         self._load_remote_selected_file(selected_uri, selected_path)
+
+    def _open_remote_uri_direct(
+        self,
+        *,
+        uri: str,
+        remote_path: str,
+        config: dict[str, object],
+        host_alias: str,
+    ) -> None:
+        """Open a specific remote URI directly without launching the navigator dialog."""
+        if not isinstance(config, dict):
+            return
+
+        if str(config.get("protocol", "")).upper() in {"HTTP", "HTTPS"} and host_alias:
+            details = {}
+            remote = config.get("remote")
+            if isinstance(remote, dict):
+                raw_details = remote.get("details")
+                if isinstance(raw_details, dict):
+                    details = dict(raw_details)
+                if not details and isinstance(remote.get("url"), str):
+                    details = {"url": str(remote.get("url"))}
+
+            https_locations = self._settings.get("remote_https_locations")
+            merged = dict(https_locations) if isinstance(https_locations, dict) else {}
+            if details:
+                merged[host_alias] = details
+            self._settings["remote_https_locations"] = merged
+
+        try:
+            spec = build_remote_filesystem_spec(config)
+        except Exception as exc:
+            QMessageBox.critical(self, "Remote configuration invalid", str(exc))
+            return
+
+        self._release_remote_session_if_active()
+        descriptor = spec_to_descriptor(spec, cache=config.get("cache") if isinstance(config, dict) else None)
+        session_id = uuid.uuid4().hex
+        descriptor_hash = remote_descriptor_hash(descriptor)
+        self._remote_session_id = session_id
+        self._remote_descriptor_hash = descriptor_hash
+        self._remote_descriptor = descriptor
+
+        log_dialog = RemoteLoginLogDialog(self, spec.display_name)
+        self._pending_prepare_log_dialog = log_dialog
+        self._pending_prepare_loop = QEventLoop()
+        self._pending_prepare_loop_ok = False
+        log_dialog.show()
+        QApplication.processEvents()
+
+        self._send_worker_control_task(
+            "REMOTE_PREPARE",
+            {
+                "session_id": session_id,
+                "descriptor_hash": descriptor_hash,
+                "descriptor": descriptor,
+            },
+        )
+        self._pending_prepare_loop.exec()
+        self._pending_prepare_log_dialog = None
+
+        if not self._pending_prepare_loop_ok:
+            log_dialog.exec()
+            self._release_remote_session_if_active()
+            return
+
+        log_dialog.close()
+        self._set_window_title_for_file(uri)
+        self._show_status_message(f"Selected remote file: {uri}")
+        self._record_recent_uri(uri, host_alias or spec.display_name)
+        self._load_remote_selected_file(uri, remote_path)
+
+    def _resolve_remote_uri(self, uri: str) -> tuple[dict[str, object] | None, str, str, bool]:
+        """Resolve URI into (config, remote_path, host_alias, unknown_host)."""
+        canonical_uri = CFVCore._canonical_remote_uri(uri)
+        parsed = urlparse(canonical_uri)
+        scheme = parsed.scheme.lower()
+
+        if scheme == "s3":
+            locations = RemoteConfigurationDialog._load_s3_locations()
+
+            endpoint_to_alias: dict[str, str] = {}
+            for alias_name, details in locations.items():
+                if not isinstance(alias_name, str) or not isinstance(details, dict):
+                    continue
+                endpoint_url = str(details.get("url", "")).strip()
+                endpoint_host = urlparse(endpoint_url).netloc.strip()
+                if endpoint_host:
+                    endpoint_to_alias[endpoint_host] = alias_name
+
+            netloc = parsed.netloc.strip()
+            endpoint_alias = endpoint_to_alias.get(netloc, "")
+            if endpoint_alias:
+                path = parsed.path.lstrip("/")
+            else:
+                path = f"{parsed.netloc}{parsed.path}".lstrip("/")
+
+            aliases = self._settings.get("recent_uri_aliases")
+            alias_map = aliases if isinstance(aliases, dict) else {}
+            preferred_alias = alias_map.get(canonical_uri) or alias_map.get(uri)
+            if not isinstance(preferred_alias, str):
+                preferred_alias = ""
+            preferred_alias = preferred_alias.strip()
+
+            if endpoint_alias:
+                preferred_alias = endpoint_alias
+
+            if not preferred_alias:
+                raw_state = self._settings.get("last_remote_configuration")
+                state = raw_state if isinstance(raw_state, dict) else {}
+                candidate = state.get("s3_existing_alias")
+                if isinstance(candidate, str) and candidate.strip():
+                    preferred_alias = candidate.strip()
+
+            chosen_alias = preferred_alias if preferred_alias in locations else ""
+            if not chosen_alias and len(locations) == 1:
+                chosen_alias = next(iter(locations.keys()))
+
+            details = dict(locations.get(chosen_alias, {})) if chosen_alias else {}
+            config: dict[str, object] = {
+                "protocol": "S3",
+                "remote": {
+                    "mode": "Select from existing",
+                    "alias": chosen_alias or "S3",
+                    "details": details,
+                },
+            }
+            return config, path, chosen_alias or "S3", False
+
+        if scheme == "ssh":
+            host = (parsed.hostname or parsed.netloc or "").strip()
+            user = (parsed.username or "").strip()
+            remote_path = unquote(parsed.path or "/")
+            hosts = RemoteConfigurationDialog._load_ssh_hosts()
+
+            matched_alias = ""
+            matched_details: dict[str, object] | None = None
+            for alias, details in hosts.items():
+                if alias == host or str(details.get("hostname", "")) == host:
+                    matched_alias = alias
+                    matched_details = dict(details)
+                    break
+
+            if matched_details is None:
+                return None, remote_path, host or "SSH", True
+
+            if user and not matched_details.get("user"):
+                matched_details["user"] = user
+
+            config = {
+                "protocol": "SSH",
+                "remote": {
+                    "mode": "Select from existing",
+                    "alias": matched_alias,
+                    "details": matched_details,
+                },
+            }
+            return config, remote_path, matched_alias, False
+
+        if scheme in {"http", "https"}:
+            https_locations = self._settings.get("remote_https_locations")
+            locations = dict(https_locations) if isinstance(https_locations, dict) else {}
+            if not locations:
+                cfg_state = self._settings.get("last_remote_configuration")
+                if isinstance(cfg_state, dict):
+                    raw = cfg_state.get("https_locations")
+                    if isinstance(raw, dict):
+                        locations = dict(raw)
+
+            matched_alias = ""
+            matched_url = ""
+            for alias, details in locations.items():
+                if not isinstance(details, dict):
+                    continue
+                base_url = str(details.get("url") or details.get("base_url") or "").strip()
+                if base_url and uri.startswith(base_url):
+                    if len(base_url) > len(matched_url):
+                        matched_alias = str(alias)
+                        matched_url = base_url
+
+            remote_path = unquote(parsed.path or "/")
+            if not matched_alias:
+                return None, remote_path, (parsed.hostname or "HTTPS"), True
+
+            config = {
+                "protocol": "HTTPS",
+                "remote": {
+                    "mode": "Select from existing",
+                    "alias": matched_alias,
+                    "details": locations.get(matched_alias, {}),
+                },
+            }
+            return config, remote_path, matched_alias, False
+
+        return None, "", "", False
+
+    def _configure_remote_for_uri(self, uri: str) -> None:
+        """Open Configure Remote pre-populated for URI-driven add-new workflows."""
+        parsed = urlparse(uri)
+        scheme = parsed.scheme.lower()
+        raw_state = self._settings.get("last_remote_configuration", {})
+        state = dict(raw_state) if isinstance(raw_state, dict) else {}
+        https_locations = self._settings.get("remote_https_locations")
+        if isinstance(https_locations, dict):
+            state["https_locations"] = dict(https_locations)
+
+        if scheme in {"http", "https"}:
+            state.update(
+                {
+                    "protocol_index": 1,
+                    "https_mode": "Add new",
+                    "https_alias": (parsed.hostname or "https").strip(),
+                    "https_url": f"{scheme}://{parsed.netloc}",
+                }
+            )
+        elif scheme == "ssh":
+            state.update(
+                {
+                    "protocol_index": 2,
+                    "ssh_mode": "Add new",
+                    "ssh_alias": (parsed.hostname or parsed.netloc or "ssh").strip(),
+                    "ssh_hostname": (parsed.hostname or parsed.netloc or "").strip(),
+                    "ssh_user": (parsed.username or "").strip(),
+                }
+            )
+
+        config, _ok, next_state = RemoteConfigurationDialog.get_configuration(self, state=state)
+        self._settings["last_remote_configuration"] = next_state
+        if isinstance(next_state, dict):
+            persisted_https = next_state.get("https_locations")
+            if isinstance(persisted_https, dict):
+                self._settings["remote_https_locations"] = dict(persisted_https)
+        self._save_settings()
+
+    def _open_uri_entry(self, uri: str, *, from_uri_dialog: bool) -> None:
+        """Open a URI from user input or recent list."""
+        canonical_uri = CFVCore._canonical_remote_uri(uri)
+        parsed = urlparse(canonical_uri)
+        scheme = parsed.scheme.lower()
+
+        if not scheme:
+            self._open_recent_file(canonical_uri)
+            return
+
+        if scheme not in {"s3", "ssh", "http", "https"}:
+            QMessageBox.critical(self, "Unsupported URI", f"Unsupported URI protocol: {scheme}")
+            return
+
+        config, remote_path, host_alias, unknown_host = self._resolve_remote_uri(canonical_uri)
+        if unknown_host and from_uri_dialog:
+            self._configure_remote_for_uri(canonical_uri)
+            config, remote_path, host_alias, _unknown_host_after = self._resolve_remote_uri(canonical_uri)
+
+        if config is None:
+            QMessageBox.critical(self, "Unknown host", "Host route is not known. Configure a remote first.")
+            return
+
+        self._open_remote_uri_direct(
+            uri=canonical_uri,
+            remote_path=remote_path,
+            config=config,
+            host_alias=host_alias,
+        )
 
     def _configure_remote(self) -> None:
         """Open the full remote configuration dialog; Open proceeds to worker-backed navigation."""
@@ -507,6 +777,23 @@ class CFVMain(CFVCore):
         if not ok or config is None:
             return
         self._open_remote_from_config(config)
+
+    def _choose_uris(self) -> None:
+        """Show URI dialog and open supported URIs directly through the worker."""
+        default_uri = self._default_open_uri_value()
+        uri, ok, quit_requested = OpenURIDialog.get_uri(self, default_uri=default_uri)
+        if quit_requested:
+            return
+        if not ok:
+            return
+        self._open_uri_entry(uri, from_uri_dialog=True)
+
+    def _open_recent_file(self, file_path: str) -> None:
+        """Open a recent entry, routing remote URIs through URI resolution flow."""
+        if urlparse(file_path).scheme:
+            self._open_uri_entry(file_path, from_uri_dialog=False)
+            return
+        super()._open_recent_file(file_path)
 
     def _make_worker_list_callback(self):
         """Return a callable that lists a remote directory via worker IPC using a nested QEventLoop."""

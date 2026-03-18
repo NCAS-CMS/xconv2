@@ -218,6 +218,120 @@ def test_set_window_title_for_local_file_no_tag() -> None:
     assert window.current_file_path == "/home/user/data/local.nc"
 
 
+def test_recent_menu_label_for_remote_uri_uses_filename_and_alias() -> None:
+    from xconv2.core_window import CFVCore
+
+    class _RecentLabelHost:
+        def __init__(self) -> None:
+            self._settings = {
+                "recent_uri_aliases": {
+                    "https://example.org/archive/test1.nc": "canari",
+                }
+            }
+
+    host = _RecentLabelHost()
+
+    label = CFVCore._recent_menu_label(host, "https://example.org/archive/test1.nc")
+
+    assert label == "test1.nc (canari)"
+
+
+def test_default_open_uri_value_returns_most_recent_uri() -> None:
+    from xconv2.core_window import CFVCore
+
+    class _RecentDefaultHost:
+        def __init__(self) -> None:
+            self._recent = [
+                "/tmp/local.nc",
+                "ssh://alpha.example.org/data/field.nc",
+                "https://example.org/archive/test2.nc",
+            ]
+
+        def _load_recent_files(self):
+            return list(self._recent)
+
+    host = _RecentDefaultHost()
+
+    value = CFVCore._default_open_uri_value(host)
+
+    assert value == "ssh://alpha.example.org/data/field.nc"
+
+
+def test_default_open_uri_value_for_s3_uses_endpoint_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    from xconv2.core_window import CFVCore
+
+    class _RecentDefaultHost:
+        def __init__(self) -> None:
+            self._settings = {
+                "recent_uri_aliases": {
+                    "s3://bnl/CMIP6-test.nc": "hpos",
+                }
+            }
+            self._recent = [
+                "s3://bnl/CMIP6-test.nc",
+            ]
+
+        def _load_recent_files(self):
+            return list(self._recent)
+
+        def _shareable_remote_uri(self, uri: str) -> str:
+            return CFVCore._shareable_remote_uri(self, uri)
+
+    monkeypatch.setattr(
+        main_window.RemoteConfigurationDialog,
+        "_load_s3_locations",
+        staticmethod(
+            lambda: {
+                "hpos": {
+                    "url": "https://hpos.example.org",
+                    "accessKey": "minioadmin",
+                    "secretKey": "minioadmin",
+                    "api": "S3v4",
+                }
+            }
+        ),
+    )
+
+    host = _RecentDefaultHost()
+
+    value = CFVCore._default_open_uri_value(host)
+
+    assert value == "s3://hpos.example.org/bnl/CMIP6-test.nc"
+
+
+def test_recent_menu_tooltip_for_s3_uses_shareable_host_uri(monkeypatch: pytest.MonkeyPatch) -> None:
+    from xconv2.core_window import CFVCore
+
+    class _RecentTooltipHost:
+        def __init__(self) -> None:
+            self._settings = {
+                "recent_uri_aliases": {
+                    "s3://bnl/CMIP6-test.nc": "hpos",
+                }
+            }
+
+    monkeypatch.setattr(
+        main_window.RemoteConfigurationDialog,
+        "_load_s3_locations",
+        staticmethod(
+            lambda: {
+                "hpos": {
+                    "url": "https://hpos.example.org",
+                    "accessKey": "minioadmin",
+                    "secretKey": "minioadmin",
+                    "api": "S3v4",
+                }
+            }
+        ),
+    )
+
+    host = _RecentTooltipHost()
+
+    tooltip = CFVCore._recent_menu_tooltip(host, "s3://bnl/CMIP6-test.nc")
+
+    assert tooltip == "s3://hpos.example.org/bnl/CMIP6-test.nc"
+
+
 def test_https_locations_from_configure_are_passed_to_open_dialog(monkeypatch: pytest.MonkeyPatch) -> None:
     class _DummyRemoteFlowWindow:
         def __init__(self) -> None:
@@ -264,3 +378,128 @@ def test_https_locations_from_configure_are_passed_to_open_dialog(monkeypatch: p
     # Open dialog should receive merged HTTPS aliases from settings/config state.
     CFVMain._choose_remote(window)
     assert captured_state.get("https_locations") == configured_https
+
+
+def test_resolve_remote_uri_s3_prefers_recent_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _DummyResolveWindow:
+        def __init__(self) -> None:
+            self._settings = {
+                "recent_uri_aliases": {
+                    "s3://bnl/CMIP6-test.nc": "hpos",
+                },
+                "last_remote_configuration": {
+                    "s3_existing_alias": "hpos",
+                },
+            }
+
+    monkeypatch.setattr(
+        main_window.RemoteConfigurationDialog,
+        "_load_s3_locations",
+        staticmethod(
+            lambda: {
+                "hpos": {
+                    "url": "https://hpos.example.org",
+                    "accessKey": "minioadmin",
+                    "secretKey": "minioadmin",
+                    "api": "S3v4",
+                }
+            }
+        ),
+    )
+
+    window = _DummyResolveWindow()
+
+    config, remote_path, host_alias, unknown_host = CFVMain._resolve_remote_uri(
+        window,
+        "s3://bnl/CMIP6-test.nc",
+    )
+
+    assert unknown_host is False
+    assert remote_path == "bnl/CMIP6-test.nc"
+    assert host_alias == "hpos"
+    assert config is not None
+    assert config["protocol"] == "S3"
+    remote = config["remote"]
+    assert isinstance(remote, dict)
+    assert remote.get("alias") == "hpos"
+    details = remote.get("details")
+    assert isinstance(details, dict)
+    assert details.get("url") == "https://hpos.example.org"
+
+
+def test_resolve_remote_uri_s3_accepts_legacy_single_slash(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _DummyResolveWindow:
+        def __init__(self) -> None:
+            self._settings = {
+                "recent_uri_aliases": {
+                    "s3://bnl/CMIP6-test.nc": "hpos",
+                },
+                "last_remote_configuration": {
+                    "s3_existing_alias": "hpos",
+                },
+            }
+
+    monkeypatch.setattr(
+        main_window.RemoteConfigurationDialog,
+        "_load_s3_locations",
+        staticmethod(
+            lambda: {
+                "hpos": {
+                    "url": "https://hpos.example.org",
+                    "accessKey": "minioadmin",
+                    "secretKey": "minioadmin",
+                    "api": "S3v4",
+                }
+            }
+        ),
+    )
+
+    window = _DummyResolveWindow()
+
+    config, remote_path, host_alias, unknown_host = CFVMain._resolve_remote_uri(
+        window,
+        "s3:/bnl/CMIP6-test.nc",
+    )
+
+    assert unknown_host is False
+    assert remote_path == "bnl/CMIP6-test.nc"
+    assert host_alias == "hpos"
+    assert config is not None
+
+
+def test_resolve_remote_uri_s3_accepts_host_based_uri(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _DummyResolveWindow:
+        def __init__(self) -> None:
+            self._settings = {
+                "recent_uri_aliases": {},
+                "last_remote_configuration": {
+                    "s3_existing_alias": "hpos",
+                },
+            }
+
+    monkeypatch.setattr(
+        main_window.RemoteConfigurationDialog,
+        "_load_s3_locations",
+        staticmethod(
+            lambda: {
+                "hpos": {
+                    "url": "https://hpos.example.org",
+                    "accessKey": "minioadmin",
+                    "secretKey": "minioadmin",
+                    "api": "S3v4",
+                }
+            }
+        ),
+    )
+
+    window = _DummyResolveWindow()
+
+    config, remote_path, host_alias, unknown_host = CFVMain._resolve_remote_uri(
+        window,
+        "s3://hpos.example.org/bnl/CMIP6-test.nc",
+    )
+
+    assert unknown_host is False
+    assert remote_path == "bnl/CMIP6-test.nc"
+    assert host_alias == "hpos"
+    assert config is not None

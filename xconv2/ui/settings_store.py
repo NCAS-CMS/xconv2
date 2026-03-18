@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class SettingsStore:
         return {
             "version": self.settings_version,
             "recent_files": [],
+            "recent_uri_aliases": {},
             "max_recent_files": self.default_max_recent_files,
             "last_remote_configuration": {
                 "protocol_index": 0,
@@ -159,6 +161,10 @@ class SettingsStore:
         if default_plot_format not in {"png", "svg", "pdf"}:
             settings["default_plot_format"] = "png"
 
+        recent_uri_aliases = settings.get("recent_uri_aliases")
+        if not isinstance(recent_uri_aliases, dict):
+            settings["recent_uri_aliases"] = {}
+
         self._migrate_https_settings(settings)
 
         self.data = settings
@@ -242,7 +248,12 @@ class SettingsStore:
 
     def record_recent_file(self, file_path: str) -> list[str]:
         """Record a file open event and return the updated recent list."""
-        normalized_path = str(Path(file_path).expanduser())
+        parsed = urlparse(file_path)
+        if parsed.scheme:
+            # Keep remote URIs verbatim (Path() would corrupt forms like s3://...).
+            normalized_path = file_path.strip()
+        else:
+            normalized_path = str(Path(file_path).expanduser())
         recent_files = [p for p in self.load_recent_files() if p != normalized_path]
         recent_files.insert(0, normalized_path)
         recent_files = recent_files[: self.max_recent_files()]

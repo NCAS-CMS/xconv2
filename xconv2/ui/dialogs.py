@@ -164,52 +164,48 @@ class OpenGlobDialog(QDialog):
 
 
 class OpenURIDialog(QDialog):
-    """Dialog for collecting a URI and placeholder remote access options."""
+    """Dialog for collecting a URI to open directly."""
 
-    _PROTOCOLS = ["S3", "HTTPS", "SSH"]
-
-    def __init__(self, parent: QWidget | None) -> None:
+    def __init__(self, parent: QWidget | None, default_uri: str = "") -> None:
         super().__init__(parent)
         self.setWindowTitle("Open URI")
+        self._quit_requested = False
 
         layout = QVBoxLayout(self)
 
         uri_label = QLabel("URI:")
         layout.addWidget(uri_label)
 
-        self.uri_edit = QLineEdit("")
+        self.uri_edit = QLineEdit(default_uri)
         self.uri_edit.setPlaceholderText("Examples: s3://bucket/path, https://host/path, ssh://user@host/path")
         layout.addWidget(self.uri_edit)
 
-        options_group = QGroupBox("Access options")
-        options_layout = QVBoxLayout(options_group)
-        self.protocol_tabs = QTabWidget()
-        for protocol in self._PROTOCOLS:
-            tab = QWidget()
-            tab_layout = QVBoxLayout(tab)
-            tab_layout.addWidget(QLabel(f"{protocol} access options are not implemented yet."))
-            tab_layout.addStretch(1)
-            self.protocol_tabs.addTab(tab, protocol)
-        options_layout.addWidget(self.protocol_tabs)
-        layout.addWidget(options_group)
-
         buttons = QDialogButtonBox()
         cancel_button = buttons.addButton(QDialogButtonBox.Cancel)
-        quit_button = buttons.addButton("Quit", QDialogButtonBox.AcceptRole)
+        open_button = buttons.addButton("Open", QDialogButtonBox.AcceptRole)
+        quit_button = buttons.addButton("Quit", QDialogButtonBox.DestructiveRole)
         cancel_button.clicked.connect(self.reject)
-        quit_button.clicked.connect(self.accept)
+        open_button.clicked.connect(self.accept)
+        quit_button.clicked.connect(self._accept_quit)
         layout.addWidget(buttons)
 
+    def _accept_quit(self) -> None:
+        """Mark explicit quit intent before closing with accept."""
+        self._quit_requested = True
+        self.accept()
+
     @classmethod
-    def get_uri(cls, parent: QWidget | None) -> tuple[str, str, bool]:
-        """Return the entered URI, selected protocol, and acceptance state."""
-        dialog = cls(parent)
+    def get_uri(cls, parent: QWidget | None, default_uri: str = "") -> tuple[str, bool, bool]:
+        """Return entered URI, open-accepted flag, and explicit-quit flag."""
+        dialog = cls(parent, default_uri=default_uri)
         if dialog.exec() != QDialog.Accepted:
-            return "", "", False
+            return "", False, False
+
+        if dialog._quit_requested:
+            return "", False, True
 
         uri = dialog.uri_edit.text().strip()
-        protocol = cls._PROTOCOLS[dialog.protocol_tabs.currentIndex()]
-        return uri, protocol, True
+        return uri, bool(uri), False
 
 
 class RemoteConfigurationDialog(QDialog):

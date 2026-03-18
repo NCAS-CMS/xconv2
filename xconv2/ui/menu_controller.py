@@ -146,8 +146,9 @@ class MenuController:
             return
 
         for file_path in recent_files:
-            action = QAction(Path(file_path).name, self.host)
-            action.setToolTip(file_path)
+            label = self.host._recent_menu_label(file_path)
+            action = QAction(label, self.host)
+            action.setToolTip(self.host._recent_menu_tooltip(file_path))
             action.triggered.connect(
                 lambda checked=False, p=file_path: self.host._open_recent_file(p)
             )
