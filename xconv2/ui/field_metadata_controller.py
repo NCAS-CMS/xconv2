@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import ast
 import csv
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Mapping, Sequence
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -29,9 +28,8 @@ logger = logging.getLogger(__name__)
 class FieldMetadataController:
     """Handle field list population, selection detail, and properties UI."""
 
-    def __init__(self, host: "CFVCore", field_metadata_separator: str) -> None:
+    def __init__(self, host: "CFVCore") -> None:
         self.host = host
-        self.field_metadata_separator = field_metadata_separator
 
     def set_field_list_hint(self, text: str) -> None:
         """Show a non-selectable hint message in the fields list."""
@@ -153,75 +151,13 @@ class FieldMetadataController:
     def parse_properties_dict(self, raw_properties: object) -> dict[object, object]:
         """Parse properties payload into a dictionary when possible."""
         logger.info("Parsing properties payload of type %s", type(raw_properties).__name__)
-        logger.info("Raw properties content: %r", raw_properties)
-        if isinstance(raw_properties, dict):
-            return raw_properties
-
-        if isinstance(raw_properties, str) and raw_properties.strip():
-            text = raw_properties.strip()
-
-            if text.startswith("OrderedDict(") and text.endswith(")"):
-                inner = text[len("OrderedDict(") : -1]
-                try:
-                    ordered_items = ast.literal_eval(inner)
-                    if isinstance(ordered_items, list):
-                        return dict(ordered_items)
-                except (SyntaxError, ValueError, TypeError):
-                    pass
-
-            try:
-                parsed = ast.literal_eval(text)
-                if isinstance(parsed, dict):
-                    return parsed
-            except (SyntaxError, ValueError):
-                pass
-
-            fallback = self.parse_properties_lines(text)
-            if fallback:
-                return fallback
-
-            logger.warning(
-                "Could not parse properties payload into dict (type=%s, preview=%r)",
-                type(raw_properties).__name__,
-                text[:240],
-            )
-
+        if isinstance(raw_properties, Mapping):
+            return dict(raw_properties)
+        logger.warning(
+            "Expected structured properties mapping, got %s",
+            type(raw_properties).__name__,
+        )
         return {}
-
-    def parse_properties_lines(self, text: str) -> dict[str, str]:
-        """Parse key/value properties from multi-line text representations."""
-        parsed: dict[str, str] = {}
-
-        normalized = text.strip()
-        if normalized.startswith("{") and normalized.endswith("}"):
-            normalized = normalized[1:-1]
-
-        raw_lines = normalized.splitlines()
-        if len(raw_lines) == 1 and "," in normalized:
-            raw_lines = normalized.split(",")
-
-        for raw_line in raw_lines:
-            line = raw_line.strip()
-            if not line:
-                continue
-
-            line = line.strip("{}")
-
-            if " = " in line:
-                key, value = line.split(" = ", 1)
-            elif ": " in line:
-                key, value = line.split(": ", 1)
-            elif ":" in line:
-                key, value = line.split(":", 1)
-            else:
-                continue
-
-            key = key.strip().strip("'\"")
-            value = value.strip().strip(",").strip().strip("'\"")
-            if key:
-                parsed[key] = value
-
-        return parsed
 
     def set_field_list_visible_rows(self, row_count: int) -> None:
         """Size the field list to show a target number of rows by default."""
@@ -239,19 +175,17 @@ class FieldMetadataController:
         self.host.field_list_widget.clear()
 
         for field in fields:
-            if isinstance(field, str) and self.field_metadata_separator in field:
-                parts = field.split(self.field_metadata_separator, 2)
-                identity = parts[0]
-                detail = parts[1] if len(parts) > 1 else parts[0]
-                properties = parts[2] if len(parts) > 2 else ""
-            elif isinstance(field, (tuple, list)) and len(field) >= 2:
-                identity = str(field[0])
-                detail = str(field[1])
-                properties = str(field[2]) if len(field) > 2 else ""
-            else:
-                identity = str(field)
-                detail = str(field)
-                properties = ""
+            if not isinstance(field, Mapping):
+                raise TypeError(
+                    "Field metadata row must be a mapping with keys "
+                    "'identity', 'detail', and 'properties'"
+                )
+
+            identity = str(field.get("identity", ""))
+            detail = str(field.get("detail", identity))
+            properties = field.get("properties", {})
+            if not isinstance(properties, Mapping):
+                raise TypeError("Field metadata 'properties' must be a mapping")
 
             item = QListWidgetItem(identity)
             item.setData(Qt.UserRole, detail)

@@ -54,13 +54,12 @@ def test_field_info_returns_serialized_rows() -> None:
 
     assert isinstance(payload, list)
     assert len(payload) == 1
-    assert isinstance(payload[0], str)
+    assert isinstance(payload[0], dict)
 
-    parts = payload[0].split("\x1f", 2)
-    assert len(parts) == 3
-    assert parts[0].startswith("air_temperature")
-    assert parts[1] == "mock-field-summary"
-    assert "units" in parts[2]
+    row = payload[0]
+    assert str(row["identity"]).startswith("air_temperature")
+    assert row["detail"] == "mock-field-summary"
+    assert row["properties"] == {"units": "K", "standard_name": "air_temperature"}
 
 
 class _MockCoord:
@@ -222,7 +221,7 @@ def test_run_contour_plot_applies_levels_annotations_and_save(
     assert cfp.cscale_calls == [{"scale": "magma"}]
     assert cfp.gopen_calls == [{"file": "cfplot.png", "user_plot": 1}]
     assert cfp.levs_calls == [{"manual": [-1.0, 0.0, 1.0]}]
-    assert cfp.setvars_calls == [{"title_fontsize": 10.5}]
+    assert cfp.setvars_calls == [{"title_fontsize": 10.5, "viewer": None}]
     assert cfp.con_calls
     assert cfp.gclose_calls == 0
     assert plt_obj.figure.savefig_calls == ["/tmp/mock.png"]
@@ -254,7 +253,7 @@ def test_run_contour_plot_uses_configured_title_font_sizes(
         },
     )
 
-    assert cfp.setvars_calls == [{"title_fontsize": 12.5}]
+    assert cfp.setvars_calls == [{"title_fontsize": 12.5, "viewer": None}]
     assert plt_obj.figure.suptitle_calls == [
         (("Overview",), {"y": 0.995, "fontsize": 14.0})
     ]

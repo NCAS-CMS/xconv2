@@ -7,6 +7,7 @@ import numpy as np
 from xconv2.cf_templates import contour_range_from_selection, plot_from_selection, save_data_from_selection
 import xconv2.xconv_cf_interface as cf_interface
 from xconv2.xconv_cf_interface import auto_contour_title, get_data_for_plotting, run_contour_plot
+from xconv2.ui.contour_options_controller import ContourOptionsController
 
 
 @dataclass
@@ -284,3 +285,9 @@ def test_save_data_from_selection_builds_data_only_worker_code() -> None:
     assert "save_selected_field_data(pfld, save_data_path)" in code
     assert "run_line_plot(" not in code
     assert "run_contour_plot(" not in code
+
+
+def test_contour_property_text_normalization_compacts_linebreaks() -> None:
+    text = "alpha\r\n beta\n\ngamma\rdelta"
+    normalized = ContourOptionsController._normalize_property_cell_text(text)
+    assert normalized == "alpha beta gamma delta"

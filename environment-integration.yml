@@ -1,0 +1,21 @@
+---
+name: xconv2-integration
+channels:
+  - conda-forge
+  - nodefaults
+
+dependencies:
+  - python >=3.12
+  - pip !=21.3
+  - cf-plot
+  - cf-python
+  - pandas
+  - pyside6
+  - setuptools >80
+  - superqt
+  - zarr
+  - pytest
+  - pip
+  - pip:
+      - docker
+      - minio

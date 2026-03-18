@@ -16,6 +16,7 @@ import glob
 from pathlib import Path
 import logging
 from typing import Sequence
+from urllib.parse import urlparse
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon, QPixmap
@@ -50,16 +51,17 @@ from PySide6.QtWidgets import (
 from . import __version__
 from .ui.contour_options_controller import ContourOptionsController
 from .ui.field_metadata_controller import FieldMetadataController
+from .ui.lineplot_options_controller import LineplotOptionsController
 from .ui.menu_controller import MenuController
 from .ui.plot_view_controller import PlotViewController
 from .ui.selection_controller import SelectionController
-from .ui.dialogs import OpenGlobDialog
+from .ui.dialogs import OpenGlobDialog, OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog
+from .ui.remote_file_navigator import RemoteFileNavigatorDialog
 from .ui.settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-FIELD_METADATA_SEPARATOR = "\x1f"
 DEFAULT_MAX_RECENT_FILES = 10
 SETTINGS_VERSION = 1
 STATUSBAR_NORMAL_STYLE = ""
@@ -84,9 +86,10 @@ class CFVCore(QMainWindow):
         )
         self.menu_controller = MenuController(self)
         self.selection_controller = SelectionController(self)
-        self.field_metadata_controller = FieldMetadataController(self, FIELD_METADATA_SEPARATOR)
+        self.field_metadata_controller = FieldMetadataController(self)
         self.plot_view_controller = PlotViewController(self)
         self.contour_options_controller = ContourOptionsController(self)
+        self.lineplot_options_controller = LineplotOptionsController(self)
         self._settings = self._load_settings()
         self.setWindowTitle(self.base_window_title)
         self.resize(1000, 700)
@@ -349,6 +352,99 @@ class CFVCore(QMainWindow):
             return
 
         self._refresh_recent_menu()
+
+    def _record_recent_uri(self, uri: str, host_alias: str | None = None) -> None:
+        """Record a remote URI and optional alias for display in the Recent submenu."""
+        canonical_uri = CFVCore._canonical_remote_uri(uri)
+        self._record_recent_file(canonical_uri)
+
+        aliases = self._settings.get("recent_uri_aliases")
+        alias_map = dict(aliases) if isinstance(aliases, dict) else {}
+        if host_alias:
+            alias_map[canonical_uri] = host_alias
+        else:
+            alias_map.pop(canonical_uri, None)
+
+        recent = set(self._load_recent_files())
+        alias_map = {key: value for key, value in alias_map.items() if key in recent}
+        self._settings["recent_uri_aliases"] = alias_map
+        try:
+            self._save_settings()
+        except OSError:
+            logger.exception("Failed to persist URI alias map")
+
+    def _recent_menu_label(self, file_path: str) -> str:
+        """Return display label for a recent-file menu entry."""
+        canonical_path = CFVCore._canonical_remote_uri(file_path)
+        parsed = urlparse(canonical_path)
+        if parsed.scheme:
+            filename = Path(parsed.path).name or canonical_path
+            aliases = self._settings.get("recent_uri_aliases")
+            alias_map = aliases if isinstance(aliases, dict) else {}
+            alias = alias_map.get(canonical_path) or alias_map.get(file_path)
+            if isinstance(alias, str) and alias.strip():
+                return f"{filename} ({alias.strip()})"
+
+            if parsed.hostname:
+                return f"{filename} ({parsed.hostname})"
+            return filename
+
+        return Path(file_path).name
+
+    def _recent_menu_tooltip(self, file_path: str) -> str:
+        """Return tooltip text for a recent-file menu entry."""
+        canonical_path = CFVCore._canonical_remote_uri(file_path)
+        parsed = urlparse(canonical_path)
+        if parsed.scheme:
+            return CFVCore._shareable_remote_uri(self, canonical_path)
+        return file_path
+
+    def _default_open_uri_value(self) -> str:
+        """Return the most recent remote URI as the Open URI default value."""
+        for item in self._load_recent_files():
+            if urlparse(item).scheme:
+                canonical = CFVCore._canonical_remote_uri(item)
+                return CFVCore._shareable_remote_uri(self, canonical)
+        return ""
+
+    def _shareable_remote_uri(self, uri: str) -> str:
+        """Return a user-facing URI form suitable for sharing outside xconv2."""
+        parsed = urlparse(uri)
+        if parsed.scheme != "s3":
+            return uri
+
+        alias = ""
+        aliases = self._settings.get("recent_uri_aliases")
+        if isinstance(aliases, dict):
+            value = aliases.get(uri)
+            if isinstance(value, str):
+                alias = value.strip()
+
+        if not alias:
+            return uri
+
+        locations = RemoteConfigurationDialog._load_s3_locations()
+        details = locations.get(alias, {})
+        if not isinstance(details, dict):
+            return uri
+
+        endpoint = str(details.get("url", "")).strip()
+        endpoint_host = urlparse(endpoint).netloc.strip()
+        if not endpoint_host:
+            return uri
+
+        path = f"{parsed.netloc}{parsed.path}".lstrip("/")
+        if not path:
+            return uri
+        return f"s3://{endpoint_host}/{path}"
+
+    @staticmethod
+    def _canonical_remote_uri(uri: str) -> str:
+        """Normalize user-visible remote URI strings for internal consistency."""
+        text = str(uri).strip()
+        if text.startswith("s3:/") and not text.startswith("s3://"):
+            return "s3://" + text[len("s3:/") :].lstrip("/")
+        return text
 
     def _default_settings(self) -> dict[str, object]:
         """Return default persisted settings schema."""
@@ -667,6 +763,11 @@ class CFVCore(QMainWindow):
 
     def _open_recent_file(self, file_path: str) -> None:
         """Open a file selected from the Recent submenu."""
+        parsed = urlparse(file_path)
+        if parsed.scheme:
+            self._show_status_message("Open recent URI is handled by worker-backed windows.", is_error=True)
+            return
+
         self._set_window_title_for_file(file_path)
         logger.info("Selected recent file: %s", file_path)
         self._record_recent_file(file_path)
@@ -810,10 +911,6 @@ class CFVCore(QMainWindow):
     def _parse_properties_dict(self, raw_properties: object) -> dict[object, object]:
         """Parse properties payload into a dictionary when possible."""
         return self.field_metadata_controller.parse_properties_dict(raw_properties)
-
-    def _parse_properties_lines(self, text: str) -> dict[str, str]:
-        """Parse key/value properties from multi-line text representations."""
-        return self.field_metadata_controller.parse_properties_lines(text)
 
     def _set_field_list_visible_rows(self, row_count: int) -> None:
         """Size the field list to show a target number of rows by default."""
@@ -1015,8 +1112,79 @@ class CFVCore(QMainWindow):
         self.on_file_selected(expression)
 
     def _choose_uris(self) -> None:
-        """Placeholder for future multi-URI open flow."""
-        self._show_not_implemented_dialog("Open URIs")
+        """Show URI dialog and return selected URI for worker-backed windows."""
+        default_uri = self._default_open_uri_value()
+        uri, ok, quit_requested = OpenURIDialog.get_uri(self, default_uri=default_uri)
+        if quit_requested:
+            return
+        if not ok or not uri:
+            return
+        self._show_status_message("Open URI is handled by worker-backed windows.", is_error=True)
+
+    def _configure_remote(self) -> None:
+        """Show remote configuration dialog and optionally open with the chosen config."""
+        raw_state = self._settings.get("last_remote_configuration", {})
+        state = dict(raw_state) if isinstance(raw_state, dict) else {}
+        https_locations = self._settings.get("remote_https_locations")
+        if not isinstance(https_locations, dict):
+            https_locations = self._settings.get("remote_http_locations")
+        if isinstance(https_locations, dict) and https_locations:
+            state["https_locations"] = dict(https_locations)
+        config, ok, next_state = RemoteConfigurationDialog.get_configuration(self, state=state)
+        self._settings["last_remote_configuration"] = next_state
+        if isinstance(next_state, dict):
+            persisted_https = next_state.get("https_locations")
+            if not isinstance(persisted_https, dict):
+                persisted_https = next_state.get("http_locations")
+            if isinstance(persisted_https, dict):
+                self._settings["remote_https_locations"] = dict(persisted_https)
+        self._save_settings()
+        if not ok or config is None:
+            return
+        selected_uri, selected_ok = RemoteFileNavigatorDialog.get_remote_selection(self, config)
+        if not selected_ok:
+            return
+        self._set_window_title_for_file(selected_uri)
+        self._show_status_message(f"Selected remote file: {selected_uri}")
+
+    def _choose_remote(self) -> None:
+        """Show open-remote dialog and open using the selected saved short name."""
+        raw_state = self._settings.get("last_remote_open", {})
+        state = raw_state if isinstance(raw_state, dict) else {}
+        if isinstance(state, dict):
+            merged_http: dict[str, object] = {}
+
+            configured_state = self._settings.get("last_remote_configuration")
+            if isinstance(configured_state, dict):
+                cfg_http = configured_state.get("https_locations")
+                if not isinstance(cfg_http, dict):
+                    cfg_http = configured_state.get("http_locations")
+                if isinstance(cfg_http, dict):
+                    merged_http.update(cfg_http)
+
+            http_locations = self._settings.get("remote_https_locations")
+            if not isinstance(http_locations, dict):
+                http_locations = self._settings.get("remote_http_locations")
+            if isinstance(http_locations, dict):
+                merged_http.update(http_locations)
+
+            if merged_http:
+                state = dict(state)
+                state["https_locations"] = dict(merged_http)
+
+        config, ok, next_state = RemoteOpenDialog.get_configuration(self, state=state)
+        self._settings["last_remote_open"] = next_state
+        self._save_settings()
+        if isinstance(next_state, dict) and bool(next_state.get("configure_new_remote")):
+            self._configure_remote()
+            return
+        if not ok or config is None:
+            return
+        selected_uri, selected_ok = RemoteFileNavigatorDialog.get_remote_selection(self, config)
+        if not selected_ok:
+            return
+        self._set_window_title_for_file(selected_uri)
+        self._show_status_message(f"Selected remote file: {selected_uri}")
 
     def _set_window_title_for_file(self, file_path: str) -> None:
         """Update the window title to reflect the selected file."""
@@ -1046,6 +1214,10 @@ class CFVCore(QMainWindow):
             range_max=range_max,
             suggested_title=suggested_title,
         )
+
+    def _show_lineplot_options_dialog(self) -> None:
+        """Show lineplot options dialog and persist selected options."""
+        self.lineplot_options_controller.show_lineplot_options_dialog()
 
     def _show_annotation_properties_chooser(
         self,

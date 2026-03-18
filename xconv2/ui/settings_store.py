@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,32 @@ class SettingsStore:
         return {
             "version": self.settings_version,
             "recent_files": [],
+            "recent_uri_aliases": {},
             "max_recent_files": self.default_max_recent_files,
+            "last_remote_configuration": {
+                "protocol_index": 0,
+                "s3_mode": "Select from existing",
+                "s3_existing_alias": "",
+                "s3_alias": "",
+                "s3_url": "",
+                "s3_access_key": "",
+                "s3_secret_key": "",
+                "s3_config_target": "MinIO",
+                "ssh_mode": "Select from existing",
+                "ssh_existing_alias": "",
+                "ssh_alias": "",
+                "ssh_hostname": "",
+                "ssh_user": "",
+                "ssh_identity_file": "",
+                "ssh_proxy_jump": "",
+                "cache_blocksize_mb": 2,
+                "cache_ram_buffer_mb": 1024,
+                "cache_strategy": "Block",
+                "disk_mode": "Disabled",
+                "disk_location": str(Path.home() / ".cache/xconv2"),
+                "disk_limit_gb": 10,
+                "disk_expiry": "1 day",
+            },
             "field_list_rows": 12,
             "visible_coordinate_rows": 4,
             "contour_title_fontsize": 10.5,
@@ -136,6 +162,12 @@ class SettingsStore:
         if default_plot_format not in {"png", "svg", "pdf"}:
             settings["default_plot_format"] = "png"
 
+        recent_uri_aliases = settings.get("recent_uri_aliases")
+        if not isinstance(recent_uri_aliases, dict):
+            settings["recent_uri_aliases"] = {}
+
+        self._migrate_https_settings(settings)
+
         self.data = settings
         try:
             self.save()
@@ -143,6 +175,45 @@ class SettingsStore:
             logger.exception("Failed to persist settings JSON after load")
 
         return self.data
+
+    @staticmethod
+    def _migrate_https_state_dict(payload: dict[str, object]) -> None:
+        """Upgrade legacy http_* dialog-state keys to https_* equivalents."""
+        if not isinstance(payload, dict):
+            return
+
+        protocol = payload.get("protocol")
+        if isinstance(protocol, str) and protocol.upper() == "HTTP":
+            payload["protocol"] = "HTTPS"
+
+        protocol_index = payload.get("protocol_index")
+        if isinstance(protocol_index, int) and protocol_index == 1:
+            # Tab index remains 1; this simply documents that index 1 is now HTTPS.
+            payload["protocol_index"] = 1
+
+        http_locations = payload.get("http_locations")
+        if isinstance(http_locations, dict) and not isinstance(payload.get("https_locations"), dict):
+            payload["https_locations"] = dict(http_locations)
+
+        http_alias = payload.get("http_alias")
+        if isinstance(http_alias, str) and "https_alias" not in payload:
+            payload["https_alias"] = http_alias
+
+        payload.pop("http_locations", None)
+        payload.pop("http_alias", None)
+
+    def _migrate_https_settings(self, settings: dict[str, object]) -> None:
+        """Apply one-way migration from legacy http_* persisted keys."""
+        remote_http_locations = settings.get("remote_http_locations")
+        remote_https_locations = settings.get("remote_https_locations")
+        if isinstance(remote_http_locations, dict) and not isinstance(remote_https_locations, dict):
+            settings["remote_https_locations"] = dict(remote_http_locations)
+        settings.pop("remote_http_locations", None)
+
+        for key in ("last_remote_configuration", "last_remote_open"):
+            value = settings.get(key)
+            if isinstance(value, dict):
+                self._migrate_https_state_dict(value)
 
     def save(self) -> None:
         """Persist settings dictionary to disk as JSON."""
@@ -178,7 +249,12 @@ class SettingsStore:
 
     def record_recent_file(self, file_path: str) -> list[str]:
         """Record a file open event and return the updated recent list."""
-        normalized_path = str(Path(file_path).expanduser())
+        parsed = urlparse(file_path)
+        if parsed.scheme:
+            # Keep remote URIs verbatim (Path() would corrupt forms like s3://...).
+            normalized_path = file_path.strip()
+        else:
+            normalized_path = str(Path(file_path).expanduser())
         recent_files = [p for p in self.load_recent_files() if p != normalized_path]
         recent_files.insert(0, normalized_path)
         recent_files = recent_files[: self.max_recent_files()]

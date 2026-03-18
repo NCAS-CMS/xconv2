@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xconv2"
-version = "0.1.0a1"
+version = "0.2.0a1"
 description = "High-performance data viewer and simple data converter"
 requires-python = ">=3.12"
 dependencies = [
@@ -12,6 +12,9 @@ dependencies = [
     "superqt",
     "cf-python",
     "cf-plot",
+    "fsspec",
+    "s3fs",
+    "paramiko",
     "zarr",
     "pandas",
     "setuptools>80",
@@ -20,6 +23,8 @@ dependencies = [
 [project.optional-dependencies]
 test = [
     "pytest",
+    "docker",
+    "minio",
 ]
 
 [project.gui-scripts]

@@ -329,7 +329,10 @@ class SelectionController:
                 value = float(value)
             except ValueError:
                 return text
-        date = num2date(value, time_units, calendar=calendar)
+        if calendar:
+            date = num2date(value, time_units, calendar=calendar)
+        else:
+            date = num2date(value, time_units)
         if delta is not None and delta > 86399:
             return date.strftime("%Y-%m-%d")
         else:

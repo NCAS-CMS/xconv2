@@ -60,6 +60,14 @@ class MenuController:
         open_glob_action.triggered.connect(self.host._choose_glob)
         file_menu.addAction(open_glob_action)
 
+        configure_remote_action = QAction("Configure Remote...", self.host)
+        configure_remote_action.triggered.connect(self.host._configure_remote)
+        file_menu.addAction(configure_remote_action)
+
+        open_remote_action = QAction("Open Remote...", self.host)
+        open_remote_action.triggered.connect(self.host._choose_remote)
+        file_menu.addAction(open_remote_action)
+
         open_uris_action = QAction("Open URIs...", self.host)
         open_uris_action.triggered.connect(self.host._choose_uris)
         file_menu.addAction(open_uris_action)
@@ -138,8 +146,9 @@ class MenuController:
             return
 
         for file_path in recent_files:
-            action = QAction(Path(file_path).name, self.host)
-            action.setToolTip(file_path)
+            label = self.host._recent_menu_label(file_path)
+            action = QAction(label, self.host)
+            action.setToolTip(self.host._recent_menu_tooltip(file_path))
             action.triggered.connect(
                 lambda checked=False, p=file_path: self.host._open_recent_file(p)
             )
