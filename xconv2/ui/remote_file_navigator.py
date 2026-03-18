@@ -162,15 +162,19 @@ def _create_sftp_via_jump(spec: RemoteFilesystemSpec, log: Callable[[str], None]
 
     target_user = str(spec.storage_options.get("username", "")) or None
     target_key = str(spec.storage_options.get("key_filename", "")) or None
+    explicit_jump_user = str(spec.storage_options.get("proxyjump_username", "")) or None
+    explicit_jump_password = str(spec.storage_options.get("proxyjump_password", "")) or None
 
     # Prefer explicit user from ProxyJump directive, then SSH config user, then target user
-    effective_jump_user = jump_user_override or jump_resolved_user or target_user
+    effective_jump_user = explicit_jump_user or jump_user_override or jump_resolved_user or target_user
     # Prefer jump-specific key, fall back to target key
     effective_jump_key = jump_key_filename or target_key
 
     jump_connect: dict[str, Any] = {"hostname": jump_hostname, "port": jump_port}
     if effective_jump_user:
         jump_connect["username"] = effective_jump_user
+    if explicit_jump_password:
+        jump_connect["password"] = explicit_jump_password
     if effective_jump_key:
         jump_connect["key_filename"] = effective_jump_key
 
@@ -238,6 +242,9 @@ def build_remote_filesystem_spec(config: dict[str, Any]) -> RemoteFilesystemSpec
         alias = str(remote.get("alias") or "SSH")
         hostname = _value_from_keys(details, "hostname") or _value_from_keys(remote, "hostname")
         user = _value_from_keys(details, "user") or _value_from_keys(remote, "user")
+        password = _value_from_keys(details, "password") or _value_from_keys(remote, "password")
+        proxyjump_password = _value_from_keys(details, "proxyjump_password") or _value_from_keys(remote, "proxyjump_password")
+        proxyjump_user = _value_from_keys(details, "proxyjump_user") or _value_from_keys(remote, "proxyjump_user")
         identity_file = _value_from_keys(details, "identityfile", "identity_file") or _value_from_keys(remote, "identity_file")
         if not hostname:
             raise ValueError("SSH configuration is missing a hostname")
@@ -247,6 +254,12 @@ def build_remote_filesystem_spec(config: dict[str, Any]) -> RemoteFilesystemSpec
         storage_options = {"host": hostname}
         if user:
             storage_options["username"] = user
+        if password:
+            storage_options["password"] = password
+        if proxyjump_password:
+            storage_options["proxyjump_password"] = proxyjump_password
+        if proxyjump_user:
+            storage_options["proxyjump_username"] = proxyjump_user
         if identity_file:
             storage_options["key_filename"] = str(Path(identity_file).expanduser())
 
