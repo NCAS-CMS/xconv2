@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from xconv2.ui.dialogs import RemoteConfigurationDialog
+from xconv2.ui.dialogs import RemoteConfigurationDialog, RemoteOpenDialog
 
 
 def test_load_s3_locations_returns_alias_mapping(monkeypatch) -> None:
@@ -131,3 +131,46 @@ def test_save_ssh_host_writes_config_file(tmp_path: Path) -> None:
     assert "HostName alpha.example.org" in content
     assert "User alice" in content
     assert "ProxyJump gateway.example.org" in content
+
+
+def test_load_https_locations_prefers_https_key() -> None:
+    state = {
+        "https_locations": {
+            "prod": {"url": "https://example.org/data"},
+        },
+        "http_locations": {
+            "legacy": {"url": "http://legacy.example.org"},
+        },
+    }
+
+    locations = RemoteConfigurationDialog._load_http_locations(state)
+
+    assert locations == {"prod": {"url": "https://example.org/data"}}
+
+
+def test_load_https_locations_falls_back_to_legacy_http_key() -> None:
+    state = {
+        "http_locations": {
+            "legacy": {"url": "https://legacy.example.org"},
+        },
+    }
+
+    locations = RemoteConfigurationDialog._load_http_locations(state)
+
+    assert locations == {"legacy": {"url": "https://legacy.example.org"}}
+
+
+def test_open_dialog_uses_https_locations() -> None:
+    state = {
+        "https_locations": {
+            "alpha": {"url": "https://alpha.example.org"},
+            "beta": {"base_url": "https://beta.example.org"},
+        },
+    }
+
+    locations = RemoteOpenDialog._load_http_locations(state)
+
+    assert locations == {
+        "alpha": {"url": "https://alpha.example.org"},
+        "beta": {"url": "https://beta.example.org"},
+    }

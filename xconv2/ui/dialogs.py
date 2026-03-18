@@ -223,6 +223,7 @@ class RemoteConfigurationDialog(QDialog):
     _EXPIRY_OPTIONS = ["Never", "1 day", "7 days", "30 days"]
     _RESULT_SAVED_ONLY = 2
     _WIDE_FIELD_CHARS = 50
+    _DISK_LOCATION_CHARS = 30
 
     def __init__(self, parent: QWidget | None, state: dict[str, Any] | None = None) -> None:
         super().__init__(parent)
@@ -282,10 +283,17 @@ class RemoteConfigurationDialog(QDialog):
 
     @staticmethod
     def _load_http_locations(state: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
-        """Load persisted HTTP alias mapping from dialog state."""
+        """Load persisted HTTPS alias mapping from dialog state."""
         if not isinstance(state, dict):
             return {}
-        raw = state.get("http_locations")
+        raw = state.get("https_locations")
+        if not isinstance(raw, dict):
+            raw = state.get("http_locations")
+        return RemoteConfigurationDialog._normalize_https_locations(raw)
+
+    @staticmethod
+    def _normalize_https_locations(raw: object) -> dict[str, dict[str, Any]]:
+        """Normalize raw HTTPS alias mapping into sorted {alias: {url}} form."""
         if not isinstance(raw, dict):
             return {}
 
@@ -821,7 +829,7 @@ class RemoteConfigurationDialog(QDialog):
         self.disk_mode_combo.addItems(self._DISK_CACHE_MODES)
         self.disk_mode_combo.setCurrentText("Disabled")
         self.disk_location_edit = QLineEdit(str(Path.home() / ".cache/xconv2"))
-        disk_width_px = self.disk_location_edit.fontMetrics().horizontalAdvance("M" * (self._WIDE_FIELD_CHARS * 2))
+        disk_width_px = self.disk_location_edit.fontMetrics().horizontalAdvance("M" * self._DISK_LOCATION_CHARS)
         self.disk_location_edit.setMinimumWidth(disk_width_px)
         self.disk_limit_spin = QSpinBox()
         self.disk_limit_spin.setRange(1, 4096)
@@ -1236,22 +1244,13 @@ class RemoteOpenDialog(QDialog):
 
     @staticmethod
     def _load_http_locations(state: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
-        """Load optional HTTP aliases from persisted dialog state."""
+        """Load optional HTTPS aliases from persisted dialog state."""
         if not isinstance(state, dict):
             return {}
         raw = state.get("https_locations")
         if not isinstance(raw, dict):
             raw = state.get("http_locations")
-        if not isinstance(raw, dict):
-            return {}
-        cleaned: dict[str, dict[str, Any]] = {}
-        for alias, details in raw.items():
-            if not isinstance(alias, str) or not isinstance(details, dict):
-                continue
-            url = details.get("url") or details.get("base_url")
-            if isinstance(url, str) and url.strip():
-                cleaned[alias] = {"url": url.strip()}
-        return dict(sorted(cleaned.items()))
+        return RemoteConfigurationDialog._normalize_https_locations(raw)
 
     @staticmethod
     def _set_combo_items(combo: QComboBox, items: list[str], empty_label: str) -> None:

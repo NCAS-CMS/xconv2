@@ -9,6 +9,7 @@ import pytest
 from xconv2.cf_templates import coordinate_list
 from xconv2.xconv_cf_interface import coordinate_info, field_info
 from xconv2.gui import CFVMain
+import xconv2.main_window as main_window
 
 
 @dataclass
@@ -215,3 +216,51 @@ def test_set_window_title_for_local_file_no_tag() -> None:
 
     assert window.titles == ["xconv2 (test): local.nc"]
     assert window.current_file_path == "/home/user/data/local.nc"
+
+
+def test_https_locations_from_configure_are_passed_to_open_dialog(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _DummyRemoteFlowWindow:
+        def __init__(self) -> None:
+            self._settings = {
+                "last_remote_configuration": {},
+                "last_remote_open": {},
+            }
+            self.saved = 0
+
+        def _save_settings(self) -> None:
+            self.saved += 1
+
+        def _open_remote_from_config(self, _config: dict[str, object]) -> None:
+            pass
+
+        def _configure_remote(self) -> None:
+            CFVMain._configure_remote(self)
+
+    window = _DummyRemoteFlowWindow()
+
+    configured_https = {
+        "archive": {"url": "https://archive.example.org/data"},
+    }
+
+    monkeypatch.setattr(
+        main_window.RemoteConfigurationDialog,
+        "get_configuration",
+        lambda _parent, state=None: (None, False, {"https_locations": configured_https, **(state or {})}),
+    )
+
+    captured_state: dict[str, object] = {}
+
+    def _fake_open_config(_parent, state=None):
+        nonlocal captured_state
+        captured_state = dict(state or {})
+        return None, False, dict(state or {})
+
+    monkeypatch.setattr(main_window.RemoteOpenDialog, "get_configuration", _fake_open_config)
+
+    # Save-only configure should persist HTTPS aliases into shared settings.
+    CFVMain._configure_remote(window)
+    assert window._settings["remote_https_locations"] == configured_https
+
+    # Open dialog should receive merged HTTPS aliases from settings/config state.
+    CFVMain._choose_remote(window)
+    assert captured_state.get("https_locations") == configured_https
