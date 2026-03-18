@@ -36,7 +36,7 @@
   "attributes": {
     "units": "degrees_north",
     "standard_name": "latitude",
-    "bounds": "lat_bnds",
+    "bounds": "lat_bnds"
   },
   "dimension_names": [
     "lat"
