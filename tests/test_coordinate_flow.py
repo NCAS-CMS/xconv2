@@ -5,7 +5,11 @@ import pickle
 from dataclasses import dataclass, field
 import types
 
+from PySide6.QtWidgets import QStyle
+
 from xconv2.main_window import CFVMain
+from xconv2.core_window import CFVCore
+from xconv2.ui.plot_view_controller import PlotViewController
 
 
 @dataclass
@@ -72,9 +76,19 @@ class _DummyFieldListWidget:
 class _DummyResetMain:
     _plot_request_in_flight: bool = True
     _plot_request_expects_image: bool = True
+    _selection_info_visible: bool = False
     loading_calls: list[bool] = field(default_factory=list)
     canvas_messages: list[str] = field(default_factory=list)
     status_messages: list[str] = field(default_factory=list)
+    panel_visible_calls: list[bool] = field(default_factory=list)
+    button_sync_calls: int = 0
+
+    def _set_selection_info_panel_visible(self, visible: bool) -> None:
+        self._selection_info_visible = visible
+        self.panel_visible_calls.append(visible)
+
+    def _update_selection_info_toggle_button(self) -> None:
+        self.button_sync_calls += 1
 
     def _set_plot_loading(self, is_loading: bool, message: str = "Rendering plot...") -> None:
         _ = message
@@ -119,6 +133,114 @@ class _DummyStaleErrorMain:
     def _set_plot_loading(self, is_loading: bool, message: str = "Rendering plot...") -> None:
         _ = message
         self.loading_calls.append(is_loading)
+
+
+@dataclass
+class _DummyVisibilityPanel:
+    visible: bool = True
+
+    def setVisible(self, visible: bool) -> None:
+        self.visible = visible
+
+    def isVisible(self) -> bool:
+        return self.visible
+
+    def isHidden(self) -> bool:
+        return not self.visible
+
+
+@dataclass
+class _DummyVisibilityButton:
+    icon: object | None = None
+    tooltip: str = ""
+    status_tip: str = ""
+
+    def setIcon(self, icon: object) -> None:
+        self.icon = icon
+
+    def setToolTip(self, tooltip: str) -> None:
+        self.tooltip = tooltip
+
+    def setStatusTip(self, status_tip: str) -> None:
+        self.status_tip = status_tip
+
+
+class _DummyStyle:
+    def standardIcon(self, icon_kind: QStyle.StandardPixmap) -> QStyle.StandardPixmap:
+        return icon_kind
+
+
+@dataclass
+class _DummyVisibilityMain:
+    plot_info_output: _DummyVisibilityPanel = field(default_factory=_DummyVisibilityPanel)
+    selection_info_toggle_button: _DummyVisibilityButton = field(default_factory=_DummyVisibilityButton)
+    _selection_info_visible: bool = True
+    _selection_info_expanded_from_width: int | None = None
+    width_value: int = 1000
+    height_value: int = 700
+
+    def __post_init__(self) -> None:
+        self.plot_view_controller = types.SimpleNamespace(
+            adjust_window_width_for_info_panel=lambda _visible: None,
+        )
+
+    def style(self) -> _DummyStyle:
+        return _DummyStyle()
+
+    def width(self) -> int:
+        return self.width_value
+
+    def height(self) -> int:
+        return self.height_value
+
+    def _update_selection_info_toggle_button(self) -> None:
+        CFVCore._update_selection_info_toggle_button(self)
+
+    def _set_selection_info_panel_visible(self, visible: bool) -> None:
+        CFVCore._set_selection_info_panel_visible(self, visible)
+
+
+@dataclass
+class _DummyStartupVisibilityPanel:
+    hidden: bool = False
+
+    def isVisible(self) -> bool:
+        # Simulate child widget before top-level show(): effectively not visible.
+        return False
+
+    def isHidden(self) -> bool:
+        return self.hidden
+
+
+@dataclass
+class _DummyResetVisibilityMain:
+    _plot_request_in_flight: bool = True
+    _plot_request_expects_image: bool = True
+    _suppress_stale_error_status: bool = False
+    _selection_info_visible: bool = False
+    panel_visible_calls: list[bool] = field(default_factory=list)
+    button_sync_calls: int = 0
+    loading_calls: list[bool] = field(default_factory=list)
+    canvas_messages: list[str] = field(default_factory=list)
+    status_messages: list[str] = field(default_factory=list)
+
+    def _set_selection_info_panel_visible(self, visible: bool) -> None:
+        self._selection_info_visible = visible
+        self.panel_visible_calls.append(visible)
+
+    def _update_selection_info_toggle_button(self) -> None:
+        self.button_sync_calls += 1
+
+    def _set_plot_loading(self, is_loading: bool, message: str = "Rendering plot...") -> None:
+        _ = message
+        self.loading_calls.append(is_loading)
+
+    def _clear_plot_canvas(self, message: str = "Plot unavailable") -> None:
+        self.canvas_messages.append(message)
+
+    def _show_status_message(self, message: str, is_error: bool = False) -> None:
+        _ = is_error
+        self.status_messages.append(message)
 
 
 def test_normalize_coordinate_metadata_filters_and_coerces() -> None:
@@ -307,3 +429,108 @@ def test_handle_worker_output_ignores_stale_error_after_coord_message() -> None:
 
     assert dummy.shown_statuses == []
     assert dummy._suppress_stale_error_status is True
+
+
+def test_toggle_selection_info_panel_updates_visibility_and_button_state() -> None:
+    dummy = _DummyVisibilityMain()
+
+    CFVCore._toggle_selection_info_panel(dummy)
+
+    assert dummy.plot_info_output.isVisible() is False
+    assert dummy._selection_info_visible is False
+    assert dummy.selection_info_toggle_button.icon == QStyle.SP_TitleBarUnshadeButton
+    assert dummy.selection_info_toggle_button.tooltip == "Show field details"
+    assert dummy.selection_info_toggle_button.status_tip == "Show field details"
+
+    CFVCore._toggle_selection_info_panel(dummy)
+
+    assert dummy.plot_info_output.isVisible() is True
+    assert dummy._selection_info_visible is True
+    assert dummy.selection_info_toggle_button.icon == QStyle.SP_TitleBarShadeButton
+    assert dummy.selection_info_toggle_button.tooltip == "Hide field details"
+    assert dummy.selection_info_toggle_button.status_tip == "Hide field details"
+
+
+def test_toggle_selection_info_panel_stores_width_before_hiding() -> None:
+    dummy = _DummyVisibilityMain(width_value=1180)
+
+    CFVCore._toggle_selection_info_panel(dummy)
+
+    assert dummy._selection_info_expanded_from_width == 1180
+
+
+def test_compute_target_window_width_expands_when_plot_is_height_limited() -> None:
+    target_width = PlotViewController._compute_target_window_width(
+        current_window_width=1000,
+        current_plot_width=700,
+        current_plot_height=900,
+        pixmap_width=1200,
+        pixmap_height=800,
+        max_window_width=1600,
+        min_window_width=640,
+    )
+
+    assert target_width == 1600
+
+
+def test_compute_target_window_width_expands_without_hitting_screen_cap() -> None:
+    target_width = PlotViewController._compute_target_window_width(
+        current_window_width=1000,
+        current_plot_width=700,
+        current_plot_height=800,
+        pixmap_width=1000,
+        pixmap_height=800,
+        max_window_width=1600,
+        min_window_width=640,
+    )
+
+    assert target_width == 1300
+
+
+def test_compute_target_window_width_keeps_width_when_change_is_tiny() -> None:
+    target_width = PlotViewController._compute_target_window_width(
+        current_window_width=1000,
+        current_plot_width=700,
+        current_plot_height=474,
+        pixmap_width=1200,
+        pixmap_height=800,
+        max_window_width=1600,
+        min_window_width=640,
+    )
+
+    assert target_width == 1000
+
+
+def test_compute_target_window_width_shrinks_when_plot_is_too_wide_for_height() -> None:
+    target_width = PlotViewController._compute_target_window_width(
+        current_window_width=1500,
+        current_plot_width=1100,
+        current_plot_height=600,
+        pixmap_width=800,
+        pixmap_height=800,
+        max_window_width=1800,
+        min_window_width=640,
+    )
+
+    assert target_width == 1000
+
+
+def test_update_toggle_button_uses_hidden_state_not_effective_visibility() -> None:
+    dummy = _DummyVisibilityMain()
+    dummy.plot_info_output = _DummyStartupVisibilityPanel(hidden=False)
+
+    CFVCore._update_selection_info_toggle_button(dummy)
+
+    assert dummy._selection_info_visible is True
+    assert dummy.selection_info_toggle_button.icon == QStyle.SP_TitleBarShadeButton
+    assert dummy.selection_info_toggle_button.tooltip == "Hide field details"
+
+
+def test_reset_ui_for_new_field_selection_reveals_details_panel() -> None:
+    dummy = _DummyResetVisibilityMain()
+
+    CFVMain._reset_ui_for_new_field_selection(dummy)
+
+    assert dummy._selection_info_visible is True
+    assert dummy.panel_visible_calls[-1] is True
+    assert dummy.button_sync_calls == 1

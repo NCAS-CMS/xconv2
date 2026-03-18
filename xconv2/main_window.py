@@ -67,6 +67,8 @@ class CFVMain(CFVCore):
         self._plot_request_in_flight = False
         self._plot_request_expects_image = False
         self._suppress_stale_error_status = True
+        self._set_selection_info_panel_visible(True)
+        self._update_selection_info_toggle_button()
         self._set_plot_loading(False)
         self._clear_plot_canvas("Waiting for data...")
         self._show_status_message("Task Complete")

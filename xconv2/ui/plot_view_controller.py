@@ -275,6 +275,115 @@ class PlotViewController:
         self.host._plot_pixmap_original = pixmap
         self.set_plot_loading(False)
         self.fit_window_to_plot_aspect()
+        if not getattr(self.host, "_selection_info_visible", True):
+            # If details were hidden before the first plot existed, apply width
+            # adjustment now that we have a pixmap/aspect to target.
+            self.adjust_window_width_for_info_panel(False)
+        self.refresh_plot_pixmap()
+
+    def adjust_window_width_for_info_panel(self, info_panel_visible: bool) -> None:
+        """Resize window width after info-panel toggles to reduce plot letterboxing."""
+        QTimer.singleShot(0, lambda: self._apply_window_width_for_info_panel(info_panel_visible))
+
+    @staticmethod
+    def _compute_target_window_width(
+        current_window_width: int,
+        current_plot_width: int,
+        current_plot_height: int,
+        pixmap_width: int,
+        pixmap_height: int,
+        max_window_width: int,
+        min_window_width: int,
+    ) -> int:
+        """Return a window width target that reduces side/top-bottom letterboxing."""
+        if min(
+            current_window_width,
+            current_plot_width,
+            current_plot_height,
+            pixmap_width,
+            pixmap_height,
+            max_window_width,
+            min_window_width,
+        ) <= 0:
+            return current_window_width
+
+        desired_plot_width = int(round(current_plot_height * (pixmap_width / pixmap_height)))
+        width_delta = desired_plot_width - current_plot_width
+        if abs(width_delta) <= 12:
+            return current_window_width
+
+        return max(
+            min_window_width,
+            min(current_window_width + width_delta, max_window_width),
+        )
+
+    def _apply_window_width_for_info_panel(self, info_panel_visible: bool) -> None:
+        """Apply width expansion when hiding details and restore width when showing them."""
+        if info_panel_visible:
+            restore_width = getattr(self.host, "_selection_info_expanded_from_width", None)
+            if restore_width is not None and restore_width != self.host.width():
+                self.host.resize(max(self.host.minimumWidth(), restore_width), self.host.height())
+
+            pixmap = getattr(self.host, "_plot_pixmap_original", None)
+            if pixmap is not None:
+                current_plot_width = max(self.host.plot_frame.width(), 1)
+                current_plot_height = max(self.host.plot_frame.height(), 1)
+
+                screen = self.host.screen() or QApplication.primaryScreen()
+                if screen is not None:
+                    available_width = screen.availableGeometry().width()
+                    min_width = max(self.host.minimumWidth(), 640)
+                    base_max_width = max(min_width, int(available_width * 0.95))
+                    if restore_width is not None:
+                        max_width = max(min_width, min(base_max_width, restore_width))
+                    else:
+                        max_width = base_max_width
+
+                    target_width = self._compute_target_window_width(
+                        current_window_width=self.host.width(),
+                        current_plot_width=current_plot_width,
+                        current_plot_height=current_plot_height,
+                        pixmap_width=pixmap.width(),
+                        pixmap_height=pixmap.height(),
+                        max_window_width=max_width,
+                        min_window_width=min_width,
+                    )
+                    if target_width != self.host.width():
+                        self.host.resize(target_width, self.host.height())
+
+            self.host._selection_info_expanded_from_width = None
+            self.refresh_plot_pixmap()
+            return
+
+        pixmap = getattr(self.host, "_plot_pixmap_original", None)
+        if pixmap is None:
+            self.refresh_plot_pixmap()
+            return
+
+        current_plot_width = max(self.host.plot_frame.width(), 1)
+        current_plot_height = max(self.host.plot_frame.height(), 1)
+
+        screen = self.host.screen() or QApplication.primaryScreen()
+        if screen is None:
+            self.refresh_plot_pixmap()
+            return
+
+        available_width = screen.availableGeometry().width()
+        min_width = max(self.host.minimumWidth(), 640)
+        max_width = max(min_width, int(available_width * 0.95))
+        target_width = self._compute_target_window_width(
+            current_window_width=self.host.width(),
+            current_plot_width=current_plot_width,
+            current_plot_height=current_plot_height,
+            pixmap_width=pixmap.width(),
+            pixmap_height=pixmap.height(),
+            max_window_width=max_width,
+            min_window_width=min_width,
+        )
+
+        if target_width != self.host.width():
+            self.host.resize(target_width, self.host.height())
+
         self.refresh_plot_pixmap()
 
     def fit_window_to_plot_aspect(self) -> None:
