@@ -188,6 +188,7 @@ def get_data_for_plotting(
 def save_selected_field_data(field: object, filename: str) -> None:
     """Persist selected field data to disk using cf.write."""
     cf.write(field, filename)
+    
 def run_contour_plot(
     pfld: object,
     options: dict[str, object] | None,

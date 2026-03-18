@@ -326,8 +326,7 @@ class PlotViewController:
 
     def adjust_window_width_for_info_panel(self, info_panel_visible: bool) -> None:
         """Re-fit window geometry to current plot aspect after layout toggles."""
-        _ = info_panel_visible
-        QTimer.singleShot(0, self.fit_window_to_plot_aspect)
+        QTimer.singleShot(0, lambda: self._apply_window_width_for_info_panel(info_panel_visible))
 
     @staticmethod
     def _compute_target_window_width(
