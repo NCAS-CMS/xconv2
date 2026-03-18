@@ -36,7 +36,7 @@
   "attributes": {
     "units": "degrees_east",
     "standard_name": "longitude",
-    "bounds": "lon_bnds",
+    "bounds": "lon_bnds"
   },
   "dimension_names": [
     "lon"
