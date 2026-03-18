@@ -29,6 +29,15 @@ class SelectionController:
     def __init__(self, host: "CFVCore") -> None:
         self.host = host
 
+    def _set_save_controls_enabled(self, enabled: bool) -> None:
+        """Enable or disable save mode selector and save action button."""
+        save_combo = getattr(self.host, "save_target_combo", None)
+        save_button = getattr(self.host, "save_go_button", None)
+        if save_combo is not None:
+            save_combo.setEnabled(enabled)
+        if save_button is not None:
+            save_button.setEnabled(enabled)
+
     def reset_all_sliders(self) -> None:
         """Reset all slider ranges to full extent and refresh summary state."""
         self.host.selected_collapse_methods.clear()
@@ -337,8 +346,7 @@ class SelectionController:
             self.host.plot_view_controller.set_plot_type_options([], None)
             self.host.plot_button.setEnabled(False)
             self.host.options_button.setEnabled(False)
-            self.host.save_code_button.setEnabled(False)
-            self.host.save_plot_button.setEnabled(False)
+            self._set_save_controls_enabled(False)
             return
 
         dims: list[int] = []
@@ -386,29 +394,25 @@ class SelectionController:
             self.host.plot_summary_label.setText(f"{dims_text} | Total collapse, plot not possible")
             self.host.plot_button.setEnabled(False)
             self.host.options_button.setEnabled(False)
-            self.host.save_code_button.setEnabled(False)
-            self.host.save_plot_button.setEnabled(False)
+            self._set_save_controls_enabled(False)
         elif varying_dims == 1:
             self.host.plot_summary_label.setText(
                 f"{dims_text} | Plot Type: {selected_kind.title() if selected_kind else 'N/A'}"
             )
             self.host.plot_button.setEnabled(True)
             self.host.options_button.setEnabled(False)
-            self.host.save_code_button.setEnabled(True)
-            self.host.save_plot_button.setEnabled(True)
+            self._set_save_controls_enabled(True)
         elif varying_dims == 2:
             self.host.plot_summary_label.setText(
                 f"{dims_text} | Plot Type: {selected_kind.title() if selected_kind else 'N/A'}"
             )
             self.host.plot_button.setEnabled(True)
             self.host.options_button.setEnabled(selected_kind == "contour")
-            self.host.save_code_button.setEnabled(True)
-            self.host.save_plot_button.setEnabled(True)
+            self._set_save_controls_enabled(True)
         else:
             self.host.plot_summary_label.setText(
                 f"{dims_text} | Need to reduce to 1D or 2D before plotting"
             )
             self.host.plot_button.setEnabled(False)
             self.host.options_button.setEnabled(False)
-            self.host.save_code_button.setEnabled(False)
-            self.host.save_plot_button.setEnabled(False)
+            self._set_save_controls_enabled(False)

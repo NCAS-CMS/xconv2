@@ -23,6 +23,7 @@ from .cf_templates import (
     coordinate_list,
     field_list,
     plot_from_selection,
+    save_data_from_selection,
 )
 from .core_window import CFVCore
 
@@ -293,15 +294,51 @@ class CFVMain(CFVCore):
 
     def _request_plot_update(self) -> None:
         """Request a new plot using current slider and collapse selections."""
-        self._request_plot_task(save_code_path=None, save_plot_path=None)
+        self._request_plot_task(
+            save_code_path=None,
+            save_plot_path=None,
+            save_data_path=None,
+        )
 
     def _request_plot_code_save(self, file_path: str) -> None:
         """Request plotting and ask the worker to save the generated code to a file."""
-        self._request_plot_task(save_code_path=file_path, save_plot_path=None)
+        self._request_plot_task(
+            save_code_path=file_path,
+            save_plot_path=None,
+            save_data_path=None,
+        )
 
     def _request_plot_save(self, file_path: str) -> None:
         """Request plotting directly to a file output path."""
-        self._request_plot_task(save_code_path=None, save_plot_path=file_path)
+        self._request_plot_task(
+            save_code_path=None,
+            save_plot_path=file_path,
+            save_data_path=None,
+            emit_image_override=False,
+        )
+
+    def _request_plot_data_save(self, file_path: str) -> None:
+        """Request saving the currently selected/collapsed field data."""
+        self._request_plot_task(
+            save_code_path=None,
+            save_plot_path=None,
+            save_data_path=file_path,
+            emit_image_override=False,
+        )
+
+    def _request_plot_save_all(
+        self,
+        save_code_path: str,
+        save_plot_path: str,
+        save_data_path: str,
+    ) -> None:
+        """Request saving plot image, data, and generated script in one action."""
+        self._request_plot_task(
+            save_code_path=save_code_path,
+            save_plot_path=save_plot_path,
+            save_data_path=save_data_path,
+            emit_image_override=False,
+        )
 
     def _request_plot_options(self) -> None:
         """Fetch plot-type specific option context from worker."""
@@ -375,8 +412,14 @@ class CFVMain(CFVCore):
 
         return selections, collapse_by_coord, plot_kind
 
-    def _request_plot_task(self, save_code_path: str | None, save_plot_path: str | None) -> None:
-        """Build and send a plot task with optional code-save and plot-save paths."""
+    def _request_plot_task(
+        self,
+        save_code_path: str | None,
+        save_plot_path: str | None,
+        save_data_path: str | None,
+        emit_image_override: bool | None = None,
+    ) -> None:
+        """Build and send a plot/data task with optional save targets."""
         context = self._build_plot_context()
         if context is None:
             logger.info("PLOT_DIAG gui_plot_skip reason=no_controls")
@@ -392,29 +435,50 @@ class CFVMain(CFVCore):
             )
             return
 
-        plot_options = dict(self.plot_options_by_kind.get(plot_kind, {}))
-        if plot_kind == "contour":
-            plot_options.setdefault("contour_title_fontsize", self._contour_title_fontsize())
-            plot_options.setdefault("page_title_fontsize", self._page_title_fontsize())
-            plot_options.setdefault("annotation_fontsize", self._annotation_fontsize())
-
-        if save_plot_path:
-            plot_options["filename"] = str(Path(save_plot_path).expanduser())
-        elif not plot_options:
-            plot_options = None
-
-        try:
-            cmd = plot_from_selection(selections, collapse_by_coord, plot_kind, plot_options)
-        except (ValueError, NotImplementedError) as exc:
-            self._show_status_message(f"Plot request unavailable: {exc}", is_error=True)
-            logger.warning("Plot template unavailable for kind=%s: %s", plot_kind, exc)
-            return
-
         save_target = None
         if save_code_path:
             save_target = str(Path(save_code_path).expanduser())
 
-        emit_image = save_plot_path is None
+        save_plot_target = str(Path(save_plot_path).expanduser()) if save_plot_path else None
+        save_data_target = str(Path(save_data_path).expanduser()) if save_data_path else None
+
+        if save_data_target and not save_plot_target:
+            if save_code_path:
+                self._show_status_message(
+                    "Save Code + Save Data requires a plot target. Use Save All.",
+                    is_error=True,
+                )
+                return
+            cmd = save_data_from_selection(selections, collapse_by_coord, save_data_target)
+        else:
+            plot_options = dict(self.plot_options_by_kind.get(plot_kind, {}))
+            if plot_kind == "contour":
+                plot_options.setdefault("contour_title_fontsize", self._contour_title_fontsize())
+                plot_options.setdefault("page_title_fontsize", self._page_title_fontsize())
+                plot_options.setdefault("annotation_fontsize", self._annotation_fontsize())
+
+            if save_plot_target:
+                plot_options["filename"] = save_plot_target
+            elif not plot_options:
+                plot_options = None
+
+            try:
+                cmd = plot_from_selection(
+                    selections,
+                    collapse_by_coord,
+                    plot_kind,
+                    plot_options,
+                    save_data_path=save_data_target,
+                )
+            except (ValueError, NotImplementedError) as exc:
+                self._show_status_message(f"Plot request unavailable: {exc}", is_error=True)
+                logger.warning("Plot template unavailable for kind=%s: %s", plot_kind, exc)
+                return
+
+        if emit_image_override is not None:
+            emit_image = emit_image_override
+        else:
+            emit_image = save_plot_target is None and save_data_target is None
 
         logger.debug(
             "Requesting plot update kind=%s coords=%d collapses=%d save_code=%s save_plot=%s",
@@ -422,18 +486,24 @@ class CFVMain(CFVCore):
             len(selections),
             len(collapse_by_coord),
             bool(save_target),
-            bool(save_plot_path),
+            bool(save_plot_target),
         )
         logger.info(
             "PLOT_DIAG gui_plot_request pid=%s worker_pid=%s kind=%s emit_image=%s",
             os.getpid(),
             self.worker.processId(),
             plot_kind,
-            save_plot_path is None,
+            emit_image,
         )
 
-        if save_plot_path:
+        if save_target and save_plot_target and save_data_target:
+            loading_message = "Saving plot, data, and code..."
+        elif save_plot_target and save_data_target:
+            loading_message = "Rendering and saving plot/data..."
+        elif save_plot_target:
             loading_message = "Rendering and saving plot..."
+        elif save_data_target:
+            loading_message = "Saving selected data..."
         elif save_code_path:
             loading_message = "Rendering plot and saving code..."
         else:

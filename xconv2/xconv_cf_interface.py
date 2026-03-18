@@ -20,6 +20,7 @@ __all__ = [
     "field_info",
     "coordinate_info",
     "get_data_for_plotting",
+    "save_selected_field_data",
     "annotation_text",
     "estimate_layout_padding",
     "apply_vertical_padding",
@@ -173,6 +174,11 @@ def get_data_for_plotting(
             pfld = pfld.collapse(instruction, weights=False)
 
     return pfld
+
+
+def save_selected_field_data(field: object, filename: str) -> None:
+    """Persist selected field data to disk using cf.write."""
+    cf.write(field, filename)
 
 
 def annotation_text(
@@ -462,12 +468,9 @@ def run_contour_plot(
     top_padding += page_margin_top
     bottom_padding += page_margin_bottom
 
-    # Force cf-plot into embedded mode for in-memory rendering. Without this,
-    # cfp.con() may implicitly call gclose() and trigger an external viewer.
-    if filename is None:
-        cfp.gopen(user_plot=1)
-    else:
-        cfp.gopen(file=filename)
+    # Force cf-plot into embedded mode for worker rendering. Using cf-plot's
+    # file mode can trigger an external viewer command on some platforms.
+    cfp.gopen(user_plot=1)
 
     _apply_levels()
 
@@ -496,7 +499,8 @@ def run_contour_plot(
         )
 
     if filename is not None:
-        cfp.gclose()
+        mycanvas.savefig(str(filename))
+        plt.close(mycanvas)
 
 def run_line_plot(
     pfld: object,

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from xconv2.cf_templates import contour_range_from_selection, plot_from_selection
+from xconv2.cf_templates import contour_range_from_selection, plot_from_selection, save_data_from_selection
 import xconv2.xconv_cf_interface as cf_interface
 from xconv2.xconv_cf_interface import auto_contour_title, get_data_for_plotting, run_contour_plot
 
@@ -77,17 +77,25 @@ class _FakeCFPlot:
 @dataclass
 class _FakeFigure:
     text_calls: list[tuple[tuple[object, ...], dict[str, object]]] = field(default_factory=list)
+    savefig_calls: list[str] = field(default_factory=list)
 
     def text(self, *args: object, **kwargs: object) -> None:
         self.text_calls.append((args, kwargs))
+
+    def savefig(self, filename: str) -> None:
+        self.savefig_calls.append(filename)
 
 
 @dataclass
 class _FakePlt:
     figure: _FakeFigure = field(default_factory=_FakeFigure)
+    close_calls: int = 0
 
     def gcf(self) -> _FakeFigure:
         return self.figure
+
+    def close(self, _fig: object) -> None:
+        self.close_calls += 1
 
 
 
@@ -112,6 +120,7 @@ def _run_generated(
         "cf": _FakeCF,
         "np": np,
         "get_data_for_plotting": get_data_for_plotting,
+        "save_selected_field_data": lambda _field, _path: None,
         "run_contour_plot": run_contour_plot,
         "auto_contour_title": auto_contour_title,
         "send_to_gui": lambda prefix, payload=None: messages.append((prefix, payload)),
@@ -182,12 +191,15 @@ def test_plot_from_selection_contour_explicit_levels_and_save_file() -> None:
 
     fld = _FakeField()
     cfp = _FakeCFPlot()
-    messages = _run_generated(code, fld, cfp)
+    fake_plt = _FakePlt()
+    messages = _run_generated(code, fld, cfp, plt_obj=fake_plt)
 
-    assert cfp.gopen_calls == [{"file": output_file}]
-    assert cfp.gclose_calls == 1
+    assert cfp.gopen_calls == [{"file": "cfplot.png", "user_plot": 1}]
+    assert cfp.gclose_calls == 0
     assert cfp.cscale_calls == [{}]
     assert cfp.con_calls
+    assert fake_plt.figure.savefig_calls == [output_file]
+    assert fake_plt.close_calls == 1
     assert ("STATUS:Saved plot to /tmp/mock-contour.png", None) in messages
 
 
@@ -246,3 +258,29 @@ def test_plot_from_selection_lineplot_generates_worker_call() -> None:
 
     assert "run_line_plot(" in code
     assert "lineplot_options" in code
+
+
+def test_plot_from_selection_includes_data_save_when_requested() -> None:
+    code = plot_from_selection(
+        selections={"time": ("1", "2")},
+        collapse_by_coord={},
+        plot_kind="lineplot",
+        plot_options={"mode": "default"},
+        save_data_path="/tmp/selection.nc",
+    )
+
+    assert "save_selected_field_data(pfld, save_data_path)" in code
+    assert "save_data_path = '/tmp/selection.nc'" in code
+
+
+def test_save_data_from_selection_builds_data_only_worker_code() -> None:
+    code = save_data_from_selection(
+        selections={"time": ("1", "2")},
+        collapse_by_coord={"time": "mean"},
+        save_data_path="/tmp/data-only.nc",
+    )
+
+    assert "pfld = get_data_for_plotting" in code
+    assert "save_selected_field_data(pfld, save_data_path)" in code
+    assert "run_line_plot(" not in code
+    assert "run_contour_plot(" not in code

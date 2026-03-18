@@ -56,6 +56,7 @@ def plot_from_selection(
     collapse_by_coord: dict[str, str],
     plot_kind: str,
     plot_options: dict[str, object] | None = None,
+    save_data_path: str | None = None,
 ) -> str:
     """Generate worker code for plotting based on GUI selections.
 
@@ -72,7 +73,21 @@ def plot_from_selection(
     elif plot_kind == "contour":
         plot_code = contour(options=plot_options)
 
-    return "\n".join([prep_code, plot_code])
+    data_save_code = _save_data_code(save_data_path) if save_data_path else ""
+    parts = [prep_code, plot_code]
+    if data_save_code:
+        parts.append(data_save_code)
+    return "\n".join(parts)
+
+
+def save_data_from_selection(
+    selections: dict[str, tuple[object, object]],
+    collapse_by_coord: dict[str, str],
+    save_data_path: str,
+) -> str:
+    """Generate worker code that saves selected data without rendering a plot."""
+    prep_code = _pfld_from_selection_code(selections, collapse_by_coord)
+    return "\n".join([prep_code, _save_data_code(save_data_path)])
 
 
 def contour_range_from_selection(
@@ -148,6 +163,18 @@ def lineplot(options: dict[str, object] | None) -> str:
             selection_spec=selection_spec,
             collapse_by_coord=collapse_by_coord,
         )
+        """
+    ).lstrip()
+    return payload_code
+
+
+def _save_data_code(save_data_path: str) -> str:
+    """Generate worker code that persists selected data via cf.write."""
+    payload_code = textwrap.dedent(
+        f"""
+        save_data_path = {save_data_path!r}
+        save_selected_field_data(pfld, save_data_path)
+        send_to_gui(f"STATUS:Saved data to {{save_data_path}}")  #omit4save
         """
     ).lstrip()
     return payload_code

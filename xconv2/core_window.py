@@ -1080,6 +1080,24 @@ class CFVCore(QMainWindow):
         """Hook for worker-backed implementations to save rendered plot output."""
         logger.debug("Requested plot save to: %s", file_path)
 
+    def _request_plot_data_save(self, file_path: str) -> None:
+        """Hook for worker-backed implementations to save selected field data."""
+        logger.debug("Requested data save to: %s", file_path)
+
+    def _request_plot_save_all(
+        self,
+        save_code_path: str,
+        save_plot_path: str,
+        save_data_path: str,
+    ) -> None:
+        """Hook for worker-backed implementations to save code, plot, and data."""
+        logger.debug(
+            "Requested save-all code=%s plot=%s data=%s",
+            save_code_path,
+            save_plot_path,
+            save_data_path,
+        )
+
     def _quit_application(self) -> None:
         """Quit the whole application, even when modal dialogs are open."""
         logger.info("Quit requested from UI")

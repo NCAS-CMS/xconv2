@@ -91,6 +91,11 @@ class CircularSpinner(QWidget):
 class PlotViewController:
     """Manage plot area widgets, pixmap rendering, and save actions."""
 
+    SAVE_MODE_PLOT = "plot"
+    SAVE_MODE_DATA = "data"
+    SAVE_MODE_CODE = "code"
+    SAVE_MODE_ALL = "all"
+
     def __init__(self, host: "CFVCore") -> None:
         self.host = host
 
@@ -164,19 +169,23 @@ class PlotViewController:
         self.host.options_button = QPushButton("Options")
         self.host.options_button.setEnabled(False)
         self.host.options_button.clicked.connect(self.on_options_button_clicked)
-        self.host.save_code_button = QPushButton("Save Code...")
-        self.host.save_code_button.setEnabled(False)
-        self.host.save_code_button.clicked.connect(self.on_save_code_button_clicked)
-        self.host.save_plot_button = QPushButton("Save Plot...")
-        self.host.save_plot_button.setEnabled(False)
-        self.host.save_plot_button.clicked.connect(self.on_save_plot_button_clicked)
+        self.host.save_target_combo = QComboBox()
+        self.host.save_target_combo.setMinimumWidth(110)
+        self.host.save_target_combo.addItem("Plot", self.SAVE_MODE_PLOT)
+        self.host.save_target_combo.addItem("Data", self.SAVE_MODE_DATA)
+        self.host.save_target_combo.addItem("Code", self.SAVE_MODE_CODE)
+        self.host.save_target_combo.addItem("All", self.SAVE_MODE_ALL)
+        self.host.save_target_combo.setEnabled(False)
+        self.host.save_go_button = QPushButton("Go")
+        self.host.save_go_button.setEnabled(False)
+        self.host.save_go_button.clicked.connect(self.on_save_go_clicked)
 
         summary_row.addWidget(self.host.plot_summary_label, 1)
         summary_row.addWidget(self.host.plot_type_combo)
         summary_row.addWidget(self.host.plot_button)
         summary_row.addWidget(self.host.options_button)
-        summary_row.addWidget(self.host.save_code_button)
-        summary_row.addWidget(self.host.save_plot_button)
+        summary_row.addWidget(self.host.save_target_combo)
+        summary_row.addWidget(self.host.save_go_button)
 
         layout.addWidget(self.host.plot_info_output)
         layout.addWidget(plot_stack_container, 1)
@@ -434,9 +443,24 @@ class PlotViewController:
         self.host.plot_frame.setPixmap(scaled)
         self.host.plot_frame.setText("")
 
+    def on_save_go_clicked(self) -> None:
+        """Run save action for the currently selected save target mode."""
+        if not getattr(self.host, "save_go_button", None) or not self.host.save_go_button.isEnabled():
+            return
+
+        mode = self.host.save_target_combo.currentData()
+        if mode == self.SAVE_MODE_CODE:
+            self.on_save_code_button_clicked()
+        elif mode == self.SAVE_MODE_DATA:
+            self.on_save_data_button_clicked()
+        elif mode == self.SAVE_MODE_ALL:
+            self.on_save_all_button_clicked()
+        else:
+            self.on_save_plot_button_clicked()
+
     def on_save_code_button_clicked(self) -> None:
         """Prompt for destination file and request worker-side plot code save."""
-        if not getattr(self.host, "save_code_button", None) or not self.host.save_code_button.isEnabled():
+        if not getattr(self.host, "save_go_button", None) or not self.host.save_go_button.isEnabled():
             return
 
         default_path = self.host._default_save_path("last_save_code_dir", "cfview_plot_code.py")
@@ -455,9 +479,31 @@ class PlotViewController:
         self.host._remember_last_save_dir("last_save_code_dir", file_path)
         self.host._request_plot_code_save(file_path)
 
+    def on_save_data_button_clicked(self) -> None:
+        """Prompt for destination file and request worker-side selected-data save."""
+        if not getattr(self.host, "save_go_button", None) or not self.host.save_go_button.isEnabled():
+            return
+
+        default_stem = self.host._default_plot_filename()
+        default_path = self.host._default_save_path("last_save_data_dir", f"{default_stem}.nc")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self.host,
+            "Save Plot Data",
+            default_path,
+            "NetCDF files (*.nc);;All files (*)",
+        )
+        if not file_path:
+            return
+
+        if not Path(file_path).suffix:
+            file_path += ".nc"
+
+        self.host._remember_last_save_dir("last_save_data_dir", file_path)
+        self.host._request_plot_data_save(file_path)
+
     def on_save_plot_button_clicked(self) -> None:
         """Prompt for destination image file and request worker-side plot save."""
-        if not getattr(self.host, "save_plot_button", None) or not self.host.save_plot_button.isEnabled():
+        if not getattr(self.host, "save_go_button", None) or not self.host.save_go_button.isEnabled():
             return
 
         format_filters = {
@@ -497,3 +543,33 @@ class PlotViewController:
 
         self.host._remember_last_save_dir("last_save_plot_dir", file_path)
         self.host._request_plot_save(file_path)
+
+    def on_save_all_button_clicked(self) -> None:
+        """Prompt for a stem path and save plot/data/code outputs in one action."""
+        if not getattr(self.host, "save_go_button", None) or not self.host.save_go_button.isEnabled():
+            return
+
+        default_stem = self.host._default_plot_filename()
+        default_path = self.host._default_save_path("last_save_plot_dir", default_stem)
+        stem_path, _ = QFileDialog.getSaveFileName(
+            self.host,
+            "Save Plot/Data/Code (Choose stem)",
+            default_path,
+            "All files (*)",
+        )
+        if not stem_path:
+            return
+
+        stem = Path(stem_path).expanduser()
+        if stem.suffix.lower() in {".png", ".svg", ".pdf", ".py", ".nc"}:
+            stem = stem.with_suffix("")
+
+        plot_ext = self.host._default_plot_output_format()
+        save_plot_path = str(stem.with_suffix(f".{plot_ext}"))
+        save_data_path = str(stem.with_suffix(".nc"))
+        save_code_path = str(stem.with_suffix(".py"))
+
+        self.host._remember_last_save_dir("last_save_plot_dir", save_plot_path)
+        self.host._remember_last_save_dir("last_save_data_dir", save_data_path)
+        self.host._remember_last_save_dir("last_save_code_dir", save_code_path)
+        self.host._request_plot_save_all(save_code_path, save_plot_path, save_data_path)

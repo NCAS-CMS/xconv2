@@ -38,6 +38,7 @@ class SettingsStore:
             "default_plot_filename": "xconv_{timestamp}",
             "default_plot_format": "png",
             "last_save_code_dir": str(Path.home()),
+            "last_save_data_dir": str(Path.home()),
             "last_save_plot_dir": str(Path.home()),
         }
 
@@ -89,7 +90,7 @@ class SettingsStore:
             if migrated:
                 settings["recent_files"] = migrated
 
-        for key in ("last_save_code_dir", "last_save_plot_dir"):
+        for key in ("last_save_code_dir", "last_save_data_dir", "last_save_plot_dir"):
             value = settings.get(key)
             if not isinstance(value, str) or not value.strip():
                 settings[key] = str(Path.home())

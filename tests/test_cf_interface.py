@@ -10,6 +10,7 @@ from xconv2.xconv_cf_interface import (
     get_data_for_plotting,
     run_contour_plot,
     run_line_plot,
+    save_selected_field_data,
 )
 
 import numpy as np
@@ -173,6 +174,7 @@ class _FakeFigure:
     def __init__(self) -> None:
         self.text_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
         self.suptitle_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+        self.savefig_calls: list[str] = []
 
     def text(self, *args: object, **kwargs: object) -> None:
         self.text_calls.append((args, kwargs))
@@ -180,13 +182,20 @@ class _FakeFigure:
     def suptitle(self, *args: object, **kwargs: object) -> None:
         self.suptitle_calls.append((args, kwargs))
 
+    def savefig(self, filename: str) -> None:
+        self.savefig_calls.append(filename)
+
 
 class _FakePlt:
     def __init__(self) -> None:
         self.figure = _FakeFigure()
+        self.close_calls = 0
 
     def gcf(self) -> _FakeFigure:
         return self.figure
+
+    def close(self, _fig: object) -> None:
+        self.close_calls += 1
 
 
 def test_run_contour_plot_applies_levels_annotations_and_save(
@@ -211,11 +220,13 @@ def test_run_contour_plot_applies_levels_annotations_and_save(
     )
 
     assert cfp.cscale_calls == [{"scale": "magma"}]
-    assert cfp.gopen_calls == [{"file": "/tmp/mock.png"}]
+    assert cfp.gopen_calls == [{"file": "cfplot.png", "user_plot": 1}]
     assert cfp.levs_calls == [{"manual": [-1.0, 0.0, 1.0]}]
     assert cfp.setvars_calls == [{"title_fontsize": 10.5}]
     assert cfp.con_calls
-    assert cfp.gclose_calls == 1
+    assert cfp.gclose_calls == 0
+    assert plt_obj.figure.savefig_calls == ["/tmp/mock.png"]
+    assert plt_obj.close_calls == 1
     assert plt_obj.figure.text_calls
     assert plt_obj.figure.text_calls[-1][1]["fontsize"] == 8.0
 
@@ -349,4 +360,18 @@ def test_run_line_plot_uses_canonical_axes_and_wraps_file_output() -> None:
     assert captured["pfld"] is field_eg
     assert captured["options"] == {"filename": "/tmp/line.png", "title": "line"}
     assert captured["rendered"] is True
+
+
+def test_save_selected_field_data_uses_cf_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[object, str]] = []
+    monkeypatch.setattr(
+        cf_interface.cf,
+        "write",
+        lambda field, filename: calls.append((field, filename)),
+    )
+
+    field_obj = object()
+    save_selected_field_data(field_obj, "/tmp/out.nc")
+
+    assert calls == [(field_obj, "/tmp/out.nc")]
  
