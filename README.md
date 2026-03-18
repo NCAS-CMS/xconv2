@@ -18,7 +18,7 @@ xconv2 provides (or will provide) a graphical interface to local and remote weat
 ## Installation
 
 We intend to release this as a standalone executable for linux and macos, but for the moment you should use a Python 3.12 (or later) environment with
-udunits2 installed, then you can pip install from the source using one of these:
+udunits2 and cartopy installed (from conda-forge), then you can pip install from the source using one of these:
 
 `pip install "git+https://github.com/ncas-cms/xconv2.git"`
 `pip install "git+ssh://github.com/ncas-cms/xconv2.git"`
