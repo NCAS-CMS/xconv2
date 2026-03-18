@@ -33,10 +33,16 @@ class SelectionController:
         """Enable or disable save mode selector and save action button."""
         save_combo = getattr(self.host, "save_target_combo", None)
         save_button = getattr(self.host, "save_go_button", None)
+        legacy_save_code_button = getattr(self.host, "save_code_button", None)
+        legacy_save_plot_button = getattr(self.host, "save_plot_button", None)
         if save_combo is not None:
             save_combo.setEnabled(enabled)
         if save_button is not None:
             save_button.setEnabled(enabled)
+        if legacy_save_code_button is not None:
+            legacy_save_code_button.setEnabled(enabled)
+        if legacy_save_plot_button is not None:
+            legacy_save_plot_button.setEnabled(enabled)
 
     def reset_all_sliders(self) -> None:
         """Reset all slider ranges to full extent and refresh summary state."""
@@ -403,14 +409,14 @@ class SelectionController:
                 f"{dims_text} \nPlot Type: {selected_kind.title() if selected_kind else 'N/A'}"
             )
             self.host.plot_button.setEnabled(True)
-            self.host.options_button.setEnabled(False)
+            self.host.options_button.setEnabled(selected_kind in {"contour", "lineplot"})
             self._set_save_controls_enabled(True)
         elif varying_dims == 2:
             self.host.plot_summary_label.setText(
                 f"{dims_text} \nPlot Type: {selected_kind.title() if selected_kind else 'N/A'}"
             )
             self.host.plot_button.setEnabled(True)
-            self.host.options_button.setEnabled(selected_kind == "contour")
+            self.host.options_button.setEnabled(selected_kind in {"contour", "lineplot"})
             self._set_save_controls_enabled(True)
         else:
             self.host.plot_summary_label.setText(
