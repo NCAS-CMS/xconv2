@@ -40,7 +40,7 @@
     "standard_name": "specific_humidity",
     "units": "1",
     "cell_methods": "area: mean",
-    "coordinates": "time",
+    "coordinates": "time"
   },
   "dimension_names": [
     "lat",
