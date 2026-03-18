@@ -391,27 +391,27 @@ class SelectionController:
         self.host.plot_view_controller.set_plot_type_options(available_plot_kinds, selected_kind)
 
         if varying_dims == 0:
-            self.host.plot_summary_label.setText(f"{dims_text} | Total collapse, plot not possible")
+            self.host.plot_summary_label.setText(f"{dims_text} \nTotal collapse, plot not possible")
             self.host.plot_button.setEnabled(False)
             self.host.options_button.setEnabled(False)
             self._set_save_controls_enabled(False)
         elif varying_dims == 1:
             self.host.plot_summary_label.setText(
-                f"{dims_text} | Plot Type: {selected_kind.title() if selected_kind else 'N/A'}"
+                f"{dims_text} \nPlot Type: {selected_kind.title() if selected_kind else 'N/A'}"
             )
             self.host.plot_button.setEnabled(True)
             self.host.options_button.setEnabled(False)
             self._set_save_controls_enabled(True)
         elif varying_dims == 2:
             self.host.plot_summary_label.setText(
-                f"{dims_text} | Plot Type: {selected_kind.title() if selected_kind else 'N/A'}"
+                f"{dims_text} \nPlot Type: {selected_kind.title() if selected_kind else 'N/A'}"
             )
             self.host.plot_button.setEnabled(True)
             self.host.options_button.setEnabled(selected_kind == "contour")
             self._set_save_controls_enabled(True)
         else:
             self.host.plot_summary_label.setText(
-                f"{dims_text} | Need to reduce to 1D or 2D before plotting"
+                f"{dims_text} \nNeed to reduce to 1D or 2D before plotting"
             )
             self.host.plot_button.setEnabled(False)
             self.host.options_button.setEnabled(False)

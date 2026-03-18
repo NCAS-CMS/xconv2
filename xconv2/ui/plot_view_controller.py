@@ -10,6 +10,7 @@ from PySide6.QtGui import QColor, QFontDatabase, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QFrame,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -176,16 +177,53 @@ class PlotViewController:
         self.host.save_target_combo.addItem("Code", self.SAVE_MODE_CODE)
         self.host.save_target_combo.addItem("All", self.SAVE_MODE_ALL)
         self.host.save_target_combo.setEnabled(False)
-        self.host.save_go_button = QPushButton("Go")
+        self.host.save_go_button = QPushButton("Export")
         self.host.save_go_button.setEnabled(False)
         self.host.save_go_button.clicked.connect(self.on_save_go_clicked)
 
-        summary_row.addWidget(self.host.plot_summary_label, 1)
-        summary_row.addWidget(self.host.plot_type_combo)
-        summary_row.addWidget(self.host.plot_button)
-        summary_row.addWidget(self.host.options_button)
-        summary_row.addWidget(self.host.save_target_combo)
-        summary_row.addWidget(self.host.save_go_button)
+        combo_height = max(
+            self.host.plot_type_combo.sizeHint().height(),
+            self.host.save_target_combo.sizeHint().height(),
+        )
+        for button in (self.host.plot_button, self.host.options_button, self.host.save_go_button):
+            button.setMinimumHeight(combo_height)
+
+        plot_controls_group = QFrame()
+        plot_controls_group.setObjectName("plot_controls_group")
+        plot_controls_group.setFrameShape(QFrame.StyledPanel)
+        plot_controls_group.setFrameShadow(QFrame.Plain)
+        plot_controls_group.setStyleSheet(
+            "QFrame#plot_controls_group {"
+            " border: 1px solid palette(mid);"
+            " border-radius: 4px;"
+            "}"
+        )
+        plot_controls_layout = QHBoxLayout(plot_controls_group)
+        plot_controls_layout.setContentsMargins(6, 2, 6, 2)
+        plot_controls_layout.setSpacing(6)
+        plot_controls_layout.addWidget(self.host.plot_type_combo)
+        plot_controls_layout.addWidget(self.host.plot_button)
+        plot_controls_layout.addWidget(self.host.options_button)
+
+        export_controls_group = QFrame()
+        export_controls_group.setObjectName("export_controls_group")
+        export_controls_group.setFrameShape(QFrame.StyledPanel)
+        export_controls_group.setFrameShadow(QFrame.Plain)
+        export_controls_group.setStyleSheet(
+            "QFrame#export_controls_group {"
+            " border: 1px solid palette(mid);"
+            " border-radius: 4px;"
+            "}"
+        )
+        export_controls_layout = QHBoxLayout(export_controls_group)
+        export_controls_layout.setContentsMargins(6, 2, 6, 2)
+        export_controls_layout.setSpacing(6)
+        export_controls_layout.addWidget(self.host.save_go_button)
+        export_controls_layout.addWidget(self.host.save_target_combo)
+
+        summary_row.addWidget(self.host.plot_summary_label, 1, Qt.AlignVCenter)
+        summary_row.addWidget(plot_controls_group, 0, Qt.AlignVCenter)
+        summary_row.addWidget(export_controls_group, 0, Qt.AlignVCenter)
 
         layout.addWidget(self.host.plot_info_output)
         layout.addWidget(plot_stack_container, 1)
@@ -283,16 +321,13 @@ class PlotViewController:
 
         self.host._plot_pixmap_original = pixmap
         self.set_plot_loading(False)
-        self.fit_window_to_plot_aspect()
-        if not getattr(self.host, "_selection_info_visible", True):
-            # If details were hidden before the first plot existed, apply width
-            # adjustment now that we have a pixmap/aspect to target.
-            self.adjust_window_width_for_info_panel(False)
         self.refresh_plot_pixmap()
+        QTimer.singleShot(0, self.fit_window_to_plot_aspect)
 
     def adjust_window_width_for_info_panel(self, info_panel_visible: bool) -> None:
-        """Resize window width after info-panel toggles to reduce plot letterboxing."""
-        QTimer.singleShot(0, lambda: self._apply_window_width_for_info_panel(info_panel_visible))
+        """Re-fit window geometry to current plot aspect after layout toggles."""
+        _ = info_panel_visible
+        QTimer.singleShot(0, self.fit_window_to_plot_aspect)
 
     @staticmethod
     def _compute_target_window_width(
@@ -396,35 +431,63 @@ class PlotViewController:
         self.refresh_plot_pixmap()
 
     def fit_window_to_plot_aspect(self) -> None:
-        """Nudge window height to match plot aspect ratio without exceeding screen bounds."""
+        """Resize window to keep plot viewport aligned with the image aspect ratio."""
         if self.host._plot_pixmap_original is None:
             return
 
-        plot_height = self.host._plot_pixmap_original.height()
-        plot_width = self.host._plot_pixmap_original.width()
-        if plot_height <= 0 or plot_width <= 0:
+        pixmap_height = self.host._plot_pixmap_original.height()
+        pixmap_width = self.host._plot_pixmap_original.width()
+        if pixmap_height <= 0 or pixmap_width <= 0:
             return
 
-        aspect_ratio = plot_width / plot_height
         current_plot_width = max(self.host.plot_frame.width(), 1)
-        desired_plot_height = max(1, int(current_plot_width / aspect_ratio))
         current_plot_height = max(self.host.plot_frame.height(), 1)
+        aspect_ratio = pixmap_width / pixmap_height
+        desired_plot_width = max(1, int(round(current_plot_height * aspect_ratio)))
+        desired_plot_height = max(1, int(round(current_plot_width / aspect_ratio)))
+
+        width_delta = desired_plot_width - current_plot_width
         height_delta = desired_plot_height - current_plot_height
 
-        if abs(height_delta) < 12:
+        if abs(width_delta) < 10 and abs(height_delta) < 10:
             return
+
+        chrome_width = max(0, self.host.width() - current_plot_width)
+        chrome_height = max(0, self.host.height() - current_plot_height)
+        target_width = self.host.width() + width_delta
+        target_height = self.host.height() + height_delta
 
         screen = self.host.screen() or QApplication.primaryScreen()
         if screen is None:
             return
 
+        available_width = screen.availableGeometry().width()
         available_height = screen.availableGeometry().height()
+        min_width = max(self.host.minimumWidth(), 640)
         min_height = max(self.host.minimumHeight(), 420)
+        max_width = max(min_width, int(available_width * 0.95))
         max_height = max(min_height, int(available_height * 0.9))
-        target_height = max(min_height, min(self.host.height() + height_delta, max_height))
+        target_width = max(min_width, min(target_width, max_width))
+        target_height = max(min_height, min(target_height, max_height))
 
-        if target_height != self.host.height():
-            self.host.resize(self.host.width(), target_height)
+        # If one axis was clamped by screen bounds, recompute the other axis
+        # from the available plot viewport so aspect fitting remains consistent.
+        if target_width != self.host.width() or target_height != self.host.height():
+            fitted_plot_width = max(1, target_width - chrome_width)
+            fitted_plot_height = max(1, target_height - chrome_height)
+            fitted_ratio = fitted_plot_width / fitted_plot_height
+
+            if fitted_ratio > aspect_ratio:
+                fitted_plot_width = max(1, int(round(fitted_plot_height * aspect_ratio)))
+                target_width = max(min_width, min(chrome_width + fitted_plot_width, max_width))
+            else:
+                fitted_plot_height = max(1, int(round(fitted_plot_width / aspect_ratio)))
+                target_height = max(min_height, min(chrome_height + fitted_plot_height, max_height))
+
+        if target_width != self.host.width() or target_height != self.host.height():
+            self.host.resize(target_width, target_height)
+
+        self.refresh_plot_pixmap()
 
     def refresh_plot_pixmap(self) -> None:
         """Scale current plot pixmap to fit the visible plot frame."""
