@@ -148,6 +148,8 @@ def lineplot(options: dict[str, object] | None) -> str:
             selection_spec=selection_spec,
             collapse_by_coord=collapse_by_coord,
         )
+        if lineplot_options and 'filename' in lineplot_options:  #omit4save
+            send_to_gui(f"STATUS:Saved plot to {{lineplot_options['filename']}}")  #omit4save
         """
     ).lstrip()
     return payload_code

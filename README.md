@@ -17,6 +17,8 @@ xconv2 provides (or will provide) a graphical interface to local and remote weat
 
 ## Installation
 
+We intend to release this as a standalone executable for linux and macos, but for the moment you should use a Python 3.12 (or later) environment with
+udunits2 and cartopy installed (from conda-forge), then you can pip install from the source using one of these:
 
 #### Alpha
 
@@ -30,6 +32,11 @@ pip install xconv2
 ```
 
 and then you should have `xconv2` available on your command line in that environment.  You could of course pip install into your own environment, but you will need to ensure it has cartopy and udunits2 in it (both via conda or mamba).
+
+### Conda Environments
+
+- `environment.yml`: base development/runtime environment (no Docker test dependencies).
+- `environment-integration.yml`: optional integration-test environment (includes Python `docker` and `minio` packages for Docker-backed MinIO tests).
 
 ## Documentation
 
@@ -46,6 +53,12 @@ limited to the following:
 - `docs/uml/alpha_core_window.puml`
 - `docs/uml/core_window_gui_worker_signals.puml`
 - `docs/uml/core_window_options_sequence.puml`
+- `docs/uml/remote_worker_warmup_sequence.puml`
+
+#### Architecture Notes
+
+- `docs/architecture/core_window_refactor.md`
+- `docs/architecture/remote_navigation_and_worker_warmup.md`
 
 ## License
 

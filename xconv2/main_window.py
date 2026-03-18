@@ -9,14 +9,20 @@ This module layers backend interaction onto `CFVCore`:
 from __future__ import annotations
 
 import base64
+from collections import deque
+import json
 import logging
 import os
 import pickle
+import socket
+import time
+import uuid
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
-from PySide6.QtCore import QProcess
+from PySide6.QtCore import QEventLoop, QProcess
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QListWidgetItem
+from PySide6.QtWidgets import QApplication, QDialog, QInputDialog, QLineEdit, QListWidgetItem, QMessageBox
 
 from .cf_templates import (
     contour_range_from_selection,
@@ -25,6 +31,16 @@ from .cf_templates import (
     plot_from_selection,
 )
 from .core_window import CFVCore
+from .ui.dialogs import OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog
+from .ui.remote_file_navigator import (
+    RemoteEntry,
+    RemoteFileNavigatorDialog,
+    RemoteLoginLogDialog,
+    _XconvHostKeyPolicy,
+    build_remote_filesystem_spec,
+    remote_descriptor_hash,
+    spec_to_descriptor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +53,17 @@ class CFVMain(CFVCore):
         self._plot_request_in_flight = False
         self._plot_request_expects_image = False
         self._suppress_stale_error_status = False
+        self._remote_session_id: str | None = None
+        self._remote_descriptor_hash: str | None = None
+        self._remote_descriptor: dict[str, object] | None = None
+        self._pending_worker_task_starts: deque[float] = deque()
+        self._pending_prepare_loop: QEventLoop | None = None
+        self._pending_prepare_loop_ok: bool = False
+        self._pending_prepare_failure_message: str = ""
+        self._pending_prepare_log_dialog: RemoteLoginLogDialog | None = None
+        self._pending_list_loop: QEventLoop | None = None
+        self._pending_list_result: dict | None = None
+        self._ssh_session_passwords: dict[str, str] = {}
 
         self.worker = QProcess()
         self.worker.readyReadStandardOutput.connect(self.handle_worker_output)
@@ -80,9 +107,71 @@ class CFVMain(CFVCore):
 
             logger.debug("Worker stdout line: %s", line)
 
-            if line.startswith("STATUS:"):
+            if line.startswith("REMOTE_STATUS:"):
+                raw_payload = line.split(":", 1)[1]
+                payload = pickle.loads(base64.b64decode(raw_payload))
+                if not isinstance(payload, dict):
+                    logger.warning("Unexpected REMOTE_STATUS payload type: %s", type(payload).__name__)
+                    continue
+
+                phase = str(payload.get("phase", ""))
+                message = str(payload.get("message") or f"Remote worker phase: {phase}")
+                is_error = phase == "failed"
+                self._show_status_message(message, is_error=is_error)
+
+                log_dialog = getattr(self, "_pending_prepare_log_dialog", None)
+                if log_dialog is not None:
+                    log_dialog.append_line(message)
+                    if phase == "failed":
+                        log_dialog.mark_failed("")
+                        self._pending_prepare_failure_message = message
+
+                if phase in ("ready", "failed"):
+                    loop = getattr(self, "_pending_prepare_loop", None)
+                    if loop is not None:
+                        self._pending_prepare_loop_ok = phase == "ready"
+                        self._pending_prepare_loop = None
+                        loop.quit()
+
+            elif line.startswith("REMOTE_LIST_RESULT:"):
+                raw_payload = line.split(":", 1)[1]
+                result = pickle.loads(base64.b64decode(raw_payload))
+                if isinstance(result, dict):
+                    self._pending_list_result = result
+                    loop = getattr(self, "_pending_list_loop", None)
+                    if loop is not None:
+                        self._pending_list_loop = None
+                        loop.quit()
+                else:
+                    logger.warning("Unexpected REMOTE_LIST_RESULT payload type: %s", type(result).__name__)
+
+            elif line.startswith("REMOTE_OPEN_RESULT:"):
+                raw_payload = line.split(":", 1)[1]
+                payload = pickle.loads(base64.b64decode(raw_payload))
+                if not isinstance(payload, dict):
+                    logger.warning("Unexpected REMOTE_OPEN_RESULT payload type: %s", type(payload).__name__)
+                    continue
+
+                if payload.get("ok"):
+                    uri = str(payload.get("uri", ""))
+                    if uri:
+                        self._set_window_title_for_file(uri)
+                        self._show_status_message(f"Loaded remote file: {uri}")
+                else:
+                    error = str(payload.get("error") or "Remote open failed")
+                    self._show_status_message(error, is_error=True)
+
+            elif line.startswith("STATUS:"):
                 status_text = line.split(":", 1)[1]
+                display_status_text = status_text
                 is_error_status = status_text.startswith("Error -")
+
+                if status_text == "Task Complete":
+                    elapsed = CFVMain._complete_pending_worker_task(self, consume=True)
+                    if elapsed is not None:
+                        display_status_text = f"Task Complete ({elapsed:.2f}s)"
+                elif is_error_status:
+                    CFVMain._complete_pending_worker_task(self, consume=True)
 
                 # Ignore delayed worker errors from a previous task right after field reselection.
                 if self._suppress_stale_error_status and is_error_status and not self._plot_request_in_flight:
@@ -90,7 +179,7 @@ class CFVMain(CFVCore):
                     continue
 
                 self._show_status_message(
-                    status_text,
+                    display_status_text,
                     is_error=is_error_status,
                 )
 
@@ -117,6 +206,14 @@ class CFVMain(CFVCore):
                 raw_payload = line.split(":", 1)[1]
                 metadata = pickle.loads(base64.b64decode(raw_payload))
                 if isinstance(metadata, list):
+                    if not all(isinstance(row, dict) for row in metadata):
+                        logger.warning(
+                            "Malformed METADATA payload: expected list of dicts, got mixed types"
+                        )
+                        self._show_status_message(
+                            "Received malformed field metadata from worker.", is_error=True
+                        )
+                        continue
                     logger.info("Received metadata for %d fields", len(metadata))
                     self.populate_field_list(metadata)
                 elif isinstance(metadata, dict):
@@ -229,6 +326,9 @@ class CFVMain(CFVCore):
 
     def _load_selected_file(self, file_path: str) -> None:
         """Load selected file in worker and publish field metadata."""
+        release_remote = getattr(self, "_release_remote_session_if_active", None)
+        if callable(release_remote):
+            release_remote()
         self._show_status_message(f"Loading file: {file_path}")
         logger.info("Loading file in worker: %s", file_path)
 
@@ -240,6 +340,901 @@ class CFVMain(CFVCore):
             + "send_to_gui('METADATA', fields)"
         )
         self._send_worker_task(code)
+
+    def _load_remote_selected_file(self, uri: str, remote_path: str) -> None:
+        """Load a selected remote file through the worker remote session pool."""
+        if not self._remote_session_id or not self._remote_descriptor_hash or not self._remote_descriptor:
+            self._show_status_message("Remote worker session is not initialized.", is_error=True)
+            return
+
+        self._show_status_message(f"Loading remote file: {uri}")
+        self._send_worker_control_task(
+            "REMOTE_OPEN",
+            {
+                "session_id": self._remote_session_id,
+                "descriptor_hash": self._remote_descriptor_hash,
+                "descriptor": self._remote_descriptor,
+                "uri": uri,
+                "path": remote_path,
+            },
+        )
+
+    def _release_remote_session_if_active(self) -> None:
+        """Release any worker-side warm remote session currently tracked by the UI."""
+        if not self._remote_session_id or not self._remote_descriptor_hash:
+            return
+
+        self._send_worker_control_task(
+            "REMOTE_RELEASE",
+            {
+                "session_id": self._remote_session_id,
+                "descriptor_hash": self._remote_descriptor_hash,
+            },
+        )
+        self._remote_session_id = None
+        self._remote_descriptor_hash = None
+        self._remote_descriptor = None
+
+    def _open_remote_from_config(self, config: dict[str, object]) -> None:
+        """Perform remote login once in the worker, then navigate via IPC using a nested QEventLoop."""
+        if not isinstance(config, dict):
+            return
+
+        prepared_config = self._prepare_ssh_config_for_auth(config)
+        if prepared_config is None:
+            return
+        config = prepared_config
+
+        if str(config.get("protocol", "")).upper() in {"HTTP", "HTTPS"}:
+            http_locations = self._settings.get("remote_https_locations")
+            if not isinstance(http_locations, dict):
+                http_locations = self._settings.get("remote_http_locations")
+            if isinstance(http_locations, dict):
+                updated = dict(http_locations)
+            else:
+                updated = {}
+
+            remote = config.get("remote")
+            if isinstance(remote, dict):
+                alias = str(remote.get("alias", "")).strip()
+                details = remote.get("details")
+                if alias and isinstance(details, dict):
+                    url = details.get("url") or details.get("base_url")
+                    if isinstance(url, str) and url.strip():
+                        updated[alias] = {"url": url.strip()}
+
+            self._settings["remote_https_locations"] = updated
+
+        try:
+            spec = build_remote_filesystem_spec(config)
+        except Exception as exc:
+            QMessageBox.critical(self, "Remote configuration invalid", str(exc))
+            return
+
+        self._release_remote_session_if_active()
+
+        descriptor = spec_to_descriptor(spec, cache=config.get("cache") if isinstance(config, dict) else None)
+        session_id = uuid.uuid4().hex
+        descriptor_hash = remote_descriptor_hash(descriptor)
+        self._remote_session_id = session_id
+        self._remote_descriptor_hash = descriptor_hash
+        self._remote_descriptor = descriptor
+
+        # Show login progress dialog and spin a QEventLoop until the worker signals ready/failed.
+        log_dialog = RemoteLoginLogDialog(self, spec.display_name)
+        self._pending_prepare_log_dialog = log_dialog
+        self._pending_prepare_loop = QEventLoop()
+        self._pending_prepare_loop_ok = False
+        log_dialog.show()
+        QApplication.processEvents()
+
+        self._send_worker_control_task(
+            "REMOTE_PREPARE",
+            {
+                "session_id": session_id,
+                "descriptor_hash": descriptor_hash,
+                "descriptor": descriptor,
+            },
+        )
+        self._pending_prepare_failure_message = ""
+        self._pending_prepare_loop.exec()
+        self._pending_prepare_log_dialog = None
+
+        if not self._pending_prepare_loop_ok:
+            # mark_failed was already called in handle_worker_output; show the dialog modally.
+            log_dialog.exec()
+            failure_message = self._pending_prepare_failure_message
+            if self._maybe_retry_ssh_authentication(config, failure_message):
+                self._release_remote_session_if_active()
+                self._open_remote_from_config(config)
+                return
+            self._release_remote_session_if_active()
+            return
+
+        log_dialog.close()
+
+        # Open the navigator backed entirely by worker-side directory listing via IPC.
+        list_callback = self._make_worker_list_callback()
+        dialog = RemoteFileNavigatorDialog(self, config, spec=spec, list_callback=list_callback)
+        if dialog.exec() != QDialog.Accepted:
+            self._release_remote_session_if_active()
+            return
+
+        selected_uri = dialog.selected_uri()
+        selected_path = dialog.selected_path()
+        if not selected_uri or not selected_path:
+            self._show_status_message("Remote file selection was incomplete.", is_error=True)
+            self._release_remote_session_if_active()
+            return
+
+        remote = config.get("remote") if isinstance(config, dict) else None
+        host_alias = str(remote.get("alias", "")).strip() if isinstance(remote, dict) else ""
+        self._set_window_title_for_file(selected_uri)
+        self._show_status_message(f"Selected remote file: {selected_uri}")
+        if host_alias:
+            self._record_recent_uri(selected_uri, host_alias)
+        else:
+            self._record_recent_file(selected_uri)
+        self._load_remote_selected_file(selected_uri, selected_path)
+
+    def _open_remote_uri_direct(
+        self,
+        *,
+        uri: str,
+        remote_path: str,
+        config: dict[str, object],
+        host_alias: str,
+    ) -> None:
+        """Open a specific remote URI directly without launching the navigator dialog."""
+        if not isinstance(config, dict):
+            return
+
+        prepared_config = self._prepare_ssh_config_for_auth(config)
+        if prepared_config is None:
+            return
+        config = prepared_config
+
+        if str(config.get("protocol", "")).upper() in {"HTTP", "HTTPS"} and host_alias:
+            details = {}
+            remote = config.get("remote")
+            if isinstance(remote, dict):
+                raw_details = remote.get("details")
+                if isinstance(raw_details, dict):
+                    details = dict(raw_details)
+                if not details and isinstance(remote.get("url"), str):
+                    details = {"url": str(remote.get("url"))}
+
+            https_locations = self._settings.get("remote_https_locations")
+            merged = dict(https_locations) if isinstance(https_locations, dict) else {}
+            if details:
+                merged[host_alias] = details
+            self._settings["remote_https_locations"] = merged
+
+        try:
+            spec = build_remote_filesystem_spec(config)
+        except Exception as exc:
+            QMessageBox.critical(self, "Remote configuration invalid", str(exc))
+            return
+
+        self._release_remote_session_if_active()
+        descriptor = spec_to_descriptor(spec, cache=config.get("cache") if isinstance(config, dict) else None)
+        session_id = uuid.uuid4().hex
+        descriptor_hash = remote_descriptor_hash(descriptor)
+        self._remote_session_id = session_id
+        self._remote_descriptor_hash = descriptor_hash
+        self._remote_descriptor = descriptor
+
+        log_dialog = RemoteLoginLogDialog(self, spec.display_name)
+        self._pending_prepare_log_dialog = log_dialog
+        self._pending_prepare_loop = QEventLoop()
+        self._pending_prepare_loop_ok = False
+        log_dialog.show()
+        QApplication.processEvents()
+
+        self._send_worker_control_task(
+            "REMOTE_PREPARE",
+            {
+                "session_id": session_id,
+                "descriptor_hash": descriptor_hash,
+                "descriptor": descriptor,
+            },
+        )
+        self._pending_prepare_failure_message = ""
+        self._pending_prepare_loop.exec()
+        self._pending_prepare_log_dialog = None
+
+        if not self._pending_prepare_loop_ok:
+            log_dialog.exec()
+            failure_message = self._pending_prepare_failure_message
+            if self._maybe_retry_ssh_authentication(config, failure_message):
+                self._release_remote_session_if_active()
+                self._open_remote_uri_direct(
+                    uri=uri,
+                    remote_path=remote_path,
+                    config=config,
+                    host_alias=host_alias,
+                )
+                return
+            self._release_remote_session_if_active()
+            return
+
+        log_dialog.close()
+        self._set_window_title_for_file(uri)
+        self._show_status_message(f"Selected remote file: {uri}")
+        self._record_recent_uri(uri, host_alias or spec.display_name)
+        self._load_remote_selected_file(uri, remote_path)
+
+    def _resolve_remote_uri(self, uri: str) -> tuple[dict[str, object] | None, str, str, bool]:
+        """Resolve URI into (config, remote_path, host_alias, unknown_host)."""
+        canonical_uri = CFVCore._canonical_remote_uri(uri)
+        parsed = urlparse(canonical_uri)
+        scheme = parsed.scheme.lower()
+
+        if scheme == "s3":
+            locations = RemoteConfigurationDialog._load_s3_locations()
+
+            endpoint_to_alias: dict[str, str] = {}
+            for alias_name, details in locations.items():
+                if not isinstance(alias_name, str) or not isinstance(details, dict):
+                    continue
+                endpoint_url = str(details.get("url", "")).strip()
+                endpoint_host = urlparse(endpoint_url).netloc.strip()
+                if endpoint_host:
+                    endpoint_to_alias[endpoint_host] = alias_name
+
+            netloc = parsed.netloc.strip()
+            endpoint_alias = endpoint_to_alias.get(netloc, "")
+            if endpoint_alias:
+                path = parsed.path.lstrip("/")
+            else:
+                path = f"{parsed.netloc}{parsed.path}".lstrip("/")
+
+            aliases = self._settings.get("recent_uri_aliases")
+            alias_map = aliases if isinstance(aliases, dict) else {}
+            preferred_alias = alias_map.get(canonical_uri) or alias_map.get(uri)
+            if not isinstance(preferred_alias, str):
+                preferred_alias = ""
+            preferred_alias = preferred_alias.strip()
+
+            if endpoint_alias:
+                preferred_alias = endpoint_alias
+
+            if not preferred_alias:
+                raw_state = self._settings.get("last_remote_configuration")
+                state = raw_state if isinstance(raw_state, dict) else {}
+                candidate = state.get("s3_existing_alias")
+                if isinstance(candidate, str) and candidate.strip():
+                    preferred_alias = candidate.strip()
+
+            chosen_alias = preferred_alias if preferred_alias in locations else ""
+            if not chosen_alias and len(locations) == 1:
+                chosen_alias = next(iter(locations.keys()))
+
+            details = dict(locations.get(chosen_alias, {})) if chosen_alias else {}
+            config: dict[str, object] = {
+                "protocol": "S3",
+                "remote": {
+                    "mode": "Select from existing",
+                    "alias": chosen_alias or "S3",
+                    "details": details,
+                },
+            }
+            return config, path, chosen_alias or "S3", False
+
+        if scheme == "ssh":
+            host = (parsed.hostname or parsed.netloc or "").strip()
+            user = (parsed.username or "").strip()
+            remote_path = unquote(parsed.path or "/")
+            hosts = RemoteConfigurationDialog._load_ssh_hosts()
+
+            matched_alias = ""
+            matched_details: dict[str, object] | None = None
+            for alias, details in hosts.items():
+                if alias == host or str(details.get("hostname", "")) == host:
+                    matched_alias = alias
+                    matched_details = dict(details)
+                    break
+
+            if matched_details is None:
+                return None, remote_path, host or "SSH", True
+
+            if user and not matched_details.get("user"):
+                matched_details["user"] = user
+
+            config = {
+                "protocol": "SSH",
+                "remote": {
+                    "mode": "Select from existing",
+                    "alias": matched_alias,
+                    "details": matched_details,
+                },
+            }
+            return config, remote_path, matched_alias, False
+
+        if scheme in {"http", "https"}:
+            https_locations = self._settings.get("remote_https_locations")
+            locations = dict(https_locations) if isinstance(https_locations, dict) else {}
+            if not locations:
+                cfg_state = self._settings.get("last_remote_configuration")
+                if isinstance(cfg_state, dict):
+                    raw = cfg_state.get("https_locations")
+                    if isinstance(raw, dict):
+                        locations = dict(raw)
+
+            matched_alias = ""
+            matched_url = ""
+            for alias, details in locations.items():
+                if not isinstance(details, dict):
+                    continue
+                base_url = str(details.get("url") or details.get("base_url") or "").strip()
+                if base_url and uri.startswith(base_url):
+                    if len(base_url) > len(matched_url):
+                        matched_alias = str(alias)
+                        matched_url = base_url
+
+            remote_path = unquote(parsed.path or "/")
+            if not matched_alias:
+                return None, remote_path, (parsed.hostname or "HTTPS"), True
+
+            config = {
+                "protocol": "HTTPS",
+                "remote": {
+                    "mode": "Select from existing",
+                    "alias": matched_alias,
+                    "details": locations.get(matched_alias, {}),
+                },
+            }
+            return config, remote_path, matched_alias, False
+
+        return None, "", "", False
+
+    def _configure_remote_for_uri(self, uri: str) -> None:
+        """Open Configure Remote pre-populated for URI-driven add-new workflows."""
+        parsed = urlparse(uri)
+        scheme = parsed.scheme.lower()
+        raw_state = self._settings.get("last_remote_configuration", {})
+        state = dict(raw_state) if isinstance(raw_state, dict) else {}
+        https_locations = self._settings.get("remote_https_locations")
+        if isinstance(https_locations, dict):
+            state["https_locations"] = dict(https_locations)
+
+        if scheme in {"http", "https"}:
+            state.update(
+                {
+                    "protocol_index": 1,
+                    "https_mode": "Add new",
+                    "https_alias": (parsed.hostname or "https").strip(),
+                    "https_url": f"{scheme}://{parsed.netloc}",
+                }
+            )
+        elif scheme == "ssh":
+            state.update(
+                {
+                    "protocol_index": 2,
+                    "ssh_mode": "Add new",
+                    "ssh_alias": (parsed.hostname or parsed.netloc or "ssh").strip(),
+                    "ssh_hostname": (parsed.hostname or parsed.netloc or "").strip(),
+                    "ssh_user": (parsed.username or "").strip(),
+                }
+            )
+
+        config, _ok, next_state = RemoteConfigurationDialog.get_configuration(self, state=state)
+        self._settings["last_remote_configuration"] = next_state
+        if isinstance(next_state, dict):
+            persisted_https = next_state.get("https_locations")
+            if isinstance(persisted_https, dict):
+                self._settings["remote_https_locations"] = dict(persisted_https)
+        self._save_settings()
+
+    @staticmethod
+    def _probe_ssh_auth_methods(
+        hostname: str,
+        username: str,
+        *,
+        port: int = 22,
+        timeout: float = 6.0,
+    ) -> set[str] | None:
+        """Probe SSH server auth methods quickly without waiting for filesystem auth timeout."""
+        try:
+            import paramiko  # type: ignore
+        except Exception:
+            return None
+
+        sock = None
+        transport = None
+        try:
+            sock = socket.create_connection((hostname, port), timeout=timeout)
+            transport = paramiko.Transport(sock)
+            transport.start_client(timeout=timeout)
+            try:
+                transport.auth_none(username)
+                return set()
+            except paramiko.BadAuthenticationType as exc:  # type: ignore[attr-defined]
+                allowed = getattr(exc, "allowed_types", None) or ()
+                methods = {
+                    str(item).strip().lower()
+                    for item in allowed
+                    if str(item).strip()
+                }
+                return methods or None
+            except paramiko.AuthenticationException:  # type: ignore[attr-defined]
+                # Some servers reply with a generic auth failure for auth_none.
+                return None
+        except Exception as exc:
+            logger.info("SSH auth preflight probe failed for %s@%s: %s", username, hostname, exc)
+            return None
+        finally:
+            if transport is not None:
+                try:
+                    transport.close()
+                except Exception:
+                    pass
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _validate_ssh_secret(
+        hostname: str,
+        username: str,
+        secret: str,
+        *,
+        port: int = 22,
+        timeout: float = 6.0,
+    ) -> bool | None:
+        """Validate an SSH password/secret; returns None when validation is inconclusive."""
+        try:
+            import paramiko  # type: ignore
+        except Exception:
+            return None
+
+        client = paramiko.SSHClient()
+        client.load_system_host_keys()
+        client.set_missing_host_key_policy(_XconvHostKeyPolicy())
+        try:
+            client.connect(
+                hostname,
+                port=port,
+                username=username,
+                password=secret,
+                timeout=timeout,
+                auth_timeout=timeout,
+                banner_timeout=timeout,
+                allow_agent=False,
+                look_for_keys=False,
+            )
+            return True
+        except paramiko.AuthenticationException:  # type: ignore[attr-defined]
+            return False
+        except Exception:
+            return None
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _parse_proxy_jump_target(proxy_jump: str) -> tuple[str | None, str, int]:
+        """Parse first ProxyJump hop into (user, host-or-alias, port)."""
+        first = proxy_jump.split(",", 1)[0].strip()
+        if not first:
+            return None, "", 22
+
+        port = 22
+        user: str | None = None
+        if "@" in first:
+            user_part, rest = first.split("@", 1)
+            user = user_part or None
+        else:
+            rest = first
+
+        if ":" in rest:
+            host, port_text = rest.rsplit(":", 1)
+            try:
+                port = int(port_text)
+            except ValueError:
+                host = rest
+        else:
+            host = rest
+
+        return user, host, port
+
+    @staticmethod
+    def _resolve_ssh_alias(alias: str) -> tuple[str, str | None]:
+        """Resolve SSH config alias to concrete hostname/user when available."""
+        host = alias
+        user: str | None = None
+        try:
+            import paramiko  # type: ignore
+            ssh_config_path = Path.home() / ".ssh/config"
+            if ssh_config_path.is_file():
+                cfg = paramiko.SSHConfig.from_path(str(ssh_config_path))
+                looked_up = cfg.lookup(alias)
+                looked_host = looked_up.get("hostname")
+                looked_user = looked_up.get("user")
+                if isinstance(looked_host, str) and looked_host.strip():
+                    host = looked_host.strip()
+                if isinstance(looked_user, str) and looked_user.strip():
+                    user = looked_user.strip()
+        except Exception:
+            pass
+        return host, user
+
+    def _prompt_ssh_secret(
+        self,
+        *,
+        title: str,
+        prompt: str,
+    ) -> tuple[str, bool]:
+        """Prompt the user for an SSH secret/response."""
+        secret, ok = QInputDialog.getText(
+            self,
+            title,
+            prompt,
+            QLineEdit.Password,
+        )
+        if not ok:
+            self._show_status_message("SSH login cancelled by user.", is_error=True)
+            return "", False
+        if not secret:
+            self._show_status_message("SSH secret is required for this host.", is_error=True)
+            return "", False
+        return secret, True
+
+    def _prepare_ssh_config_for_auth(self, config: dict[str, object]) -> dict[str, object] | None:
+        """Inject transient SSH password credentials when preflight indicates a challenge."""
+        if str(config.get("protocol", "")).upper() != "SSH":
+            return config
+
+        remote = config.get("remote")
+        if not isinstance(remote, dict):
+            return config
+
+        details = remote.get("details")
+        detail_map = dict(details) if isinstance(details, dict) else {}
+
+        hostname_raw = detail_map.get("hostname") or remote.get("hostname")
+        username_raw = detail_map.get("user") or remote.get("user")
+        hostname = str(hostname_raw).strip() if isinstance(hostname_raw, str) else ""
+        username = str(username_raw).strip() if isinstance(username_raw, str) else ""
+        if not hostname or not username:
+            return config
+
+        updated_remote = dict(remote)
+        updated_details = dict(detail_map)
+
+        target_auth_methods = self._probe_ssh_auth_methods(hostname, username)
+        target_needs_secret = bool(target_auth_methods) and (
+            "password" in target_auth_methods or "keyboard-interactive" in target_auth_methods
+        )
+
+        if target_needs_secret:
+            cache_key = f"{username}@{hostname}:22"
+            secret = self._ssh_session_passwords.get(cache_key, "")
+            requires_otp_style = bool(target_auth_methods) and (
+                "keyboard-interactive" in target_auth_methods and "password" not in target_auth_methods
+            )
+
+            if secret and not requires_otp_style:
+                validation = CFVMain._validate_ssh_secret(hostname, username, secret, port=22)
+                if validation is False:
+                    self._ssh_session_passwords.pop(cache_key, None)
+                    secret = ""
+
+            if not secret:
+                prompt = f"Enter SSH secret for {username}@{hostname}"
+                if requires_otp_style:
+                    prompt = f"Enter one-time code or challenge response for {username}@{hostname}"
+
+                attempts = 2
+                for attempt in range(attempts):
+                    entered, ok = self._prompt_ssh_secret(
+                        title="SSH Authentication Required",
+                        prompt=prompt,
+                    )
+                    if not ok:
+                        return None
+
+                    validation = CFVMain._validate_ssh_secret(hostname, username, entered, port=22)
+                    if validation is False:
+                        QMessageBox.warning(
+                            self,
+                            "SSH Authentication Failed",
+                            "Authentication failed for the provided SSH secret. Please try again.",
+                        )
+                        continue
+
+                    secret = entered
+                    break
+
+                if not secret:
+                    return None
+
+            self._ssh_session_passwords[cache_key] = secret
+            updated_details["password"] = secret
+            updated_remote["password"] = secret
+
+        proxy_jump_raw = updated_details.get("proxyjump") or updated_remote.get("proxyjump")
+        proxy_jump = str(proxy_jump_raw).strip() if isinstance(proxy_jump_raw, str) else ""
+        if proxy_jump:
+            jump_user_hint, jump_alias, jump_port = CFVMain._parse_proxy_jump_target(proxy_jump)
+            if jump_alias:
+                jump_host, jump_user_cfg = CFVMain._resolve_ssh_alias(jump_alias)
+                jump_user = (jump_user_hint or jump_user_cfg or username).strip()
+
+                jump_auth_methods = self._probe_ssh_auth_methods(jump_host, jump_user, port=jump_port)
+                jump_needs_secret = bool(jump_auth_methods) and (
+                    "password" in jump_auth_methods or "keyboard-interactive" in jump_auth_methods
+                )
+
+                if jump_needs_secret:
+                    jump_cache_key = f"jump:{jump_user}@{jump_host}:{jump_port}"
+                    jump_secret = self._ssh_session_passwords.get(jump_cache_key, "")
+                    jump_requires_otp_style = bool(jump_auth_methods) and (
+                        "keyboard-interactive" in jump_auth_methods and "password" not in jump_auth_methods
+                    )
+
+                    if jump_secret and not jump_requires_otp_style:
+                        validation = CFVMain._validate_ssh_secret(
+                            jump_host,
+                            jump_user,
+                            jump_secret,
+                            port=jump_port,
+                        )
+                        if validation is False:
+                            self._ssh_session_passwords.pop(jump_cache_key, None)
+                            jump_secret = ""
+
+                    if not jump_secret:
+                        prompt = (
+                            f"Authenticating with bastion host {jump_host} "
+                            f"before proxyjump to {hostname}.\n\n"
+                            f"Enter bastion SSH secret for {jump_user}@{jump_host}"
+                        )
+                        if jump_requires_otp_style:
+                            prompt = (
+                                f"Authenticating with bastion host {jump_host} "
+                                f"before proxyjump to {hostname}.\n\n"
+                                f"Enter bastion one-time code or challenge response for {jump_user}@{jump_host}"
+                            )
+
+                        attempts = 2
+                        for _ in range(attempts):
+                            entered, ok = self._prompt_ssh_secret(
+                                title="Bastion Authentication Required",
+                                prompt=prompt,
+                            )
+                            if not ok:
+                                return None
+
+                            validation = CFVMain._validate_ssh_secret(
+                                jump_host,
+                                jump_user,
+                                entered,
+                                port=jump_port,
+                            )
+                            if validation is False:
+                                QMessageBox.warning(
+                                    self,
+                                    "Bastion Authentication Failed",
+                                    "Authentication failed for the provided bastion secret. Please try again.",
+                                )
+                                continue
+
+                            jump_secret = entered
+                            break
+
+                        if not jump_secret:
+                            return None
+
+                    self._ssh_session_passwords[jump_cache_key] = jump_secret
+                    updated_details["proxyjump_password"] = jump_secret
+                    updated_details["proxyjump_user"] = jump_user
+                    updated_remote["proxyjump_password"] = jump_secret
+                    updated_remote["proxyjump_user"] = jump_user
+
+        updated_remote["details"] = updated_details
+
+        updated_config = dict(config)
+        updated_config["remote"] = updated_remote
+        return updated_config
+
+    @staticmethod
+    def _is_ssh_auth_failure_message(message: str) -> bool:
+        """Return True when a worker prepare failure message looks like SSH auth failure."""
+        text = (message or "").strip().lower()
+        if not text:
+            return False
+        markers = (
+            "authentication",
+            "bad authentication type",
+            "auth fail",
+            "permission denied",
+            "keyboard-interactive",
+            "auth",
+        )
+        return any(marker in text for marker in markers)
+
+    def _clear_ssh_cached_secrets_for_config(self, config: dict[str, object]) -> None:
+        """Forget cached SSH secrets for target and bastion hosts in a config."""
+        if str(config.get("protocol", "")).upper() != "SSH":
+            return
+
+        remote = config.get("remote")
+        if not isinstance(remote, dict):
+            return
+
+        details = remote.get("details")
+        detail_map = dict(details) if isinstance(details, dict) else {}
+
+        hostname_raw = detail_map.get("hostname") or remote.get("hostname")
+        username_raw = detail_map.get("user") or remote.get("user")
+        hostname = str(hostname_raw).strip() if isinstance(hostname_raw, str) else ""
+        username = str(username_raw).strip() if isinstance(username_raw, str) else ""
+        if hostname and username:
+            self._ssh_session_passwords.pop(f"{username}@{hostname}:22", None)
+
+        proxy_jump_raw = detail_map.get("proxyjump") or remote.get("proxyjump")
+        proxy_jump = str(proxy_jump_raw).strip() if isinstance(proxy_jump_raw, str) else ""
+        if proxy_jump:
+            jump_user_hint, jump_alias, jump_port = CFVMain._parse_proxy_jump_target(proxy_jump)
+            if jump_alias:
+                jump_host, jump_user_cfg = CFVMain._resolve_ssh_alias(jump_alias)
+                jump_user = (jump_user_hint or jump_user_cfg or username).strip()
+                if jump_host and jump_user:
+                    self._ssh_session_passwords.pop(f"jump:{jump_user}@{jump_host}:{jump_port}", None)
+
+    def _maybe_retry_ssh_authentication(self, config: dict[str, object], failure_message: str) -> bool:
+        """Offer auth retry for SSH prepare failures that look like authentication problems."""
+        if str(config.get("protocol", "")).upper() != "SSH":
+            return False
+        if not CFVMain._is_ssh_auth_failure_message(failure_message):
+            return False
+
+        self._clear_ssh_cached_secrets_for_config(config)
+        choice = QMessageBox.question(
+            self,
+            "SSH Authentication Failed",
+            "SSH authentication failed. Retry with new credentials/response?",
+            QMessageBox.Retry | QMessageBox.Cancel,
+            QMessageBox.Retry,
+        )
+        return choice == QMessageBox.Retry
+
+    def _open_uri_entry(self, uri: str, *, from_uri_dialog: bool) -> None:
+        """Open a URI from user input or recent list."""
+        canonical_uri = CFVCore._canonical_remote_uri(uri)
+        parsed = urlparse(canonical_uri)
+        scheme = parsed.scheme.lower()
+
+        if not scheme:
+            self._open_recent_file(canonical_uri)
+            return
+
+        if scheme not in {"s3", "ssh", "http", "https"}:
+            QMessageBox.critical(self, "Unsupported URI", f"Unsupported URI protocol: {scheme}")
+            return
+
+        config, remote_path, host_alias, unknown_host = self._resolve_remote_uri(canonical_uri)
+        if unknown_host and from_uri_dialog:
+            self._configure_remote_for_uri(canonical_uri)
+            config, remote_path, host_alias, _unknown_host_after = self._resolve_remote_uri(canonical_uri)
+
+        if config is None:
+            QMessageBox.critical(self, "Unknown host", "Host route is not known. Configure a remote first.")
+            return
+
+        self._open_remote_uri_direct(
+            uri=canonical_uri,
+            remote_path=remote_path,
+            config=config,
+            host_alias=host_alias,
+        )
+
+    def _configure_remote(self) -> None:
+        """Open the full remote configuration dialog; Open proceeds to worker-backed navigation."""
+        raw_state = self._settings.get("last_remote_configuration", {})
+        state = dict(raw_state) if isinstance(raw_state, dict) else {}
+        https_locations = self._settings.get("remote_https_locations")
+        if not isinstance(https_locations, dict):
+            https_locations = self._settings.get("remote_http_locations")
+        if isinstance(https_locations, dict) and https_locations:
+            state["https_locations"] = dict(https_locations)
+        config, ok, next_state = RemoteConfigurationDialog.get_configuration(self, state=state)
+        self._settings["last_remote_configuration"] = next_state
+        if isinstance(next_state, dict):
+            persisted_https = next_state.get("https_locations")
+            if not isinstance(persisted_https, dict):
+                persisted_https = next_state.get("http_locations")
+            if isinstance(persisted_https, dict):
+                self._settings["remote_https_locations"] = dict(persisted_https)
+        self._save_settings()
+        if not ok or config is None:
+            return
+        self._open_remote_from_config(config)
+
+    def _choose_remote(self) -> None:
+        """Open using existing short names via a streamlined protocol picker dialog."""
+        raw_state = self._settings.get("last_remote_open", {})
+        state = raw_state if isinstance(raw_state, dict) else {}
+        if isinstance(state, dict):
+            merged_http: dict[str, object] = {}
+
+            configured_state = self._settings.get("last_remote_configuration")
+            if isinstance(configured_state, dict):
+                cfg_http = configured_state.get("https_locations")
+                if not isinstance(cfg_http, dict):
+                    cfg_http = configured_state.get("http_locations")
+                if isinstance(cfg_http, dict):
+                    merged_http.update(cfg_http)
+
+            http_locations = self._settings.get("remote_https_locations")
+            if not isinstance(http_locations, dict):
+                http_locations = self._settings.get("remote_http_locations")
+            if isinstance(http_locations, dict):
+                merged_http.update(http_locations)
+
+            if merged_http:
+                state = dict(state)
+                state["https_locations"] = dict(merged_http)
+
+        config, ok, next_state = RemoteOpenDialog.get_configuration(self, state=state)
+        self._settings["last_remote_open"] = next_state
+        self._save_settings()
+        if isinstance(next_state, dict) and bool(next_state.get("configure_new_remote")):
+            self._configure_remote()
+            return
+        if not ok or config is None:
+            return
+        self._open_remote_from_config(config)
+
+    def _choose_uris(self) -> None:
+        """Show URI dialog and open supported URIs directly through the worker."""
+        default_uri = self._default_open_uri_value()
+        uri, ok, quit_requested = OpenURIDialog.get_uri(self, default_uri=default_uri)
+        if quit_requested:
+            return
+        if not ok:
+            return
+        self._open_uri_entry(uri, from_uri_dialog=True)
+
+    def _open_recent_file(self, file_path: str) -> None:
+        """Open a recent entry, routing remote URIs through URI resolution flow."""
+        if urlparse(file_path).scheme:
+            self._open_uri_entry(file_path, from_uri_dialog=False)
+            return
+        super()._open_recent_file(file_path)
+
+    def _make_worker_list_callback(self):
+        """Return a callable that lists a remote directory via worker IPC using a nested QEventLoop."""
+        def list_dir(path: str) -> list[RemoteEntry]:
+            loop = QEventLoop()
+            self._pending_list_loop = loop
+            self._pending_list_result = None
+            self._send_worker_control_task(
+                "REMOTE_LIST",
+                {
+                    "session_id": self._remote_session_id,
+                    "descriptor_hash": self._remote_descriptor_hash,
+                    "descriptor": self._remote_descriptor,
+                    "path": path,
+                },
+            )
+            loop.exec()
+            result = self._pending_list_result
+            self._pending_list_loop = None
+            self._pending_list_result = None
+            if result is None:
+                raise RuntimeError(f"No response from worker for directory listing of {path!r}")
+            error = result.get("error")
+            if error:
+                raise RuntimeError(str(error))
+            return list(result.get("entries", []))
+
+        return list_dir
 
     def _request_coordinates_for_field(self, index: int, show_status: bool = True) -> None:
         """Request coordinate arrays for a selected field index."""
@@ -309,6 +1304,10 @@ class CFVMain(CFVCore):
             return
 
         selections, collapse_by_coord, plot_kind = context
+        if plot_kind == "lineplot":
+            self._show_lineplot_options_dialog()
+            return
+
         if plot_kind != "contour":
             self._show_status_message(f"No options dialog available for plot type: {plot_kind}")
             return
@@ -465,11 +1464,63 @@ class CFVMain(CFVCore):
             header_block = "\n".join(headers) + "\n"
 
         payload = header_block + code + "#END_TASK\n"
+        CFVMain._record_pending_worker_task(self)
         logger.debug("Sending worker task (%d chars)", len(code))
         self.worker.write(payload.encode())
 
+    def _send_worker_control_task(self, kind: str, payload: dict[str, object]) -> None:
+        """Send a non-code control task to the worker using typed task headers."""
+        payload_text = json.dumps(payload, sort_keys=True)
+        encoded_payload = base64.b64encode(payload_text.encode("utf-8")).decode("ascii")
+        task = (
+            f"#TASK_KIND:{kind}\n"
+            f"#TASK_PAYLOAD_B64:{encoded_payload}\n"
+            "#END_TASK\n"
+        )
+        CFVMain._record_pending_worker_task(self)
+        logger.debug("Sending worker control task %s", kind)
+        self.worker.write(task.encode())
+
+    def _record_pending_worker_task(self) -> None:
+        """Store worker task start times so completion statuses can show elapsed time."""
+        starts = getattr(self, "_pending_worker_task_starts", None)
+        if starts is None:
+            starts = deque()
+            setattr(self, "_pending_worker_task_starts", starts)
+        starts.append(time.monotonic())
+
+    def _complete_pending_worker_task(self, consume: bool = True) -> float | None:
+        """Return elapsed seconds for the oldest pending worker task, if any."""
+        starts = getattr(self, "_pending_worker_task_starts", None)
+        if not starts:
+            return None
+
+        start = starts.popleft() if consume else starts[0]
+        return max(0.0, time.monotonic() - start)
+
+    def _set_window_title_for_file(self, file_path: str) -> None:
+        """Update window title, appending remote host label when a remote session is active."""
+        descriptor = getattr(self, "_remote_descriptor", None)
+        if not isinstance(descriptor, dict):
+            super()._set_window_title_for_file(file_path)
+            return
+
+        scheme = str(descriptor.get("uri_scheme", "") or descriptor.get("protocol", ""))
+        display = str(descriptor.get("display_name", ""))
+        if scheme and display:
+            remote_tag = f" ({scheme}:{display})"
+        elif display:
+            remote_tag = f" ({display})"
+        else:
+            remote_tag = ""
+
+        self.current_file_path = file_path
+        filename = Path(file_path).name
+        self.setWindowTitle(f"{self.base_window_title}: {filename}{remote_tag}")
+
     def closeEvent(self, event: QCloseEvent) -> None:
         """Ensure worker process is shut down cleanly when GUI exits."""
+        self._release_remote_session_if_active()
         if self.worker.state() != QProcess.NotRunning:
             logger.info("Terminating worker process")
             self.worker.terminate()

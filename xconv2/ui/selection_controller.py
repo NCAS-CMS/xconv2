@@ -320,7 +320,10 @@ class SelectionController:
                 value = float(value)
             except ValueError:
                 return text
-        date = num2date(value, time_units, calendar=calendar)
+        if calendar:
+            date = num2date(value, time_units, calendar=calendar)
+        else:
+            date = num2date(value, time_units)
         if delta is not None and delta > 86399:
             return date.strftime("%Y-%m-%d")
         else:
@@ -393,7 +396,7 @@ class SelectionController:
                 f"{dims_text} | Plot Type: {selected_kind.title() if selected_kind else 'N/A'}"
             )
             self.host.plot_button.setEnabled(True)
-            self.host.options_button.setEnabled(False)
+            self.host.options_button.setEnabled(selected_kind in {"contour", "lineplot"})
             self.host.save_code_button.setEnabled(True)
             self.host.save_plot_button.setEnabled(True)
         elif varying_dims == 2:
@@ -401,7 +404,7 @@ class SelectionController:
                 f"{dims_text} | Plot Type: {selected_kind.title() if selected_kind else 'N/A'}"
             )
             self.host.plot_button.setEnabled(True)
-            self.host.options_button.setEnabled(selected_kind == "contour")
+            self.host.options_button.setEnabled(selected_kind in {"contour", "lineplot"})
             self.host.save_code_button.setEnabled(True)
             self.host.save_plot_button.setEnabled(True)
         else:

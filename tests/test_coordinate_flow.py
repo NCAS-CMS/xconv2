@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from collections import deque
 import pickle
 from dataclasses import dataclass, field
 import types
@@ -99,6 +100,28 @@ class _DummyCoordRequestMain:
 
     def _send_worker_task(self, code: str) -> None:
         self.sent_tasks.append(code)
+
+
+@dataclass
+class _DummyPlotOptionsMain:
+    _context: tuple[dict[str, tuple[object, object]], dict[str, str], str] | None
+    lineplot_dialog_calls: int = 0
+    sent_tasks: list[str] = field(default_factory=list)
+    status_messages: list[str] = field(default_factory=list)
+
+    def _build_plot_context(self):
+        return self._context
+
+    def _show_lineplot_options_dialog(self) -> None:
+        self.lineplot_dialog_calls += 1
+
+    def _send_worker_task(self, code: str, emit_image: bool = True) -> None:
+        _ = emit_image
+        self.sent_tasks.append(code)
+
+    def _show_status_message(self, message: str, is_error: bool = False) -> None:
+        _ = is_error
+        self.status_messages.append(message)
 
 
 @dataclass
@@ -249,6 +272,22 @@ def test_request_coordinates_can_skip_status_message(monkeypatch) -> None:
     assert dummy.sent_tasks == ["TASK_FOR_4"]
 
 
+def test_request_plot_options_shows_lineplot_dialog_when_lineplot_selected() -> None:
+    dummy = _DummyPlotOptionsMain(
+        _context=(
+            {"time": (1, 2)},
+            {},
+            "lineplot",
+        )
+    )
+
+    CFVMain._request_plot_options(dummy)
+
+    assert dummy.lineplot_dialog_calls == 1
+    assert dummy.sent_tasks == []
+    assert dummy.status_messages == []
+
+
 def test_on_field_clicked_resets_ui_then_requests_coordinates() -> None:
     """Field click should flow through core handling, reset UI, then request coordinates."""
     window = CFVMain.__new__(CFVMain)
@@ -307,3 +346,50 @@ def test_handle_worker_output_ignores_stale_error_after_coord_message() -> None:
 
     assert dummy.shown_statuses == []
     assert dummy._suppress_stale_error_status is True
+
+
+def test_handle_worker_output_remote_status_routes_message() -> None:
+    payload = {
+        "phase": "preparing",
+        "session_id": "abc",
+        "descriptor_hash": "hash",
+        "message": "Preparing remote worker session...",
+    }
+    encoded = base64.b64encode(pickle.dumps(payload)).decode()
+
+    dummy = _DummyStaleErrorMain()
+    dummy.worker = _FakeWorker([f"REMOTE_STATUS:{encoded}\n"])
+
+    CFVMain.handle_worker_output(dummy)
+
+    assert dummy.shown_statuses == [("Preparing remote worker session...", False)]
+
+
+def test_handle_worker_output_remote_open_failure_shows_error() -> None:
+    payload = {
+        "session_id": "abc",
+        "uri": "ssh://host/file.nc",
+        "ok": False,
+        "error": "Remote open failed",
+    }
+    encoded = base64.b64encode(pickle.dumps(payload)).decode()
+
+    dummy = _DummyStaleErrorMain()
+    dummy.worker = _FakeWorker([f"REMOTE_OPEN_RESULT:{encoded}\n"])
+
+    CFVMain.handle_worker_output(dummy)
+
+    assert dummy.shown_statuses == [("Remote open failed", True)]
+
+
+def test_handle_worker_output_task_complete_includes_elapsed(monkeypatch) -> None:
+    dummy = _DummyStaleErrorMain()
+    dummy._pending_worker_task_starts = deque([10.0])
+    dummy.worker = _FakeWorker(["STATUS:Task Complete\n"])
+
+    monkeypatch.setattr("xconv2.main_window.time.monotonic", lambda: 12.5)
+
+    CFVMain.handle_worker_output(dummy)
+
+    assert dummy.shown_statuses == [("Task Complete (2.50s)", False)]
+    assert list(dummy._pending_worker_task_starts) == []

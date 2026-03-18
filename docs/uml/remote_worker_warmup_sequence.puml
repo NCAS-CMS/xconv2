@@ -1,0 +1,83 @@
+@startuml RemoteWorkerWarmupSequence
+title Remote Login and Navigation Sequence (Worker-Only Login)
+
+actor User
+participant "CFVCore/CFVMain\n(UI process)" as UI
+participant "Remote Config\nDialog" as Config
+participant "Login Progress\nDialog" as Login
+participant "Remote Navigator\nDialog" as Nav
+participant "QProcess\nstdin/stdout pipe" as Pipe
+participant "cf-worker\n(worker process)" as Worker
+participant "Worker Remote\nSession Pool" as Pool
+
+== Select Remote Configuration ==
+User -> UI : Open Remote...
+UI -> Config : show()
+User -> Config : choose protocol/auth + Save
+Config --> UI : configuration descriptor
+
+== Worker Login (single connection) ==
+UI -> Login : show() [non-modal, log dialog]
+UI -> Pipe : #TASK_KIND:REMOTE_PREPARE
+UI -> Pipe : #TASK_PAYLOAD_B64:{session_id, descriptor_hash, descriptor}
+note right of UI
+  CFVMain._pending_prepare_loop\n(QEventLoop) spins here
+end note
+Pipe -> Worker : parse task
+Worker -> Pool : prepare(descriptor_hash, descriptor)
+Pool --> Worker : connecting
+Worker -> Pipe : REMOTE_STATUS {phase=preparing, message=...}
+Pipe -> UI : forward message to Login dialog
+Worker -> Pipe : REMOTE_STATUS {phase=ready,...}
+Pipe -> UI : quit QEventLoop; close Login dialog
+
+== User Navigates via IPC ==
+UI -> Nav : open navigator (no UI-side filesystem connection)
+User -> Nav : expand tree node
+
+loop for each directory expansion
+  Nav -> UI : list_callback(path) [nested QEventLoop]
+  UI -> Pipe : #TASK_KIND:REMOTE_LIST
+  UI -> Pipe : #TASK_PAYLOAD_B64:{session_id, descriptor_hash, descriptor, path}
+  Pipe -> Worker : parse task
+  Worker -> Pool : get(descriptor_hash) [reuse warm session]
+  Pool --> Worker : ready session
+  Worker -> Worker : fs.ls(path) + normalize + resolve links
+  Worker -> Pipe : REMOTE_LIST_RESULT {path, entries[], error}
+  Pipe -> UI : quit nested QEventLoop
+  UI -> Nav : return list[RemoteEntry]
+  Nav -> Nav : populate tree node
+end
+
+== Open Selected Remote URI ==
+User -> Nav : select file + Open
+Nav --> UI : selected_uri + selected_path
+UI -> Pipe : #TASK_KIND:REMOTE_OPEN
+UI -> Pipe : #TASK_PAYLOAD_B64:{session_id, descriptor_hash, descriptor, uri, path}
+Pipe -> Worker : parse task
+Worker -> Pool : get(descriptor_hash) [reuse warm session]
+Pool --> Worker : session (guaranteed warm from navigation)
+Worker -> Worker : open/read metadata for uri
+Worker -> Pipe : METADATA {field list payload}
+Pipe -> UI : populate field list
+Worker -> Pipe : REMOTE_OPEN_RESULT {ok=true, uri=...}
+Pipe -> UI : open result
+
+== Target Change / Cleanup ==
+User -> UI : choose a different remote target
+UI -> Pipe : #TASK_KIND:REMOTE_RELEASE
+UI -> Pipe : #TASK_PAYLOAD_B64:{session_id, descriptor_hash}
+Pipe -> Worker : parse task
+Worker -> Pool : release/evict matching entry
+Worker -> Pipe : REMOTE_STATUS {phase=released,...}
+Pipe -> UI : status line
+
+note right of Pool
+Implemented pool policy:
+- Key by descriptor_hash
+- TTL idle eviction
+- LRU cap
+- Most-recent session_id wins
+end note
+
+@enduml

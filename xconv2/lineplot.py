@@ -5,6 +5,11 @@ import pandas as pd
 from matplotlib import pyplot as plt
 
 from xconv2.cell_method_handler import cell_methods_string_from_field
+from xconv2.plot_layout_helpers import (
+    annotation_text,
+    apply_vertical_padding,
+    estimate_layout_padding,
+)
 
 
 class LinePlot:
@@ -51,6 +56,15 @@ class LinePlot:
         height = float(options.get("figure_height", 6.0) or 6.0)
         dpi = float(options.get("figure_dpi", 150.0) or 150.0)
         return width, height, dpi
+
+    @staticmethod
+    def _positive_float_option(options: dict[str, object], key: str, default: float) -> float:
+        raw = options.get(key, default)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return default
+        return value if value > 0 else default
 
     @staticmethod
     def _x_values_for_coord(coord: object) -> object:
@@ -143,6 +157,15 @@ class LinePlot:
             frame, x_key, x_coord = self._make_dataframe()
             frame.plot(ax=ax, **pandas_kwargs)
 
+        legend_display = bool(merged_options.get("legend_display", True))
+        legend_location = str(merged_options.get("legend_location", "best"))
+        current_legend = ax.get_legend() if hasattr(ax, "get_legend") else None
+        if legend_display:
+            if hasattr(ax, "legend"):
+                ax.legend(loc=legend_location)
+        elif current_legend is not None and hasattr(current_legend, "remove"):
+            current_legend.remove()
+
         if "title" in lineplot_kwargs:
             title_text = str(lineplot_kwargs["title"])
         else:
@@ -158,7 +181,12 @@ class LinePlot:
         if title2:
             title_text += f"\n{title2}"
 
-        ax.set_title(title_text)
+        lineplot_title_fontsize = self._positive_float_option(
+            merged_options,
+            "lineplot_title_fontsize",
+            10.5,
+        )
+        ax.set_title(title_text, fontsize=lineplot_title_fontsize)
 
         if "xlabel" in lineplot_kwargs:
             ax.set_xlabel(str(lineplot_kwargs["xlabel"]))
@@ -169,6 +197,53 @@ class LinePlot:
             ax.set_ylabel(str(lineplot_kwargs["ylabel"]))
         else:
             ax.set_ylabel(str(getattr(self.pfld, "units", "")))
+
+        page_title = merged_options.get("page_title")
+        page_title_display = bool(merged_options.get("page_title_display", False))
+        annotation_display = bool(merged_options.get("annotation_display", False))
+        annotation_properties = merged_options.get("annotation_properties", [])
+        annotation_free_text = str(merged_options.get("annotation_free_text", "") or "").strip()
+        page_margin_top = float(merged_options.get("page_margin_top", 0.0) or 0.0)
+        page_margin_bottom = float(merged_options.get("page_margin_bottom", 0.0) or 0.0)
+
+        page_margin_top = max(0.0, min(page_margin_top, 0.25))
+        page_margin_bottom = max(0.0, min(page_margin_bottom, 0.25))
+
+        page_title_fontsize = self._positive_float_option(merged_options, "page_title_fontsize", 10.0)
+        annotation_fontsize = self._positive_float_option(merged_options, "annotation_fontsize", 8.0)
+
+        annotation_text_value = annotation_text(
+            annotation_display=annotation_display,
+            annotation_properties=annotation_properties,
+            annotation_free_text=annotation_free_text,
+        )
+        top_padding, bottom_padding = estimate_layout_padding(
+            page_title=str(page_title) if page_title is not None else None,
+            page_title_display=page_title_display,
+            page_title_fontsize=page_title_fontsize,
+            annotation_text=annotation_text_value,
+            annotation_fontsize=annotation_fontsize,
+            run_prepass=lambda: None,
+            close_after_draw=False,
+        )
+        top_padding += page_margin_top
+        bottom_padding += page_margin_bottom
+
+        if top_padding > 0 or bottom_padding > 0:
+            apply_vertical_padding(fig, top_padding, bottom_padding)
+
+        if page_title_display and page_title:
+            fig.suptitle(str(page_title), y=0.995, fontsize=page_title_fontsize)
+
+        if annotation_text_value:
+            fig.text(
+                0.5,
+                0.02,
+                annotation_text_value,
+                ha="center",
+                va="bottom",
+                fontsize=annotation_fontsize,
+            )
 
         if filename is not None:
             plt.savefig(str(filename))

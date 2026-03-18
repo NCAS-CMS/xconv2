@@ -7,13 +7,16 @@ code snippets in ``cf_templates.py`` can call them directly.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
 import cf
 import cfplot as cfp
 from matplotlib import pyplot as plt
 from xconv2.cell_method_handler import cell_methods_string_from_field
 from xconv2.lineplot import LinePlot
+from xconv2.plot_layout_helpers import (
+    annotation_text,
+    apply_vertical_padding,
+    estimate_layout_padding,
+)
 
 
 __all__ = [
@@ -30,7 +33,7 @@ __all__ = [
 
 
 
-def field_info(fields: object) -> list[str]:
+def field_info(fields: object) -> list[dict[str, object]]:
     """
     Serialize field metadata for GUI transport.
 
@@ -41,14 +44,20 @@ def field_info(fields: object) -> list[str]:
         fields: Iterable of CF field-like objects.
 
     Returns:
-        list[str]: Serialized rows ready for worker-to-GUI payload transfer.
+        list[dict[str, object]]: Structured rows ready for worker-to-GUI payload transfer.
     """
-    rows: list[str] = []
+    rows: list[dict[str, object]] = []
     for x in fields:
         id_ = f"{x.identity().strip()}{x.shape}"
         props = x.properties()
         info = str(x)
-        rows.append(f"{id_}\x1f{info}\x1f{str(props)}")
+        rows.append(
+            {
+                "identity": id_,
+                "detail": info,
+                "properties": dict(props) if isinstance(props, dict) else props,
+            }
+        )
 
     return rows
 
@@ -173,148 +182,6 @@ def get_data_for_plotting(
             pfld = pfld.collapse(instruction, weights=False)
 
     return pfld
-
-
-def annotation_text(
-    *,
-    annotation_display: bool,
-    annotation_properties: list[tuple[object, object]] | list[list[object]],
-    annotation_free_text: str,
-) -> str:
-    """Build a compact two-line annotation string from selected properties."""
-    if not annotation_display:
-        return ""
-
-    max_props = 3 if annotation_free_text else 4
-    annotation_items = [f"{key}: {value}" for key, value in annotation_properties[:max_props]]
-
-    entries: list[str] = []
-    if annotation_free_text:
-        entries.append(annotation_free_text)
-    entries.extend(annotation_items)
-
-    if not entries:
-        return ""
-
-    lines: list[str] = []
-    for idx in range(0, len(entries), 2):
-        lines.append(" | ".join(entries[idx : idx + 2]))
-
-    return "\n".join(lines)
-
-
-def estimate_layout_padding(
-    *,
-    page_title: str | None,
-    page_title_display: bool,
-    page_title_fontsize: float,
-    annotation_text: str,
-    annotation_fontsize: float,
-    run_prepass: Callable[[], None],
-) -> tuple[float, float]:
-    """
-    Estimate top and bottom padding required by page title and annotation text.
-
-    A lightweight prepass is executed by ``run_prepass`` so axis extents can be
-    measured before final rendering.
-    """
-    if (not page_title_display or not page_title) and not annotation_text:
-        return (0.0, 0.0)
-
-    fig = plt.gcf()
-    # If the canvas is not ready for drawing, return zero padding. This can
-    # happen if the figure has not been fully initialized.
-    canvas = getattr(fig, "canvas", None)
-    if canvas is None or not hasattr(canvas, "draw") or not hasattr(canvas, "get_renderer"):
-        return (0.0, 0.0)
-
-    run_prepass()
-
-    # Re-fetch figure/canvas after prepass because plotting backends may replace
-    # the current figure during rendering setup.
-    fig = plt.gcf()
-    canvas = getattr(fig, "canvas", None)
-    if canvas is None or not hasattr(canvas, "draw") or not hasattr(canvas, "get_renderer"):
-        return (0.0, 0.0)
-
-    title_artist = None
-    if page_title_display and page_title:
-        title_artist = fig.suptitle(str(page_title), y=0.995, fontsize=page_title_fontsize)
-
-    annotation_artist = None
-    if annotation_text:
-        annotation_artist = fig.text(
-            0.5,
-            0.02,
-            annotation_text,
-            ha="center",
-            va="bottom",
-            fontsize=annotation_fontsize,
-        )
-
-    canvas.draw()
-    renderer = canvas.get_renderer()
-
-    axes_top = 0.0
-    axes_bottom = 1.0
-    for ax in fig.axes:
-        tight_bbox = ax.get_tightbbox(renderer)
-        if tight_bbox is None:
-            continue
-        fig_bbox = tight_bbox.transformed(fig.transFigure.inverted())
-        axes_top = max(axes_top, fig_bbox.y1)
-        axes_bottom = min(axes_bottom, fig_bbox.y0)
-
-    top_padding = 0.0
-    if title_artist is not None:
-        title_bbox = title_artist.get_window_extent(renderer).transformed(fig.transFigure.inverted())
-        title_bottom = title_bbox.y0
-        top_overlap = (axes_top + 0.01) - title_bottom
-        if top_overlap > 0:
-            top_padding = min(top_overlap + 0.01, 0.25)
-
-    bottom_padding = 0.0
-    if annotation_artist is not None:
-        annotation_bbox = annotation_artist.get_window_extent(renderer).transformed(
-            fig.transFigure.inverted()
-        )
-        annotation_top = annotation_bbox.y1
-        bottom_overlap = (annotation_top + 0.01) - axes_bottom
-        if bottom_overlap > 0:
-            bottom_padding = min(bottom_overlap + 0.01, 0.25)
-
-    if hasattr(plt, "close"):
-        plt.close(fig)
-
-    return (top_padding, bottom_padding)
-
-
-def apply_vertical_padding(fig: object, top_pad: float, bottom_pad: float) -> None:
-    """Resize and reposition all axes to reserve top and bottom headroom."""
-    if top_pad <= 0 and bottom_pad <= 0:
-        return
-
-    axes = list(getattr(fig, "axes", ()))
-    if not axes:
-        return
-
-    total_pad = top_pad + bottom_pad
-    if total_pad <= 0:
-        return
-
-    bottom_fraction = bottom_pad / total_pad
-    for ax in axes:
-        pos = ax.get_position()
-        # Apply per-axis clamping so short axes (e.g. colorbars) do not
-        # collapse the entire layout adjustment.
-        reduction = min(total_pad, max(pos.height - 0.01, 0.0))
-        if reduction <= 0:
-            continue
-
-        bottom_reduction = reduction * bottom_fraction
-        new_y0 = pos.y0 + bottom_reduction
-        new_height = pos.height - reduction
-        ax.set_position([pos.x0, new_y0, pos.width, new_height])
 
 
 def run_contour_plot(
@@ -443,7 +310,8 @@ def run_contour_plot(
         prepass_kwargs["blockfill"] = False
         prepass_kwargs.pop("blockfill_fast", None)
 
-        _apply_levels()
+        # Keep prepass side-effect free for level configuration; levels are
+        # applied once in the final render pass.
         cfp.con(pfld, **prepass_kwargs)
 
     annotation_text_value = annotation_text(
@@ -472,7 +340,9 @@ def run_contour_plot(
     _apply_levels()
 
     if hasattr(cfp, "setvars"):
-        cfp.setvars(title_fontsize=contour_title_fontsize)
+        # Always pass viewer=None to prevent cfplot from spawning an external
+        # image viewer (e.g. ImageMagick display) after gclose().
+        cfp.setvars(title_fontsize=contour_title_fontsize, viewer=None)
 
     cfp.con(pfld, **contour_kwargs)
     
@@ -497,6 +367,18 @@ def run_contour_plot(
 
     if filename is not None:
         cfp.gclose()
+        output_path = str(filename)
+        output_exists = False
+        try:
+            with open(output_path, "rb"):
+                output_exists = True
+        except OSError:
+            output_exists = False
+
+        # Some cf-plot backends can silently skip writing the requested file.
+        # Fall back to matplotlib savefig to ensure the user-selected file is created.
+        if not output_exists and hasattr(plt, "savefig"):
+            plt.savefig(output_path)
 
 def run_line_plot(
     pfld: object,
