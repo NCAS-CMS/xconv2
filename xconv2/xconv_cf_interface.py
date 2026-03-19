@@ -7,8 +7,11 @@ code snippets in ``cf_templates.py`` can call them directly.
 
 from __future__ import annotations
 
+import logging
+
 import cf
 import cfplot as cfp
+import numpy as np
 from matplotlib import pyplot as plt
 from xconv2.cell_method_handler import cell_methods_string_from_field
 from xconv2.lineplot import LinePlot
@@ -27,10 +30,14 @@ __all__ = [
     "annotation_text",
     "estimate_layout_padding",
     "apply_vertical_padding",
+    "contour_data_range",
     "auto_contour_title",
     "run_contour_plot",
     "run_line_plot",
 ]
+
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -78,7 +85,19 @@ def coordinate_info(field: object) -> list[tuple[str, list[str]]]:
     """
     coords: list[tuple[str, list[str]]] = []
     for key, c in field.dimension_coordinates(todict=True).items():
-        arr = getattr(c, "array", None)
+        try:
+            arr = getattr(c, "array", None)
+        except Exception as exc:
+            # Some backend combinations (notably newer h5netcdf/h5py stacks)
+            # can fail when materializing coordinate arrays. Skip only the
+            # problematic coordinate so metadata loading can continue.
+            logger.warning(
+                "Skipping coordinate in metadata extraction due to backend read error: key=%s identity=%s error=%s",
+                key,
+                c.identity(default="unknown"),
+                exc,
+            )
+            continue
         if arr is None:
             continue
         if len(arr) <= 1:
@@ -87,6 +106,28 @@ def coordinate_info(field: object) -> list[tuple[str, list[str]]]:
         coords.append((c.identity(default="unknown"), vals, str(getattr(c, "Units",""))))
 
     return coords
+
+
+def contour_data_range(pfld: object) -> tuple[float, float]:
+    """Return contour min/max while tolerating backend indexing quirks.
+
+    Primary path uses the field array directly so masked values are excluded.
+    If that fails (for example with some h5netcdf/h5py indexing behaviors),
+    return a safe default and let plotting continue.
+    """
+    try:
+        arr = np.ma.array(pfld.array).compressed()
+    except Exception as exc:
+        logger.warning(
+            "Falling back to default contour range due to backend read error: %s",
+            exc,
+        )
+        return 0.0, 0.0
+
+    if arr.size == 0:
+        return 0.0, 0.0
+
+    return float(arr.min()), float(arr.max())
 
 
 def get_data_for_plotting(

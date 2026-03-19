@@ -6,7 +6,12 @@ import numpy as np
 
 from xconv2.cf_templates import contour_range_from_selection, plot_from_selection, save_data_from_selection
 import xconv2.xconv_cf_interface as cf_interface
-from xconv2.xconv_cf_interface import auto_contour_title, get_data_for_plotting, run_contour_plot
+from xconv2.xconv_cf_interface import (
+    auto_contour_title,
+    contour_data_range,
+    get_data_for_plotting,
+    run_contour_plot,
+)
 from xconv2.ui.contour_options_controller import ContourOptionsController
 
 
@@ -121,6 +126,7 @@ def _run_generated(
         "cf": _FakeCF,
         "np": np,
         "get_data_for_plotting": get_data_for_plotting,
+        "contour_data_range": contour_data_range,
         "save_selected_field_data": lambda _field, _path: None,
         "run_contour_plot": run_contour_plot,
         "auto_contour_title": auto_contour_title,
@@ -246,6 +252,29 @@ def test_contour_range_from_selection_emits_min_max_payload() -> None:
     assert prefix == "CONTOUR_RANGE"
     assert payload["min"] == 0.0
     assert payload["max"] == 3.0
+    assert isinstance(payload.get("suggested_title"), str)
+
+
+def test_contour_range_from_selection_falls_back_when_array_read_fails() -> None:
+    code = contour_range_from_selection(
+        selections={"latitude": ("-90", "90"), "longitude": ("0", "359")},
+        collapse_by_coord={},
+    )
+
+    class _BrokenArrayField(_FakeField):
+        @property
+        def array(self) -> np.ndarray:  # type: ignore[override]
+            raise TypeError("Indexing with None (or np.newaxis) is not supported")
+
+    fld = _BrokenArrayField()
+    cfp = _FakeCFPlot()
+    messages = _run_generated(code, fld, cfp)
+
+    assert messages
+    prefix, payload = messages[-1]
+    assert prefix == "CONTOUR_RANGE"
+    assert payload["min"] == 0.0
+    assert payload["max"] == 0.0
     assert isinstance(payload.get("suggested_title"), str)
 
 

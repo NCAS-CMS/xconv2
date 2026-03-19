@@ -38,6 +38,26 @@ collapse_methods = (
     'variance',
 )
 
+map_projections = {
+    'cyl': 'cylindrical',
+    'npstere': 'north polar stereographic',
+    'spstere': 'south polar stereographic',
+    'ortho': 'orthographic',
+    'merc': 'mercator',
+    'moll': 'mollweide',
+    'robin': 'robinson',
+    'lcc': 'lambert conformal conic',
+    'rotated': 'rotated pole',
+    'UKCP': 'UK Climate Projections',
+    'OSGB': 'UK Ordnance Survey',
+    'EuroPP': 'European Polar',
+}
+map_resolution_options = (
+    '110m',
+    '50m',
+    '10m',
+)
+
 def coordinate_list(index: int) -> str:
     """Generate worker code that emits 1D dimension-coordinate values for a field."""
     return textwrap.dedent(
@@ -98,16 +118,13 @@ def contour_range_from_selection(
     prep_code = _pfld_from_selection_code(selections, collapse_by_coord)
     range_code = textwrap.dedent(
         """
-        arr = np.ma.array(pfld.array).compressed()
+        range_min, range_max = contour_data_range(pfld)
         suggested_title = auto_contour_title(
             pfld=pfld,
             selection_spec=selection_spec,
             collapse_by_coord=collapse_by_coord,
         )
-        if arr.size == 0:  #omit4save
-            send_to_gui('CONTOUR_RANGE', {'min': 0.0, 'max': 0.0, 'suggested_title': suggested_title}) #omit4save
-        else:
-            send_to_gui('CONTOUR_RANGE', {'min': float(arr.min()), 'max': float(arr.max()), 'suggested_title': suggested_title}) #omit4save
+        send_to_gui('CONTOUR_RANGE', {'min': range_min, 'max': range_max, 'suggested_title': suggested_title}) #omit4save
         """
     ).lstrip()
     return "\n".join([prep_code, range_code])

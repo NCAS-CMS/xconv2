@@ -44,3 +44,7 @@ xconv2 = ["assets/*.svg", "assets/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    "ignore:distutils Version classes are deprecated. Use packaging.version instead.:DeprecationWarning:cfplot.cfplot",
+    "ignore:'maxsplit' is passed as positional argument:DeprecationWarning:cf.functions",
+]

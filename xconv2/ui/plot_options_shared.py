@@ -92,6 +92,8 @@ def build_common_options_sections(
 
     titles_group = QGroupBox("Titles")
     titles_layout = QVBoxLayout(titles_group)
+    titles_layout.setContentsMargins(9, 4, 9, 4)
+    titles_layout.setSpacing(4)
 
     title_row = QHBoxLayout()
     title_label = QLabel(plot_title_label)
@@ -114,6 +116,8 @@ def build_common_options_sections(
 
     annotations_group = QGroupBox("Choose annotation properties")
     annotations_layout = QVBoxLayout(annotations_group)
+    annotations_layout.setContentsMargins(9, 4, 9, 4)
+    annotations_layout.setSpacing(4)
 
     selected_annotation_props: list[tuple[str, str]] = []
     existing_props = existing.get("annotation_properties", [])
@@ -131,20 +135,20 @@ def build_common_options_sections(
     free_text_label = QLabel("free text")
     free_text_edit = QLineEdit(str(existing.get("annotation_free_text", "")))
     free_text_edit.setPlaceholderText("Optional custom annotation text")
-    free_text_row.addWidget(free_text_label)
-    free_text_row.addWidget(free_text_edit, 1)
-    annotations_layout.addLayout(free_text_row)
 
     annotation_limit_label = QLabel()
     annotation_limit_label.setStyleSheet("color: #666;")
 
     def _refresh_annotation_limit_hint() -> None:
         max_selected = 3 if free_text_edit.text().strip() else 4
-        annotation_limit_label.setText(f"Annotation property limit: {max_selected}")
+        annotation_limit_label.setText(f"Limit: {max_selected}")
 
     free_text_edit.textChanged.connect(lambda _text: _refresh_annotation_limit_hint())
     _refresh_annotation_limit_hint()
-    annotations_layout.addWidget(annotation_limit_label)
+
+    free_text_row.addWidget(free_text_label)
+    free_text_row.addWidget(free_text_edit, 1)
+    annotations_layout.addLayout(free_text_row)
 
     top_margin_spin = QDoubleSpinBox()
     top_margin_spin.setRange(0.0, 0.20)
@@ -169,16 +173,15 @@ def build_common_options_sections(
     annotation_display_checkbox.setChecked(bool(existing.get("annotation_display", False)))
 
     annotation_preview = QLabel()
-    annotation_preview.setWordWrap(True)
     annotation_preview.setStyleSheet("color: #444;")
 
     def _refresh_annotation_preview() -> None:
         if not selected_annotation_props:
-            annotation_preview.setText("No annotation properties selected")
+            annotation_preview.setText("(none selected)")
             annotation_preview.setToolTip("")
             return
         count = len(selected_annotation_props)
-        annotation_preview.setText(f"Selected annotation properties: {count}")
+        annotation_preview.setText(f"({count} selected)")
         annotation_preview.setToolTip(
             "\n".join(f"{key}: {value}" for key, value in selected_annotation_props)
         )
@@ -221,16 +224,18 @@ def build_common_options_sections(
     _refresh_annotation_preview()
 
     annotation_row.addWidget(choose_annotations_button)
+    annotation_row.addWidget(annotation_preview)
     annotation_row.addStretch(1)
     annotation_row.addWidget(annotation_display_checkbox)
     annotations_layout.addLayout(annotation_row)
-    annotations_layout.addWidget(annotation_preview)
 
     margin_row = QHBoxLayout()
     layout_label = QLabel("Layout:")
     top_margin_label = QLabel("top margin")
     bottom_margin_label = QLabel("bottom margin")
     margin_row.addWidget(layout_label)
+    margin_row.addWidget(annotation_limit_label)
+    margin_row.addSpacing(10)
     margin_row.addWidget(top_margin_label)
     margin_row.addWidget(top_margin_spin)
     margin_row.addSpacing(10)
