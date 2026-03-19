@@ -233,6 +233,7 @@ def save_selected_field_data(field: object, filename: str) -> None:
 def run_contour_plot(
     pfld: object,
     options: dict[str, object] | None,
+    mapset: dict[str, object] | None = None,
     selection_spec: dict[str, tuple[object, object]] | None = None,
     collapse_by_coord: dict[str, str] | None = None,
 ) -> None:
@@ -250,8 +251,28 @@ def run_contour_plot(
         None
     """
     options = options or {}
+    mapset = mapset or {}
     selection_spec = selection_spec or {}
     collapse_by_coord = collapse_by_coord or {}
+
+    if mapset.get("map_projection"):
+        projection = mapset.get("map_projection",'cyl')
+        resolution = mapset.get("map_resolution", "110m")
+        if projection in ['spstere','npstere']:
+            cfp.mapset(proj=projection, 
+                       resolution=resolution, 
+                       boundinglat=mapset.get("boundinglat", -30 if projection == 'spstere' else 30))
+        else:
+            lonmin, latmin, lonmax, latmax = mapset.get("bbox", (None, None, None, None))
+            with open('testing-maps.txt', 'a') as f:
+                f.write(f"projection={projection} resolution={resolution} lonmin={lonmin} lonmax={lonmax} latmin={latmin} latmax={latmax}\n")
+
+            if projection =='ortho':
+                raise ValueError("Need lon0 and lat0 for orthographic projection, xconv2 issue")
+            cfp.mapset(proj=projection, 
+                       resolution=resolution,
+                       lonmin=lonmin, lonmax=lonmax, latmin=latmin, latmax=latmax,
+            )
 
     filename = options.get("filename")
     title = options.get("title")

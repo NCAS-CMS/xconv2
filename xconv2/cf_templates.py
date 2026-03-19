@@ -156,9 +156,16 @@ def contour(options: dict[str, object] | None) -> str:
     payload_code = textwrap.dedent(
         f"""
         contour_options = {options!r}
+        mapset_options = {{
+            'map_projection': contour_options.get('map_projection') if contour_options else None,
+            'bbox': contour_options.get('bbox') if contour_options else None,
+            'boundinglat': contour_options.get('boundinglat') if contour_options else None,
+            'map_resolution': contour_options.get('map_resolution') if contour_options else None,
+        }}
         run_contour_plot(
             pfld=pfld,
             options=contour_options,
+            mapset=mapset_options,
             selection_spec=selection_spec,
             collapse_by_coord=collapse_by_coord,
         )
