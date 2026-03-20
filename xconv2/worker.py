@@ -8,12 +8,10 @@ import warnings
 import inspect
 import json
 import re
-import shutil
 import textwrap
 import time
 from io import BytesIO
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import Any, NamedTuple
 
 import matplotlib
@@ -196,14 +194,6 @@ def _extract_task_headers(code: str) -> TaskHeaders:
     )
 
 
-def _cf_read_supports_filesystem() -> bool:
-    """Return True when the installed cf.read accepts a filesystem keyword."""
-    try:
-        return "filesystem" in inspect.signature(cf.read).parameters
-    except Exception:
-        return False
-
-
 def _close_remote_session_entry(entry: RemoteSessionEntry) -> None:
     """Best-effort cleanup for cached remote session resources."""
     filesystem = entry.filesystem
@@ -344,41 +334,12 @@ def _read_remote_fields(
     *,
     entry: RemoteSessionEntry,
     descriptor: dict[str, Any],
-    uri: str,
-    path: str,
+    datasets: str | list[str],
 ):
-    """Read remote fields using warmed sessions when possible, else protocol fallbacks."""
+    """Read remote fields using the warmed filesystem and dataset path(s)."""
     filesystem = entry.filesystem
-    protocol = str(descriptor.get("protocol", "")).lower()
-
-    if _cf_read_supports_filesystem():
-        return cf.read(path, filesystem=filesystem)
-
-    if protocol == "s3":
-        storage_options = descriptor.get("storage_options")
-        # cfdm's s3 path handling reads u.path[1:] and ignores URI authority,
-        # so use s3:///bucket/key form to keep bucket in the path component.
-        cfdm_s3_uri = f"s3:///{path.lstrip('/')}"
-        if isinstance(storage_options, dict):
-            return cf.read(cfdm_s3_uri, storage_options=storage_options)
-        return cf.read(cfdm_s3_uri)
-
-    if protocol == "http":
-        return cf.read(uri)
-
-    suffix = Path(path).suffix or ".nc"
-    with filesystem.open(path, "rb") as remote_file:
-        with NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp_path = tmp.name
-            shutil.copyfileobj(remote_file, tmp)
-
-    try:
-        return cf.read(tmp_path)
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            logger.exception("Failed to remove staged remote file %s", tmp_path)
+    _ = descriptor
+    return cf.read(datasets, filesystem=filesystem)
 
 
 def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) -> None:
@@ -442,9 +403,15 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
             raise ValueError("REMOTE_OPEN requires session_id, descriptor_hash, and descriptor")
 
         uri = str(payload.get("uri", ""))
-        path = str(payload.get("path", ""))
-        if not uri or not path:
-            raise ValueError("REMOTE_OPEN requires uri and path")
+        raw_paths = payload.get("paths")
+        if isinstance(raw_paths, list):
+            paths = [str(item) for item in raw_paths if str(item)]
+        else:
+            path = str(payload.get("path", ""))
+            paths = [path] if path else []
+        if not uri or not paths:
+            raise ValueError("REMOTE_OPEN requires uri and at least one path")
+        datasets: str | list[str] = paths[0] if len(paths) == 1 else paths
 
         _send_remote_status(
             "preparing",
@@ -461,8 +428,7 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
         fields = _read_remote_fields(
             entry=entry,
             descriptor=descriptor,
-            uri=uri,
-            path=path,
+            datasets=datasets,
         )
 
         worker_globals["_cfview_file_path"] = uri

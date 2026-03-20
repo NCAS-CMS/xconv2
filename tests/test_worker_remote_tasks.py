@@ -49,7 +49,7 @@ def test_prepare_remote_session_reuses_cached_entry(monkeypatch) -> None:
     assert created == ["sftp"]
 
 
-def test_read_remote_fields_uses_filesystem_keyword_when_supported(monkeypatch) -> None:
+def test_read_remote_fields_uses_filesystem_keyword(monkeypatch) -> None:
     fake_fs = _FakeFilesystem()
     entry = worker.RemoteSessionEntry(
         session_id="session-1",
@@ -59,48 +59,35 @@ def test_read_remote_fields_uses_filesystem_keyword_when_supported(monkeypatch) 
     )
     calls: list[tuple[str, object]] = []
 
-    monkeypatch.setattr(worker, "_cf_read_supports_filesystem", lambda: True)
-    monkeypatch.setattr(worker.cf, "read", lambda path, filesystem=None: calls.append((path, filesystem)) or ["fields"])
+    monkeypatch.setattr(worker.cf, "read", lambda datasets, filesystem=None: calls.append((datasets, filesystem)) or ["fields"])
 
     fields = worker._read_remote_fields(
         entry=entry,
         descriptor={"protocol": "sftp"},
-        uri="ssh://alpha.example.org/data/file.nc",
-        path="/data/file.nc",
+        datasets="/data/file.nc",
     )
 
     assert fields == ["fields"]
     assert calls == [("/data/file.nc", fake_fs)]
 
 
-def test_read_remote_fields_stages_sftp_file_when_filesystem_keyword_missing(monkeypatch, tmp_path) -> None:
-    fake_fs = _FakeFilesystem(b"abc123")
+def test_read_remote_fields_supports_multiple_paths(monkeypatch) -> None:
+    fake_fs = _FakeFilesystem()
     entry = worker.RemoteSessionEntry(
         session_id="session-1",
         descriptor_hash="hash-1",
         descriptor={"protocol": "sftp"},
         filesystem=fake_fs,
     )
-    calls: list[str] = []
+    calls: list[tuple[object, object]] = []
 
-    monkeypatch.setattr(worker, "_cf_read_supports_filesystem", lambda: False)
-
-    def _fake_cf_read(path: str, **kwargs):
-        _ = kwargs
-        calls.append(path)
-        with open(path, "rb") as handle:
-            assert handle.read() == b"abc123"
-        return ["fields"]
-
-    monkeypatch.setattr(worker.cf, "read", _fake_cf_read)
+    monkeypatch.setattr(worker.cf, "read", lambda datasets, filesystem=None: calls.append((datasets, filesystem)) or ["fields"])
 
     fields = worker._read_remote_fields(
         entry=entry,
         descriptor={"protocol": "sftp"},
-        uri="ssh://alpha.example.org/data/file.nc",
-        path="/data/file.nc",
+        datasets=["/data/file-a.nc", "/data/file-b.nc"],
     )
 
     assert fields == ["fields"]
-    assert len(calls) == 1
-    assert not fake_fs.open_calls == []
+    assert calls == [(["/data/file-a.nc", "/data/file-b.nc"], fake_fs)]
