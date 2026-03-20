@@ -18,7 +18,7 @@ import logging
 from typing import Sequence
 from urllib.parse import urlparse
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import QTimer, Qt, QUrl
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QPlainTextEdit,
     QScrollArea,
     QSizePolicy,
     QStatusBar,
@@ -58,6 +59,7 @@ from .ui.selection_controller import SelectionController
 from .ui.dialogs import OpenGlobDialog, OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog
 from .ui.remote_file_navigator import RemoteFileNavigatorDialog
 from .ui.settings_store import SettingsStore
+from .logging_utils import get_log_file_path
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -66,6 +68,93 @@ DEFAULT_MAX_RECENT_FILES = 10
 SETTINGS_VERSION = 1
 STATUSBAR_NORMAL_STYLE = ""
 STATUSBAR_ERROR_STYLE = "QStatusBar { color: #c62828; font-weight: 600; }"
+
+
+class LogViewerDialog(QDialog):
+    """Tail and display the shared application log file."""
+
+    def __init__(self, parent: QWidget | None, log_path: Path) -> None:
+        super().__init__(parent)
+        self._log_path = log_path
+        self._read_pos = 0
+
+        self.setWindowTitle("xconv2 Logs")
+        self.resize(900, 520)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(str(log_path)))
+
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setLineWrapMode(QPlainTextEdit.NoWrap)
+        layout.addWidget(self.log_view, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        flush_button = buttons.addButton("Flush Log", QDialogButtonBox.ActionRole)
+        flush_button.clicked.connect(self._flush_log)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(300)
+        self._timer.timeout.connect(self._refresh_from_file)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._refresh_from_file()
+        self._timer.start()
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def _refresh_from_file(self) -> None:
+        """Append only new log bytes and keep viewport pinned to the end."""
+        try:
+            size = self._log_path.stat().st_size
+        except OSError:
+            return
+
+        if size < self._read_pos:
+            # File was truncated/rotated; reset view and start from top again.
+            self._read_pos = 0
+            self.log_view.clear()
+
+        if size == self._read_pos:
+            return
+
+        try:
+            with self._log_path.open("r", encoding="utf-8", errors="replace") as handle:
+                handle.seek(self._read_pos)
+                chunk = handle.read()
+                self._read_pos = handle.tell()
+        except OSError:
+            return
+
+        if not chunk:
+            return
+
+        cursor = self.log_view.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.insertText(chunk)
+        self.log_view.setTextCursor(cursor)
+        self.log_view.ensureCursorVisible()
+        scrollbar = self.log_view.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _flush_log(self) -> None:
+        """Truncate the backing log file and reset the live view state."""
+        self._timer.stop()
+        try:
+            with self._log_path.open("w", encoding="utf-8"):
+                pass
+        except OSError as exc:
+            QMessageBox.warning(self, "Flush Log Failed", str(exc))
+        else:
+            self._read_pos = 0
+            self.log_view.clear()
+        finally:
+            self._timer.start()
 
 
 class CFVCore(QMainWindow):
@@ -112,6 +201,7 @@ class CFVCore(QMainWindow):
         self.selection_info_toggle_button: QToolButton | None = None
         self._selection_info_visible = True
         self._selection_info_expanded_from_width: int | None = None
+        self._log_viewer_dialog: LogViewerDialog | None = None
 
         self.setup_ui()
         self._setup_tray_icon()
@@ -120,8 +210,6 @@ class CFVCore(QMainWindow):
         """Create application icon with a stable fallback chain."""
         assets_dir = Path(__file__).resolve().parent / "assets"
         candidate_paths = [
-            assets_dir / "cf-logo-box.png",
-            assets_dir / "cf-logo-box.svg",
             assets_dir / "cf-logo.png",
             assets_dir / "cf-logo.svg",
         ]
@@ -328,6 +416,23 @@ class CFVCore(QMainWindow):
         if not QDesktopServices.openUrl(roadmap_url):
             self.status.showMessage("Unable to open roadmap URL.")
             logger.warning("Failed to open roadmap URL: %s", roadmap_url.toString())
+
+    def _view_logs(self) -> None:
+        """Show a live in-app view of the shared application log file."""
+        log_path = get_log_file_path()
+        try:
+            log_path.touch(exist_ok=True)
+        except OSError:
+            self._show_status_message(f"Unable to create log file: {log_path}", is_error=True)
+            logger.exception("Failed to ensure log file exists: %s", log_path)
+            return
+
+        if self._log_viewer_dialog is None:
+            self._log_viewer_dialog = LogViewerDialog(self, log_path)
+
+        self._log_viewer_dialog.show()
+        self._log_viewer_dialog.raise_()
+        self._log_viewer_dialog.activateWindow()
 
     def _refresh_recent_menu(self) -> None:
         """Refresh the Recent submenu from the persisted log file."""

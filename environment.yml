@@ -10,7 +10,6 @@ dependencies:
   - cartopy  # no pip wheel
   - udunits2  # no pip wheel; required by cf-python/cf-units
   - cf-plot
-  - cf-python
   - pandas
   - pyside6
   - setuptools >80  # cfplot imports distutils
@@ -19,4 +18,6 @@ dependencies:
   # testing
   - pytest
   - pip:
+      - "git+https://github.com/ncas-cms/cfdm.git@main"
+      - "git+https://github.com/ncas-cms/cf-python.git@main"
       - "-e ."  # xconv2 is not yet on conda-forge

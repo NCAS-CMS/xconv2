@@ -30,6 +30,7 @@ from . import xconv_cf_interface
 from . import lineplot as xconv_lineplot
 from . import cell_method_handler as xconv_cell_method_handler
 from . import __version__
+from .logging_utils import configure_logging
 from .ui.remote_file_navigator import (
     create_filesystem,
     descriptor_to_spec,
@@ -620,13 +621,10 @@ def _emit_latest_plot_image() -> None:
 
 def main():
     """Entry point for the cf-worker command."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        force=True,
-    )
+    log_file = configure_logging()
 
     logger.info("Worker starting")
+    logger.info("Log file: %s", log_file)
     logger.info(
         "PLOT_DIAG worker_runtime version=%s module_dir=%s backend=%s",
         __version__,
@@ -690,7 +688,6 @@ def main():
                             message=error_line,
                         )
                     send_to_gui(f"STATUS:Error - {error_line}")
-                    print(err, file=sys.stderr)
                     logger.exception("Control task failed: %s", task_kind)
                 current_block = []
                 continue
@@ -724,7 +721,6 @@ def main():
                 # Send the full error back to the GUI for debugging
                 err = traceback.format_exc()
                 send_to_gui(f"STATUS:Error - {err.splitlines()[-1]}")
-                print(err, file=sys.stderr)
                 logger.exception("Task failed")
 
             current_block = []

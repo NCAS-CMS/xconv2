@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any, Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -22,6 +24,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -509,12 +514,18 @@ class RemoteLoginLogDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Remote Login")
         self.resize(720, 360)
+        self._follow_log_output = True
+        self._auto_scrolling = False
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(f"Connecting to {display_name}"))
 
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
+        self.log_view.setCenterOnScroll(False)
+        self.log_view.textChanged.connect(self._queue_scroll_to_end)
+        self.log_view.cursorPositionChanged.connect(self._queue_scroll_to_end)
+        self.log_view.verticalScrollBar().rangeChanged.connect(lambda _min, _max: self._queue_scroll_to_end())
         layout.addWidget(self.log_view, 1)
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.Close)
@@ -524,9 +535,70 @@ class RemoteLoginLogDialog(QDialog):
         layout.addWidget(self.buttons)
 
     def append_line(self, message: str) -> None:
-        """Append one log line and flush GUI events."""
-        self.log_view.appendPlainText(message)
-        QApplication.processEvents()
+        """Append one log line and keep the viewport pinned to EOF."""
+        scrollbar = self.log_view.verticalScrollBar()
+        logger.info(
+            "REMOTE_LOG append start len=%d value=%d max=%d",
+            len(message),
+            scrollbar.value(),
+            scrollbar.maximum(),
+        )
+        cursor = self.log_view.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.log_view.setTextCursor(cursor)
+        cursor.insertText(f"{message}\n")
+        self.log_view.setTextCursor(cursor)
+        self.log_view.ensureCursorVisible()
+        logger.info(
+            "REMOTE_LOG append done cursor=%d blocks=%d value=%d max=%d",
+            self.log_view.textCursor().position(),
+            self.log_view.document().blockCount(),
+            scrollbar.value(),
+            scrollbar.maximum(),
+        )
+        self._queue_scroll_to_end()
+
+    def _queue_scroll_to_end(self) -> None:
+        """Queue an EOF scroll after pending UI updates settle."""
+        if not self._follow_log_output:
+            return
+        scrollbar = self.log_view.verticalScrollBar()
+        logger.info(
+            "REMOTE_LOG queue_scroll value=%d max=%d",
+            scrollbar.value(),
+            scrollbar.maximum(),
+        )
+        QTimer.singleShot(0, self._scroll_to_end)
+
+    def _scroll_to_end(self) -> None:
+        """Force the log viewport to the newest line."""
+        if not self._follow_log_output or self._auto_scrolling:
+            logger.info(
+                "REMOTE_LOG scroll skipped follow=%s auto=%s",
+                self._follow_log_output,
+                self._auto_scrolling,
+            )
+            return
+        self._auto_scrolling = True
+        cursor = self.log_view.textCursor()
+        scrollbar = self.log_view.verticalScrollBar()
+        before = (scrollbar.value(), scrollbar.maximum())
+        try:
+            cursor.movePosition(QTextCursor.End)
+            self.log_view.setTextCursor(cursor)
+            self.log_view.ensureCursorVisible()
+            scrollbar.setValue(scrollbar.maximum())
+            logger.info(
+                "REMOTE_LOG scroll applied before=(%d,%d) after=(%d,%d) cursor=%d blocks=%d",
+                before[0],
+                before[1],
+                scrollbar.value(),
+                scrollbar.maximum(),
+                self.log_view.textCursor().position(),
+                self.log_view.document().blockCount(),
+            )
+        finally:
+            self._auto_scrolling = False
 
     def mark_failed(self, message: str) -> None:
         """Mark connection failure and keep dialog open until user closes it."""

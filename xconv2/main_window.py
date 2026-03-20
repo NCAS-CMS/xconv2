@@ -284,7 +284,7 @@ class CFVMain(CFVCore):
                     logger.warning("Unexpected CONTOUR_RANGE payload type: %s", type(payload).__name__)
 
     def handle_worker_error(self) -> None:
-        """Log worker stderr output with best-effort severity mapping."""
+        """Log any worker stderr output as errors."""
         stderr_output = self.worker.readAllStandardError().data().decode(errors="replace").strip()
         if not stderr_output:
             return
@@ -293,15 +293,7 @@ class CFVMain(CFVCore):
             line = raw_line.strip()
             if not line:
                 continue
-
-            if " ERROR " in line or line.startswith("ERROR") or line.startswith("Traceback"):
-                logger.error("Worker stderr: %s", line)
-            elif " WARNING " in line or line.startswith("WARNING"):
-                logger.warning("Worker stderr: %s", line)
-            elif " INFO " in line or line.startswith("INFO"):
-                logger.info("Worker: %s", line)
-            else:
-                logger.info("Worker stderr: %s", line)
+            logger.error("Worker stderr: %s", line)
 
     def handle_worker_process_error(self, process_error: QProcess.ProcessError) -> None:
         """Capture QProcess-level failures, such as start or crash issues."""
