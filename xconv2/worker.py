@@ -13,6 +13,7 @@ import time
 from io import BytesIO
 from pathlib import Path
 from typing import Any, NamedTuple
+from urllib.parse import urlparse
 
 import matplotlib
 import numpy as np
@@ -339,8 +340,60 @@ def _read_remote_fields(
 ):
     """Read remote fields using the warmed filesystem and dataset path(s)."""
     filesystem = entry.filesystem
-    _ = descriptor
-    return cf.read(datasets, filesystem=filesystem)
+    normalized_datasets = _normalize_remote_datasets_for_cf_read(
+        descriptor=descriptor,
+        datasets=datasets,
+    )
+    return cf.read(normalized_datasets, filesystem=filesystem)
+
+
+def _normalize_remote_datasets_for_cf_read(
+    *,
+    descriptor: dict[str, Any],
+    datasets: str | list[str],
+) -> str | list[str]:
+    """Normalize remote dataset paths to forms cf.read can open with a filesystem."""
+    protocol = str(descriptor.get("protocol", "")).lower()
+    if protocol != "http":
+        return datasets
+
+    root_path = str(descriptor.get("root_path", "")).strip()
+    parsed_root = urlparse(root_path)
+    if parsed_root.scheme not in {"http", "https"} or not parsed_root.netloc:
+        return datasets
+
+    origin = f"{parsed_root.scheme}://{parsed_root.netloc}"
+    root_prefix = parsed_root.path.rstrip("/")
+
+    def _normalize_one(path: str) -> str:
+        text = str(path).strip()
+        parsed = urlparse(text)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return text
+
+        if text.startswith("/"):
+            if root_prefix and (text == root_prefix or text.startswith(root_prefix + "/")):
+                return origin + text
+            if root_prefix:
+                return origin + root_prefix + text
+            return origin + text
+
+        suffix = text.lstrip("/")
+        if root_prefix:
+            return origin + root_prefix + "/" + suffix
+        return origin + "/" + suffix
+
+    if isinstance(datasets, list):
+        normalized = [_normalize_one(item) for item in datasets]
+    else:
+        normalized = _normalize_one(datasets)
+
+    logger.info(
+        "REMOTE_OPEN normalized HTTP datasets from %r to %r",
+        datasets,
+        normalized,
+    )
+    return normalized
 
 
 def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) -> None:

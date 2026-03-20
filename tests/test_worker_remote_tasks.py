@@ -91,3 +91,42 @@ def test_read_remote_fields_supports_multiple_paths(monkeypatch) -> None:
 
     assert fields == ["fields"]
     assert calls == [(["/data/file-a.nc", "/data/file-b.nc"], fake_fs)]
+
+
+def test_normalize_remote_datasets_for_http_overlap_prefix() -> None:
+    normalized = worker._normalize_remote_datasets_for_cf_read(
+        descriptor={
+            "protocol": "http",
+            "root_path": "http://server/public/canari",
+        },
+        datasets="/public/canari/file.nc",
+    )
+
+    assert normalized == "http://server/public/canari/file.nc"
+
+
+def test_normalize_remote_datasets_for_http_relative_path() -> None:
+    normalized = worker._normalize_remote_datasets_for_cf_read(
+        descriptor={
+            "protocol": "http",
+            "root_path": "http://server/public/canari",
+        },
+        datasets="file.nc",
+    )
+
+    assert normalized == "http://server/public/canari/file.nc"
+
+
+def test_normalize_remote_datasets_for_http_list() -> None:
+    normalized = worker._normalize_remote_datasets_for_cf_read(
+        descriptor={
+            "protocol": "http",
+            "root_path": "http://server/public/canari",
+        },
+        datasets=["/public/canari/a.nc", "b.nc"],
+    )
+
+    assert normalized == [
+        "http://server/public/canari/a.nc",
+        "http://server/public/canari/b.nc",
+    ]
