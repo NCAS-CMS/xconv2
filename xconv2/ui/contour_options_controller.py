@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
 )
 
-from xconv2.cf_templates import map_projections, map_resolution_options
+from xconv2.cf_templates import map_projections, map_resolution_options, use_lon_0
 from xconv2.colour_scales import cscales, get_colour_scale_hexes
 from xconv2.ui.plot_options_shared import build_common_options_sections
 
@@ -313,7 +313,7 @@ class ContourOptionsController:
         proj_row = QHBoxLayout()
         proj_combo_label = QLabel("Projection")
         proj_combo = QComboBox()
-        proj_combo.setMinimumContentsLength(20)
+        proj_combo.setMinimumContentsLength(10)
         proj_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         for name, description in map_projections.items():
             proj_combo.addItem(name)
@@ -322,7 +322,7 @@ class ContourOptionsController:
         current_projection_index = proj_combo.findText(current_projection)
         proj_combo.setCurrentIndex(current_projection_index if current_projection_index >= 0 else 0)
 
-        reset_map_defaults_button = QPushButton("Reset Map Defaults")
+        reset_map_defaults_button = QPushButton("Reset Map")
         reset_map_defaults_button.setAutoDefault(False)
         reset_map_defaults_button.setDefault(False)
 
@@ -337,6 +337,16 @@ class ContourOptionsController:
         proj_combo_label.setToolTip(projection_help_tooltip)
         proj_row.addWidget(proj_combo_label)
         proj_row.addWidget(proj_combo)
+        proj_row.addSpacing(10)
+        res_label = QLabel("Resolution")
+        res_combo = QComboBox()
+        for value in map_resolution_options:
+            res_combo.addItem(value)
+        current_resolution = str(existing.get("map_resolution", "110m") or "110m")
+        current_resolution_index = res_combo.findText(current_resolution)
+        res_combo.setCurrentIndex(current_resolution_index if current_resolution_index >= 0 else 0)
+        proj_row.addWidget(res_label)
+        proj_row.addWidget(res_combo)
         proj_row.addWidget(reset_map_defaults_button)
         proj_row.addStretch(1)
         proj_layout.addLayout(proj_row)
@@ -375,30 +385,39 @@ class ContourOptionsController:
         bbox_row.addWidget(bbox_n_spin)
         proj_layout.addLayout(bbox_row)
 
-        res_row = QHBoxLayout()
+        lat_lon_row = QHBoxLayout()
         boundinglat_label = QLabel("boundinglat")
         boundinglat_spin = QDoubleSpinBox()
         boundinglat_spin.setRange(-90.0, 90.0)
         boundinglat_spin.setDecimals(2)
         boundinglat_spin.setSingleStep(1.0)
         boundinglat_spin.setValue(float(existing.get("boundinglat", 0.0)))
-        res_label = QLabel("Resolution")
-        res_combo = QComboBox()
-        for value in map_resolution_options:
-            res_combo.addItem(value)
-        current_resolution = str(existing.get("map_resolution", "110m") or "110m")
-        current_resolution_index = res_combo.findText(current_resolution)
-        res_combo.setCurrentIndex(current_resolution_index if current_resolution_index >= 0 else 0)
-        res_row.addWidget(boundinglat_label)
-        res_row.addWidget(boundinglat_spin)
-        res_row.addSpacing(10)
-        res_row.addWidget(res_label)
-        res_row.addWidget(res_combo)
-        res_row.addStretch(1)
-        proj_layout.addLayout(res_row)
+        lat_0_label = QLabel("lat_0")
+        lat_0_spin = QDoubleSpinBox()
+        lat_0_spin.setRange(-90.0, 90.0)
+        lat_0_spin.setDecimals(2)
+        lat_0_spin.setSingleStep(1.0)
+        lat_0_spin.setValue(float(existing.get("lat_0", 0.0)))
+        lon_0_label = QLabel("lon_0")
+        lon_0_spin = QDoubleSpinBox()
+        lon_0_spin.setRange(-180.0, 360.0)
+        lon_0_spin.setDecimals(2)
+        lon_0_spin.setSingleStep(1.0)
+        lon_0_spin.setValue(float(existing.get("lon_0", 0.0)))
+        lat_lon_row.addWidget(boundinglat_label)
+        lat_lon_row.addWidget(boundinglat_spin)
+        lat_lon_row.addSpacing(10)
+        lat_lon_row.addWidget(lat_0_label)
+        lat_lon_row.addWidget(lat_0_spin)
+        lat_lon_row.addSpacing(10)
+        lat_lon_row.addWidget(lon_0_label)
+        lat_lon_row.addWidget(lon_0_spin)
+        lat_lon_row.addStretch(1)
+        proj_layout.addLayout(lat_lon_row)
 
         bbox_controls = [bbox_label, bbox_w_spin, bbox_s_spin, bbox_e_spin, bbox_n_spin]
         stereographic_controls = [boundinglat_label, boundinglat_spin]
+        other_proj_controls = [lat_0_label, lat_0_spin, lon_0_label, lon_0_spin]
 
         _projection_state: dict[str, str] = {"previous": proj_combo.currentText()}
 
@@ -411,6 +430,13 @@ class ContourOptionsController:
                 widget.setEnabled(not uses_boundinglat)
             for widget in stereographic_controls:
                 widget.setEnabled(uses_boundinglat)
+            # lat_0 only enabled for ortho projection
+            lat_0_label.setEnabled(projection == "ortho")
+            lat_0_spin.setEnabled(projection == "ortho")
+            # lon_0 enabled only for projections in use_lon_0 tuple
+            uses_lon_0 = projection in use_lon_0
+            lon_0_label.setEnabled(uses_lon_0)
+            lon_0_spin.setEnabled(uses_lon_0)
 
             previous_projection = _projection_state.get("previous", "")
             if projection != previous_projection:
@@ -429,6 +455,8 @@ class ContourOptionsController:
             bbox_e_spin.setValue(180.0)
             bbox_n_spin.setValue(90.0)
             boundinglat_spin.setValue(0.0)
+            lat_0_spin.setValue(0.0)
+            lon_0_spin.setValue(0.0)
             res_combo.setCurrentText("110m")
 
         reset_map_defaults_button.clicked.connect(_reset_map_defaults)
@@ -511,6 +539,8 @@ class ContourOptionsController:
                 ]
                 options.pop("boundinglat", None)
             options["map_resolution"] = str(res_combo.currentText())
+            options["lat_0"] = float(lat_0_spin.value())
+            options["lon_0"] = float(lon_0_spin.value())
             options.update(common.as_options())
             if selected_cscale.get("value"):
                 options["cscale"] = selected_cscale["value"]

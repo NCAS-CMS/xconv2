@@ -144,6 +144,7 @@ class _FakeCFPlot:
         self.gopen_calls: list[dict[str, object]] = []
         self.setvars_calls: list[dict[str, object]] = []
         self.gclose_calls = 0
+        self.mapset_calls: list[dict[str, object]] = []
 
     def levs(self, **kwargs: object) -> None:
         self.levs_calls.append(kwargs)
@@ -167,6 +168,9 @@ class _FakeCFPlot:
 
     def gclose(self) -> None:
         self.gclose_calls += 1
+
+    def mapset(self, **kwargs: object) -> None:
+        self.mapset_calls.append(kwargs)
 
 
 class _FakeFigure:

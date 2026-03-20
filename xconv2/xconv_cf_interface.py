@@ -229,7 +229,8 @@ def get_data_for_plotting(
 def save_selected_field_data(field: object, filename: str) -> None:
     """Persist selected field data to disk using cf.write."""
     cf.write(field, filename)
-    
+
+
 def run_contour_plot(
     pfld: object,
     options: dict[str, object] | None,
@@ -246,6 +247,15 @@ def run_contour_plot(
     Args:
         pfld: Plot-ready field-like object.
         options: Contour options mapping from GUI state or saved script.
+        mapset: Map projection options including:
+            - map_projection: Projection name ('cyl', 'npstere', 'spstere', etc.)
+            - bbox: Bounding box [lonmin, latmin, lonmax, latmax] for non-stereo projections
+            - boundinglat: Bounding latitude for stereographic projections
+            - map_resolution: Natural Earth resolution ('110m', '50m', '10m')
+            - lat_0: Standard parallel or latitude of projection center
+            - lon_0: Central meridian or longitude of projection center
+        selection_spec: Coordinate selection bounds.
+        collapse_by_coord: Collapse methods by coordinate name.
 
     Returns:
         None
@@ -255,30 +265,37 @@ def run_contour_plot(
     selection_spec = selection_spec or {}
     collapse_by_coord = collapse_by_coord or {}
 
+    # Only apply map projections if one was explicitly set
     if mapset.get("map_projection"):
-        projection = mapset.get("map_projection",'cyl')
+        projection = mapset.get("map_projection")
         resolution = mapset.get("map_resolution", "110m")
         if projection in ['spstere','npstere']:
-            cfp.mapset(proj=projection, 
-                       resolution=resolution, 
-                       boundinglat=mapset.get("boundinglat", -30 if projection == 'spstere' else 30))
-        else:
-            lonmin, latmin, lonmax, latmax = mapset.get("bbox", (None, None, None, None))
-            with open('testing-maps.txt', 'a') as f:
-                f.write(f"projection={projection} resolution={resolution} lonmin={lonmin} lonmax={lonmax} latmin={latmin} latmax={latmax}\n")
 
-            if projection =='ortho':
-                raise ValueError("Need lon0 and lat0 for orthographic projection, xconv2 issue")
             cfp.mapset(proj=projection, 
-                       resolution=resolution,
-                       lonmin=lonmin, lonmax=lonmax, latmin=latmin, latmax=latmax,
+                        resolution=resolution, 
+                        boundinglat=mapset.get("boundinglat", -45 if projection == 'spstere' else 45),
+                        lon_0=mapset.get("lon_0", 0.0),
             )
-
+        else:
+            bbox = mapset.get("bbox")
+            if bbox and isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                lonmin, latmin, lonmax, latmax = tuple(bbox)
+            else:
+                lonmin, latmin, lonmax, latmax = None, None, None, None
+            lon_0 = mapset.get("lon_0", 0.0)
+            lat_0 = mapset.get("lat_0", 0.0)
+        
+            cfp.mapset(proj=projection, 
+                        resolution=resolution,
+                        lonmin=lonmin, lonmax=lonmax, latmin=latmin, latmax=latmax,
+                        lon_0= lon_0, lat_0=lat_0
+            )
+            
+    annotation_display = bool(options.get("annotation_display", False))
     filename = options.get("filename")
     title = options.get("title")
     page_title = options.get("page_title")
     page_title_display = bool(options.get("page_title_display", False))
-    annotation_display = bool(options.get("annotation_display", False))
     annotation_properties = options.get("annotation_properties", [])
     annotation_free_text = str(options.get("annotation_free_text", "") or "").strip()
     cscale = options.get("cscale")
@@ -376,10 +393,14 @@ def run_contour_plot(
         prepass_kwargs["line_labels"] = False
         prepass_kwargs["blockfill"] = False
         prepass_kwargs.pop("blockfill_fast", None)
+        prepass_kwargs.pop("title", None)
 
         # Keep prepass side-effect free for level configuration; levels are
         # applied once in the final render pass.
-        cfp.con(pfld, **prepass_kwargs)
+        try:
+            cfp.con(pfld, **prepass_kwargs)
+        except Exception as exc:
+            logger.warning("Skipping contour prepass after cf-plot error: %s", exc)
 
     annotation_text_value = annotation_text(
         annotation_display=annotation_display,
@@ -408,7 +429,36 @@ def run_contour_plot(
         # image viewer (e.g. ImageMagick display) after gclose().
         cfp.setvars(title_fontsize=contour_title_fontsize, viewer=None)
 
-    cfp.con(pfld, **contour_kwargs)
+    map_title_fallback_used = False
+    fallback_contour_title = str(contour_kwargs.get("title", "") or "")
+
+    try:
+        cfp.con(pfld, **contour_kwargs)
+    except UnboundLocalError as exc:
+        # cf-plot can fail in _map_title with "xpt" unbound for some
+        # projection/title combinations. Retry once without title.
+        if "xpt" in str(exc) and "title" in contour_kwargs:
+            map_title_fallback_used = True
+            logger.warning(
+                "CFP_TITLE_FALLBACK retrying contour render without title after cf-plot _map_title error: %s",
+                exc,
+            )
+            fallback_kwargs = dict(contour_kwargs)
+            fallback_kwargs.pop("title", None)
+            cfp.con(pfld, **fallback_kwargs)
+
+            # Preserve a visible title after disabling map-title rendering.
+            if fallback_contour_title and not (page_title_display and page_title):
+                page_title = fallback_contour_title
+                page_title_display = True
+        else:
+            raise
+
+    if map_title_fallback_used:
+        logger.info("CFP_TITLE_FALLBACK_APPLIED title rendered as page title")
+        send_to_gui_fn = globals().get("send_to_gui")
+        if callable(send_to_gui_fn):
+            send_to_gui_fn("STATUS:Map title fallback applied (cf-plot _map_title bug workaround)")
     
     mycanvas = plt.gcf()
     if top_padding > 0 or bottom_padding > 0:

@@ -61,6 +61,7 @@ class _FakeCFPlot:
     cscale_calls: list[dict[str, object]] = field(default_factory=list)
     gopen_calls: list[dict[str, object]] = field(default_factory=list)
     gclose_calls: int = 0
+    mapset_calls: list[dict[str, object]] = field(default_factory=list)
 
     def levs(self, **kwargs: object) -> None:
         self.levs_calls.append(kwargs)
@@ -78,6 +79,9 @@ class _FakeCFPlot:
 
     def gclose(self) -> None:
         self.gclose_calls += 1
+
+    def mapset(self, **kwargs: object) -> None:
+        self.mapset_calls.append(kwargs)
 
 
 @dataclass

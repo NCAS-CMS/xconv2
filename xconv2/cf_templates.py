@@ -40,13 +40,13 @@ collapse_methods = (
 
 map_projections = {
     'cyl': 'cylindrical',
-    'npstere': 'north polar stereographic',
-    'spstere': 'south polar stereographic',
-    'ortho': 'orthographic',
-    'merc': 'mercator',
-    'moll': 'mollweide',
-    'robin': 'robinson',
-    'lcc': 'lambert conformal conic',
+    'npstere': 'north polar stereographic',  # lon0
+    'spstere': 'south polar stereographic',  # lon0
+    'ortho': 'orthographic',  #lat0, lon0
+    'merc': 'mercator', #lon0
+    'moll': 'mollweide', #lon0
+    'robin': 'robinson', #lon0
+    'lcc': 'lambert conformal conic', #lon0 
     'rotated': 'rotated pole',
     'UKCP': 'UK Climate Projections',
     'OSGB': 'UK Ordnance Survey',
@@ -57,6 +57,7 @@ map_resolution_options = (
     '50m',
     '10m',
 )
+use_lon_0 = ('npstere', 'spstere', 'ortho', 'merc', 'moll', 'robin', 'lcc')
 
 def coordinate_list(index: int) -> str:
     """Generate worker code that emits 1D dimension-coordinate values for a field."""
@@ -161,6 +162,8 @@ def contour(options: dict[str, object] | None) -> str:
             'bbox': contour_options.get('bbox') if contour_options else None,
             'boundinglat': contour_options.get('boundinglat') if contour_options else None,
             'map_resolution': contour_options.get('map_resolution') if contour_options else None,
+            'lat_0': contour_options.get('lat_0') if contour_options else None,
+            'lon_0': contour_options.get('lon_0') if contour_options else None,
         }}
         run_contour_plot(
             pfld=pfld,

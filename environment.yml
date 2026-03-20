@@ -18,6 +18,5 @@ dependencies:
   - zarr
   # testing
   - pytest
-  - pip
   - pip:
       - "-e ."  # xconv2 is not yet on conda-forge
