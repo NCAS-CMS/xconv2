@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QStyle,
     QSystemTrayIcon,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -108,6 +109,9 @@ class CFVCore(QMainWindow):
         self._plot_pixmap_original: QPixmap | None = None
         self.current_selection_info_text = "No selection info available."
         self.slider_scroll_area: QScrollArea | None = None
+        self.selection_info_toggle_button: QToolButton | None = None
+        self._selection_info_visible = True
+        self._selection_info_expanded_from_width: int | None = None
 
         self.setup_ui()
         self._setup_tray_icon()
@@ -183,6 +187,7 @@ class CFVCore(QMainWindow):
         self.plot_area = self._create_plot_area()
         layout.addWidget(left_panel)
         layout.addWidget(self.plot_area, stretch=1)
+        self._update_selection_info_toggle_button()
 
         self._setup_menu_bar()
         self._setup_status_bar()
@@ -807,9 +812,13 @@ class CFVCore(QMainWindow):
         reset_button = QPushButton("Reset all sliders")
         reset_button.setToolTip("Reset all range sliders to full coordinate extent")
         reset_button.clicked.connect(self._reset_all_sliders)
+        self.selection_info_toggle_button = QToolButton()
+        self.selection_info_toggle_button.setAutoRaise(True)
+        self.selection_info_toggle_button.clicked.connect(self._toggle_selection_info_panel)
         controls_row.addWidget(properties_button)
         controls_row.addWidget(reset_button)
         controls_row.addStretch(1)
+        controls_row.addWidget(self.selection_info_toggle_button)
 
         layout.addLayout(controls_row)
         layout.addWidget(self._create_slider_scroll_area())
@@ -854,6 +863,41 @@ class CFVCore(QMainWindow):
     def _show_selection_properties(self) -> None:
         """Show properties for the currently selected field."""
         self.field_metadata_controller.show_selection_properties()
+
+    def _toggle_selection_info_panel(self) -> None:
+        """Show or hide the field-detail panel above the plot."""
+        if self._selection_info_visible:
+            self._selection_info_expanded_from_width = self.width()
+        self._set_selection_info_panel_visible(not self._selection_info_visible)
+        self._update_selection_info_toggle_button()
+        self.plot_view_controller.adjust_window_width_for_info_panel(self._selection_info_visible)
+
+    def _set_selection_info_panel_visible(self, visible: bool) -> None:
+        """Set the details panel visibility without toggling width behavior."""
+        self._selection_info_visible = visible
+        if hasattr(self, "plot_info_output") and self.plot_info_output is not None:
+            self.plot_info_output.setVisible(visible)
+
+    def _update_selection_info_toggle_button(self) -> None:
+        """Sync the details-toggle button icon and tooltip with panel visibility."""
+        button = self.selection_info_toggle_button
+        if button is None:
+            return
+
+        if hasattr(self, "plot_info_output") and self.plot_info_output is not None:
+            # Use explicit hidden state: isVisible() is false before the top-level window is shown.
+            self._selection_info_visible = not self.plot_info_output.isHidden()
+
+        if self._selection_info_visible:
+            icon = self.style().standardIcon(QStyle.SP_TitleBarShadeButton)
+            tooltip = "Hide field details"
+        else:
+            icon = self.style().standardIcon(QStyle.SP_TitleBarUnshadeButton)
+            tooltip = "Show field details"
+
+        button.setIcon(icon)
+        button.setToolTip(tooltip)
+        button.setStatusTip(tooltip)
 
     def _save_properties_to_csv(
         self,
@@ -1207,6 +1251,24 @@ class CFVCore(QMainWindow):
     def _request_plot_save(self, file_path: str) -> None:
         """Hook for worker-backed implementations to save rendered plot output."""
         logger.debug("Requested plot save to: %s", file_path)
+
+    def _request_plot_data_save(self, file_path: str) -> None:
+        """Hook for worker-backed implementations to save selected field data."""
+        logger.debug("Requested data save to: %s", file_path)
+
+    def _request_plot_save_all(
+        self,
+        save_code_path: str,
+        save_plot_path: str,
+        save_data_path: str,
+    ) -> None:
+        """Hook for worker-backed implementations to save code, plot, and data."""
+        logger.debug(
+            "Requested save-all code=%s plot=%s data=%s",
+            save_code_path,
+            save_plot_path,
+            save_data_path,
+        )
 
     def _quit_application(self) -> None:
         """Quit the whole application, even when modal dialogs are open."""

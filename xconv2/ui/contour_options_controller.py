@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
 )
 
+from xconv2.cf_templates import map_projections, map_resolution_options, use_lon_0
 from xconv2.colour_scales import cscales, get_colour_scale_hexes
 from xconv2.ui.plot_options_shared import build_common_options_sections
 
@@ -304,8 +305,168 @@ class ContourOptionsController:
         text_sizes_layout.setColumnStretch(1, 1)
         text_sizes_layout.setColumnStretch(2, 1)
 
+        proj_group = QGroupBox("Map projection")
+        proj_layout = QVBoxLayout(proj_group)
+        proj_layout.setContentsMargins(9, 4, 9, 4)
+        proj_layout.setSpacing(4)
+
+        proj_row = QHBoxLayout()
+        proj_combo_label = QLabel("Projection")
+        proj_combo = QComboBox()
+        proj_combo.setMinimumContentsLength(10)
+        proj_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        for name, description in map_projections.items():
+            proj_combo.addItem(name)
+            proj_combo.setItemData(proj_combo.count() - 1, description, Qt.ToolTipRole)
+        current_projection = str(existing.get("map_projection", "cyl") or "cyl")
+        current_projection_index = proj_combo.findText(current_projection)
+        proj_combo.setCurrentIndex(current_projection_index if current_projection_index >= 0 else 0)
+
+        reset_map_defaults_button = QPushButton("Reset Map")
+        reset_map_defaults_button.setAutoDefault(False)
+        reset_map_defaults_button.setDefault(False)
+
+        projection_help_tooltip = (
+            "<table>"
+            + "".join(
+                f"<tr><td><b>{name}</b></td><td>{description}</td></tr>"
+                for name, description in map_projections.items()
+            )
+            + "</table>"
+        )
+        proj_combo_label.setToolTip(projection_help_tooltip)
+        proj_row.addWidget(proj_combo_label)
+        proj_row.addWidget(proj_combo)
+        proj_row.addSpacing(10)
+        res_label = QLabel("Resolution")
+        res_combo = QComboBox()
+        for value in map_resolution_options:
+            res_combo.addItem(value)
+        current_resolution = str(existing.get("map_resolution", "110m") or "110m")
+        current_resolution_index = res_combo.findText(current_resolution)
+        res_combo.setCurrentIndex(current_resolution_index if current_resolution_index >= 0 else 0)
+        proj_row.addWidget(res_label)
+        proj_row.addWidget(res_combo)
+        proj_row.addWidget(reset_map_defaults_button)
+        proj_row.addStretch(1)
+        proj_layout.addLayout(proj_row)
+
+        existing_bbox = existing.get("bbox", [-180.0, -90.0, 180.0, 90.0])
+        if not isinstance(existing_bbox, (list, tuple)) or len(existing_bbox) < 4:
+            existing_bbox = [-180.0, -90.0, 180.0, 90.0]
+
+        bbox_row = QHBoxLayout()
+        bbox_row.setSpacing(4)
+        bbox_label = QLabel("Bound Box (WSEN):")
+        bbox_w_spin = QDoubleSpinBox()
+        bbox_s_spin = QDoubleSpinBox()
+        bbox_e_spin = QDoubleSpinBox()
+        bbox_n_spin = QDoubleSpinBox()
+        bbox_w_spin.setRange(-180.0, 360.0)
+        bbox_w_spin.setDecimals(2)
+        bbox_w_spin.setSingleStep(1.0)
+        bbox_w_spin.setValue(float(existing_bbox[0]))
+        bbox_s_spin.setRange(-90.0, 90.0)
+        bbox_s_spin.setDecimals(2)
+        bbox_s_spin.setSingleStep(1.0)
+        bbox_s_spin.setValue(float(existing_bbox[1]))
+        bbox_e_spin.setRange(-180.0, 360.0)
+        bbox_e_spin.setDecimals(2)
+        bbox_e_spin.setSingleStep(1.0)
+        bbox_e_spin.setValue(float(existing_bbox[2]))
+        bbox_n_spin.setRange(-90.0, 90.0)
+        bbox_n_spin.setDecimals(2)
+        bbox_n_spin.setSingleStep(1.0)
+        bbox_n_spin.setValue(float(existing_bbox[3]))
+        bbox_row.addWidget(bbox_label)
+        bbox_row.addWidget(bbox_w_spin)
+        bbox_row.addWidget(bbox_s_spin)
+        bbox_row.addWidget(bbox_e_spin)
+        bbox_row.addWidget(bbox_n_spin)
+        proj_layout.addLayout(bbox_row)
+
+        lat_lon_row = QHBoxLayout()
+        boundinglat_label = QLabel("boundinglat")
+        boundinglat_spin = QDoubleSpinBox()
+        boundinglat_spin.setRange(-90.0, 90.0)
+        boundinglat_spin.setDecimals(2)
+        boundinglat_spin.setSingleStep(1.0)
+        boundinglat_spin.setValue(float(existing.get("boundinglat", 0.0)))
+        lat_0_label = QLabel("lat_0")
+        lat_0_spin = QDoubleSpinBox()
+        lat_0_spin.setRange(-90.0, 90.0)
+        lat_0_spin.setDecimals(2)
+        lat_0_spin.setSingleStep(1.0)
+        lat_0_spin.setValue(float(existing.get("lat_0", 0.0)))
+        lon_0_label = QLabel("lon_0")
+        lon_0_spin = QDoubleSpinBox()
+        lon_0_spin.setRange(-180.0, 360.0)
+        lon_0_spin.setDecimals(2)
+        lon_0_spin.setSingleStep(1.0)
+        lon_0_spin.setValue(float(existing.get("lon_0", 0.0)))
+        lat_lon_row.addWidget(boundinglat_label)
+        lat_lon_row.addWidget(boundinglat_spin)
+        lat_lon_row.addSpacing(10)
+        lat_lon_row.addWidget(lat_0_label)
+        lat_lon_row.addWidget(lat_0_spin)
+        lat_lon_row.addSpacing(10)
+        lat_lon_row.addWidget(lon_0_label)
+        lat_lon_row.addWidget(lon_0_spin)
+        lat_lon_row.addStretch(1)
+        proj_layout.addLayout(lat_lon_row)
+
+        bbox_controls = [bbox_label, bbox_w_spin, bbox_s_spin, bbox_e_spin, bbox_n_spin]
+        stereographic_controls = [boundinglat_label, boundinglat_spin]
+        other_proj_controls = [lat_0_label, lat_0_spin, lon_0_label, lon_0_spin]
+
+        _projection_state: dict[str, str] = {"previous": proj_combo.currentText()}
+
+        def _sync_projection_controls() -> None:
+            projection = proj_combo.currentText()
+            description = proj_combo.currentData(Qt.ToolTipRole)
+            proj_combo.setToolTip(str(description) if description else projection)
+            uses_boundinglat = projection in {"npstere", "spstere"}
+            for widget in bbox_controls:
+                widget.setEnabled(not uses_boundinglat)
+            for widget in stereographic_controls:
+                widget.setEnabled(uses_boundinglat)
+            # lat_0 only enabled for ortho projection
+            lat_0_label.setEnabled(projection == "ortho")
+            lat_0_spin.setEnabled(projection == "ortho")
+            # lon_0 enabled only for projections in use_lon_0 tuple
+            uses_lon_0 = projection in use_lon_0
+            lon_0_label.setEnabled(uses_lon_0)
+            lon_0_spin.setEnabled(uses_lon_0)
+
+            previous_projection = _projection_state.get("previous", "")
+            if projection != previous_projection:
+                if projection == "npstere":
+                    boundinglat_spin.setValue(45.0)
+                elif projection == "spstere":
+                    boundinglat_spin.setValue(-45.0)
+                elif not uses_boundinglat:
+                    boundinglat_spin.setValue(0.0)
+                _projection_state["previous"] = projection
+
+        def _reset_map_defaults() -> None:
+            proj_combo.setCurrentText("cyl")
+            bbox_w_spin.setValue(-180.0)
+            bbox_s_spin.setValue(-90.0)
+            bbox_e_spin.setValue(180.0)
+            bbox_n_spin.setValue(90.0)
+            boundinglat_spin.setValue(0.0)
+            lat_0_spin.setValue(0.0)
+            lon_0_spin.setValue(0.0)
+            res_combo.setCurrentText("110m")
+
+        reset_map_defaults_button.clicked.connect(_reset_map_defaults)
+
+        proj_combo.currentTextChanged.connect(lambda _text: _sync_projection_controls())
+        _sync_projection_controls()
+
         layout.addWidget(common.titles_group)
         layout.addWidget(common.annotations_group)
+        layout.addWidget(proj_group)
         layout.addWidget(levels_group)
         layout.addWidget(style_group)
         layout.addWidget(text_sizes_group)
@@ -363,6 +524,23 @@ class ContourOptionsController:
             options["contour_title_fontsize"] = float(contour_title_fontsize_spin.value())
             options["page_title_fontsize"] = float(page_title_fontsize_spin.value())
             options["annotation_fontsize"] = float(annotation_fontsize_spin.value())
+            proj_text = proj_combo.currentText()
+            if proj_text:
+                options["map_projection"] = proj_text
+            if proj_text in {"npstere", "spstere"}:
+                options["boundinglat"] = float(boundinglat_spin.value())
+                options.pop("bbox", None)
+            else:
+                options["bbox"] = [
+                    float(bbox_w_spin.value()),
+                    float(bbox_s_spin.value()),
+                    float(bbox_e_spin.value()),
+                    float(bbox_n_spin.value()),
+                ]
+                options.pop("boundinglat", None)
+            options["map_resolution"] = str(res_combo.currentText())
+            options["lat_0"] = float(lat_0_spin.value())
+            options["lon_0"] = float(lon_0_spin.value())
             options.update(common.as_options())
             if selected_cscale.get("value"):
                 options["cscale"] = selected_cscale["value"]

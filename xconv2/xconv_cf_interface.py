@@ -7,8 +7,11 @@ code snippets in ``cf_templates.py`` can call them directly.
 
 from __future__ import annotations
 
+import logging
+
 import cf
 import cfplot as cfp
+import numpy as np
 from matplotlib import pyplot as plt
 from xconv2.cell_method_handler import cell_methods_string_from_field
 from xconv2.lineplot import LinePlot
@@ -23,13 +26,18 @@ __all__ = [
     "field_info",
     "coordinate_info",
     "get_data_for_plotting",
+    "save_selected_field_data",
     "annotation_text",
     "estimate_layout_padding",
     "apply_vertical_padding",
+    "contour_data_range",
     "auto_contour_title",
     "run_contour_plot",
     "run_line_plot",
 ]
+
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -77,7 +85,19 @@ def coordinate_info(field: object) -> list[tuple[str, list[str]]]:
     """
     coords: list[tuple[str, list[str]]] = []
     for key, c in field.dimension_coordinates(todict=True).items():
-        arr = getattr(c, "array", None)
+        try:
+            arr = getattr(c, "array", None)
+        except Exception as exc:
+            # Some backend combinations (notably newer h5netcdf/h5py stacks)
+            # can fail when materializing coordinate arrays. Skip only the
+            # problematic coordinate so metadata loading can continue.
+            logger.warning(
+                "Skipping coordinate in metadata extraction due to backend read error: key=%s identity=%s error=%s",
+                key,
+                c.identity(default="unknown"),
+                exc,
+            )
+            continue
         if arr is None:
             continue
         if len(arr) <= 1:
@@ -86,6 +106,28 @@ def coordinate_info(field: object) -> list[tuple[str, list[str]]]:
         coords.append((c.identity(default="unknown"), vals, str(getattr(c, "Units",""))))
 
     return coords
+
+
+def contour_data_range(pfld: object) -> tuple[float, float]:
+    """Return contour min/max while tolerating backend indexing quirks.
+
+    Primary path uses the field array directly so masked values are excluded.
+    If that fails (for example with some h5netcdf/h5py indexing behaviors),
+    return a safe default and let plotting continue.
+    """
+    try:
+        arr = np.ma.array(pfld.array).compressed()
+    except Exception as exc:
+        logger.warning(
+            "Falling back to default contour range due to backend read error: %s",
+            exc,
+        )
+        return 0.0, 0.0
+
+    if arr.size == 0:
+        return 0.0, 0.0
+
+    return float(arr.min()), float(arr.max())
 
 
 def get_data_for_plotting(
@@ -184,9 +226,15 @@ def get_data_for_plotting(
     return pfld
 
 
+def save_selected_field_data(field: object, filename: str) -> None:
+    """Persist selected field data to disk using cf.write."""
+    cf.write(field, filename)
+
+
 def run_contour_plot(
     pfld: object,
     options: dict[str, object] | None,
+    mapset: dict[str, object] | None = None,
     selection_spec: dict[str, tuple[object, object]] | None = None,
     collapse_by_coord: dict[str, str] | None = None,
 ) -> None:
@@ -199,19 +247,55 @@ def run_contour_plot(
     Args:
         pfld: Plot-ready field-like object.
         options: Contour options mapping from GUI state or saved script.
+        mapset: Map projection options including:
+            - map_projection: Projection name ('cyl', 'npstere', 'spstere', etc.)
+            - bbox: Bounding box [lonmin, latmin, lonmax, latmax] for non-stereo projections
+            - boundinglat: Bounding latitude for stereographic projections
+            - map_resolution: Natural Earth resolution ('110m', '50m', '10m')
+            - lat_0: Standard parallel or latitude of projection center
+            - lon_0: Central meridian or longitude of projection center
+        selection_spec: Coordinate selection bounds.
+        collapse_by_coord: Collapse methods by coordinate name.
 
     Returns:
         None
     """
     options = options or {}
+    mapset = mapset or {}
     selection_spec = selection_spec or {}
     collapse_by_coord = collapse_by_coord or {}
 
+    # Only apply map projections if one was explicitly set
+    if mapset.get("map_projection"):
+        projection = mapset.get("map_projection")
+        resolution = mapset.get("map_resolution", "110m")
+        if projection in ['spstere','npstere']:
+
+            cfp.mapset(proj=projection, 
+                        resolution=resolution, 
+                        boundinglat=mapset.get("boundinglat", -45 if projection == 'spstere' else 45),
+                        lon_0=mapset.get("lon_0", 0.0),
+            )
+        else:
+            bbox = mapset.get("bbox")
+            if bbox and isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                lonmin, latmin, lonmax, latmax = tuple(bbox)
+            else:
+                lonmin, latmin, lonmax, latmax = None, None, None, None
+            lon_0 = mapset.get("lon_0", 0.0)
+            lat_0 = mapset.get("lat_0", 0.0)
+        
+            cfp.mapset(proj=projection, 
+                        resolution=resolution,
+                        lonmin=lonmin, lonmax=lonmax, latmin=latmin, latmax=latmax,
+                        lon_0= lon_0, lat_0=lat_0
+            )
+            
+    annotation_display = bool(options.get("annotation_display", False))
     filename = options.get("filename")
     title = options.get("title")
     page_title = options.get("page_title")
     page_title_display = bool(options.get("page_title_display", False))
-    annotation_display = bool(options.get("annotation_display", False))
     annotation_properties = options.get("annotation_properties", [])
     annotation_free_text = str(options.get("annotation_free_text", "") or "").strip()
     cscale = options.get("cscale")
@@ -309,10 +393,14 @@ def run_contour_plot(
         prepass_kwargs["line_labels"] = False
         prepass_kwargs["blockfill"] = False
         prepass_kwargs.pop("blockfill_fast", None)
+        prepass_kwargs.pop("title", None)
 
         # Keep prepass side-effect free for level configuration; levels are
         # applied once in the final render pass.
-        cfp.con(pfld, **prepass_kwargs)
+        try:
+            cfp.con(pfld, **prepass_kwargs)
+        except Exception as exc:
+            logger.warning("Skipping contour prepass after cf-plot error: %s", exc)
 
     annotation_text_value = annotation_text(
         annotation_display=annotation_display,
@@ -330,12 +418,9 @@ def run_contour_plot(
     top_padding += page_margin_top
     bottom_padding += page_margin_bottom
 
-    # Force cf-plot into embedded mode for in-memory rendering. Without this,
-    # cfp.con() may implicitly call gclose() and trigger an external viewer.
-    if filename is None:
-        cfp.gopen(user_plot=1)
-    else:
-        cfp.gopen(file=filename)
+    # Force cf-plot into embedded mode for worker rendering. Using cf-plot's
+    # file mode can trigger an external viewer command on some platforms.
+    cfp.gopen(user_plot=1)
 
     _apply_levels()
 
@@ -344,7 +429,36 @@ def run_contour_plot(
         # image viewer (e.g. ImageMagick display) after gclose().
         cfp.setvars(title_fontsize=contour_title_fontsize, viewer=None)
 
-    cfp.con(pfld, **contour_kwargs)
+    map_title_fallback_used = False
+    fallback_contour_title = str(contour_kwargs.get("title", "") or "")
+
+    try:
+        cfp.con(pfld, **contour_kwargs)
+    except UnboundLocalError as exc:
+        # cf-plot can fail in _map_title with "xpt" unbound for some
+        # projection/title combinations. Retry once without title.
+        if "xpt" in str(exc) and "title" in contour_kwargs:
+            map_title_fallback_used = True
+            logger.warning(
+                "CFP_TITLE_FALLBACK retrying contour render without title after cf-plot _map_title error: %s",
+                exc,
+            )
+            fallback_kwargs = dict(contour_kwargs)
+            fallback_kwargs.pop("title", None)
+            cfp.con(pfld, **fallback_kwargs)
+
+            # Preserve a visible title after disabling map-title rendering.
+            if fallback_contour_title and not (page_title_display and page_title):
+                page_title = fallback_contour_title
+                page_title_display = True
+        else:
+            raise
+
+    if map_title_fallback_used:
+        logger.info("CFP_TITLE_FALLBACK_APPLIED title rendered as page title")
+        send_to_gui_fn = globals().get("send_to_gui")
+        if callable(send_to_gui_fn):
+            send_to_gui_fn("STATUS:Map title fallback applied (cf-plot _map_title bug workaround)")
     
     mycanvas = plt.gcf()
     if top_padding > 0 or bottom_padding > 0:
@@ -366,19 +480,8 @@ def run_contour_plot(
         )
 
     if filename is not None:
-        cfp.gclose()
-        output_path = str(filename)
-        output_exists = False
-        try:
-            with open(output_path, "rb"):
-                output_exists = True
-        except OSError:
-            output_exists = False
-
-        # Some cf-plot backends can silently skip writing the requested file.
-        # Fall back to matplotlib savefig to ensure the user-selected file is created.
-        if not output_exists and hasattr(plt, "savefig"):
-            plt.savefig(output_path)
+        mycanvas.savefig(str(filename))
+        plt.close(mycanvas)
 
 def run_line_plot(
     pfld: object,
