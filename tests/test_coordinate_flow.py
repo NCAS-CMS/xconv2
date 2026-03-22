@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import base64
 from collections import deque
+import tempfile
 import pickle
 from dataclasses import dataclass, field
 import types
+from pathlib import Path
 
-from PySide6.QtWidgets import QStyle
+from PySide6.QtWidgets import QMessageBox, QStyle
 
+from xconv2.cache_utils import prune_disk_cache
 from xconv2.main_window import CFVMain
 from xconv2.core_window import CFVCore
 from xconv2.ui.plot_view_controller import PlotViewController
@@ -161,9 +164,13 @@ class _DummyStaleErrorMain:
 @dataclass
 class _DummyVisibilityPanel:
     visible: bool = True
+    text: str = ""
 
     def setVisible(self, visible: bool) -> None:
         self.visible = visible
+
+    def setPlainText(self, text: str) -> None:
+        self.text = text
 
     def isVisible(self) -> bool:
         return self.visible
@@ -191,6 +198,67 @@ class _DummyVisibilityButton:
 class _DummyStyle:
     def standardIcon(self, icon_kind: QStyle.StandardPixmap) -> QStyle.StandardPixmap:
         return icon_kind
+
+
+@dataclass
+class _DummyClearLoadedDataMain:
+    base_window_title: str = "xconv2 (test)"
+    current_file_path: str | None = "/tmp/old.nc"
+    current_selection_info_text: str = "old"
+    plot_info_output: _DummyVisibilityPanel = field(default_factory=_DummyVisibilityPanel)
+    field_hints: list[str] = field(default_factory=list)
+    built_slider_payloads: list[dict[str, object]] = field(default_factory=list)
+    panel_visible_calls: list[bool] = field(default_factory=list)
+    button_sync_calls: int = 0
+    loading_calls: list[bool] = field(default_factory=list)
+    canvas_messages: list[str] = field(default_factory=list)
+    titles: list[str] = field(default_factory=list)
+
+    def setWindowTitle(self, title: str) -> None:
+        self.titles.append(title)
+
+    def _set_field_list_hint(self, text: str) -> None:
+        self.field_hints.append(text)
+
+    def build_dynamic_sliders(self, metadata: dict[str, object]) -> None:
+        self.built_slider_payloads.append(metadata)
+
+    def _set_selection_info_panel_visible(self, visible: bool) -> None:
+        self.panel_visible_calls.append(visible)
+
+    def _update_selection_info_toggle_button(self) -> None:
+        self.button_sync_calls += 1
+
+    def _set_plot_loading(self, is_loading: bool, message: str = "Rendering plot...") -> None:
+        _ = message
+        self.loading_calls.append(is_loading)
+
+    def _clear_plot_canvas(self, message: str = "Plot unavailable") -> None:
+        self.canvas_messages.append(message)
+
+
+@dataclass
+class _DummyCacheManagerHost:
+    _settings: dict[str, object]
+    _remote_session_id: str | None = None
+    _remote_descriptor: dict[str, object] | None = None
+    status_messages: list[tuple[str, bool]] = field(default_factory=list)
+    released: int = 0
+
+    def _show_status_message(self, message: str, is_error: bool = False) -> None:
+        self.status_messages.append((message, is_error))
+
+    def _release_remote_session_if_active(self) -> None:
+        self.released += 1
+
+    def _active_cache_settings(self) -> dict[str, object]:
+        return CFVCore._active_cache_settings(self)
+
+    def _disk_cache_usage(self, location: Path) -> tuple[int, int]:
+        return CFVCore._disk_cache_usage(self, location)
+
+    def _format_storage_size(self, size_bytes: int) -> str:
+        return CFVCore._format_storage_size(size_bytes)
 
 
 @dataclass
@@ -288,6 +356,133 @@ def test_normalize_coordinate_metadata_filters_and_coerces() -> None:
             "units": "",
         },
     }
+
+
+def test_clear_loaded_data_views_resets_field_slider_plot_and_details() -> None:
+    dummy = _DummyClearLoadedDataMain()
+
+    CFVCore._clear_loaded_data_views(dummy)
+
+    assert dummy.current_file_path is None
+    assert dummy.current_selection_info_text == "No selection info available."
+    assert dummy.plot_info_output.text == "No selection info available."
+    assert dummy.field_hints == ["Open a file to see fields"]
+    assert dummy.built_slider_payloads == [{}]
+    assert dummy.panel_visible_calls == [True]
+    assert dummy.button_sync_calls == 1
+    assert dummy.loading_calls == [False]
+    assert dummy.canvas_messages == ["Waiting for data..."]
+    assert dummy.titles == ["xconv2 (test)"]
+
+
+def test_cache_summary_text_reports_config_and_usage() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache_dir = Path(tmpdir)
+        (cache_dir / "a.bin").write_bytes(b"1234")
+        (cache_dir / "sub").mkdir()
+        (cache_dir / "sub" / "b.bin").write_bytes(b"12")
+
+        host = _DummyCacheManagerHost(
+            _settings={
+                "last_remote_configuration": {
+                    "cache_blocksize_mb": 2,
+                    "cache_ram_buffer_mb": 1024,
+                    "cache_strategy": "Block",
+                    "disk_mode": "Blocks",
+                    "disk_location": str(cache_dir),
+                    "disk_limit_gb": 10,
+                    "disk_expiry": "7 days",
+                }
+            },
+            _remote_session_id="session-1",
+        )
+
+        summary = CFVCore._cache_summary_text(host)
+
+        assert "Active remote session: yes" in summary
+        assert "Strategy: Block" in summary
+        assert f"Location: {cache_dir}" in summary
+        assert "Usage: 6 B across 2 files" in summary
+        assert "Expiry: 7 days" in summary
+
+
+def test_flush_configured_disk_cache_clears_directory_and_releases_remote(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache_dir = Path(tmpdir)
+        (cache_dir / "cache").mkdir()
+        (cache_dir / "cache" / "entry.bin").write_bytes(b"123")
+
+        host = _DummyCacheManagerHost(
+            _settings={
+                "last_remote_configuration": {
+                    "disk_location": str(cache_dir),
+                }
+            },
+            _remote_session_id="session-1",
+        )
+
+        monkeypatch.setattr(
+            "xconv2.core_window.QMessageBox.question",
+            lambda *args, **kwargs: QMessageBox.Yes,
+        )
+
+        ok = CFVCore._flush_configured_disk_cache(host)
+
+        assert ok is True
+        assert host.released == 1
+        assert list(cache_dir.iterdir()) == []
+        assert host.status_messages == [(f"Flushed cache: {cache_dir}", False)]
+
+
+def test_prune_disk_cache_removes_expired_and_updates_metadata() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache_dir = Path(tmpdir)
+        old_file = cache_dir / "old.bin"
+        new_file = cache_dir / "new.bin"
+        old_file.write_bytes(b"1234")
+        new_file.write_bytes(b"12")
+        metadata = {
+            "old": {"fn": "old.bin", "blocks": True, "time": 0},
+            "new": {"fn": "new.bin", "blocks": True, "time": 0},
+        }
+        (cache_dir / "cache").write_text(__import__("json").dumps(metadata), encoding="utf-8")
+
+        old_time = 1
+        new_time = __import__("time").time()
+        __import__("os").utime(old_file, (old_time, old_time))
+        __import__("os").utime(new_file, (new_time, new_time))
+
+        summary = prune_disk_cache(cache_dir, expiry_seconds=60 * 60)
+
+        assert summary["removed_files"] == 1
+        assert old_file.exists() is False
+        assert new_file.exists() is True
+        saved = __import__("json").loads((cache_dir / "cache").read_text(encoding="utf-8"))
+        assert set(saved) == {"new"}
+
+
+def test_prune_configured_disk_cache_releases_remote_and_reports(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache_dir = Path(tmpdir)
+        (cache_dir / "entry.bin").write_bytes(b"123")
+        host = _DummyCacheManagerHost(
+            _settings={
+                "last_remote_configuration": {
+                    "disk_location": str(cache_dir),
+                    "disk_limit_gb": 0,
+                    "disk_expiry": "Never",
+                }
+            },
+            _remote_session_id="session-1",
+        )
+
+        monkeypatch.setattr("xconv2.core_window.prune_disk_cache", lambda *args, **kwargs: {"removed_files": 1, "removed_bytes": 3, "total_bytes": 0, "total_files": 0})
+
+        ok = CFVCore._prune_configured_disk_cache(host)
+
+        assert ok is True
+        assert host.released == 1
+        assert host.status_messages == [(f"Pruned cache: removed 1 files from {cache_dir}", False)]
 
 
 def test_handle_worker_output_coord_routes_to_slider_builder() -> None:

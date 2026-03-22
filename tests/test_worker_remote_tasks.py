@@ -18,9 +18,13 @@ class _FakeFilesystem:
 def test_prepare_remote_session_reuses_cached_entry(monkeypatch) -> None:
     worker.remote_session_pool.clear()
     fake_fs = _FakeFilesystem()
-    created: list[str] = []
+    created: list[tuple[str, object]] = []
 
-    monkeypatch.setattr(worker, "create_filesystem", lambda spec, log=None: created.append(spec.protocol) or fake_fs)
+    monkeypatch.setattr(
+        worker,
+        "create_filesystem",
+        lambda spec, log=None, cache=None: created.append((spec.protocol, cache)) or fake_fs,
+    )
     monkeypatch.setattr(worker, "_send_remote_status", lambda *args, **kwargs: None)
 
     descriptor = {
@@ -31,6 +35,7 @@ def test_prepare_remote_session_reuses_cached_entry(monkeypatch) -> None:
         "uri_scheme": "ssh",
         "uri_authority": "alpha.example.org",
         "proxy_jump": None,
+        "cache": {"cache_strategy": "Readahead"},
     }
 
     first = worker._prepare_remote_session(
@@ -46,7 +51,7 @@ def test_prepare_remote_session_reuses_cached_entry(monkeypatch) -> None:
 
     assert first is second
     assert second.session_id == "session-2"
-    assert created == ["sftp"]
+    assert created == [("sftp", {"cache_strategy": "Readahead"})]
 
 
 def test_read_remote_fields_uses_filesystem_keyword(monkeypatch) -> None:

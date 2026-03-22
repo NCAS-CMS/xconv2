@@ -59,6 +59,7 @@ from .ui.selection_controller import SelectionController
 from .ui.dialogs import OpenGlobDialog, OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog
 from .ui.remote_file_navigator import RemoteFileNavigatorDialog
 from .ui.settings_store import SettingsStore
+from .cache_utils import disk_cache_usage, parse_disk_expiry_seconds, prune_disk_cache
 from .logging_utils import get_log_file_path
 
 logger = logging.getLogger(__name__)
@@ -157,6 +158,49 @@ class LogViewerDialog(QDialog):
             self._timer.start()
 
 
+class CacheManagerDialog(QDialog):
+    """Summarize remote cache configuration and allow disk cache flushes."""
+
+    def __init__(self, parent: "CFVCore") -> None:
+        super().__init__(parent)
+        self._host = parent
+
+        self.setWindowTitle("xconv2 Cache")
+        self.resize(760, 420)
+
+        layout = QVBoxLayout(self)
+        self.summary_view = QPlainTextEdit()
+        self.summary_view.setReadOnly(True)
+        self.summary_view.setLineWrapMode(QPlainTextEdit.NoWrap)
+        layout.addWidget(self.summary_view, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        self.refresh_button = buttons.addButton("Refresh", QDialogButtonBox.ActionRole)
+        self.prune_button = buttons.addButton("Prune Cache", QDialogButtonBox.ActionRole)
+        self.flush_button = buttons.addButton("Flush Cache", QDialogButtonBox.ActionRole)
+        self.refresh_button.clicked.connect(self.refresh_summary)
+        self.prune_button.clicked.connect(self._prune_cache)
+        self.flush_button.clicked.connect(self._flush_cache)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.refresh_summary()
+
+    def refresh_summary(self) -> None:
+        """Refresh the cache summary text from current host state."""
+        self.summary_view.setPlainText(self._host._cache_summary_text())
+
+    def _flush_cache(self) -> None:
+        """Flush configured disk cache and refresh summary view."""
+        if self._host._flush_configured_disk_cache():
+            self.refresh_summary()
+
+    def _prune_cache(self) -> None:
+        """Prune configured disk cache and refresh summary view."""
+        if self._host._prune_configured_disk_cache():
+            self.refresh_summary()
+
+
 class CFVCore(QMainWindow):
     """Base window with GUI-only behavior and extension hooks for app logic."""
 
@@ -202,6 +246,7 @@ class CFVCore(QMainWindow):
         self._selection_info_visible = True
         self._selection_info_expanded_from_width: int | None = None
         self._log_viewer_dialog: LogViewerDialog | None = None
+        self._cache_manager_dialog: CacheManagerDialog | None = None
 
         self.setup_ui()
         self._setup_tray_icon()
@@ -433,6 +478,148 @@ class CFVCore(QMainWindow):
         self._log_viewer_dialog.show()
         self._log_viewer_dialog.raise_()
         self._log_viewer_dialog.activateWindow()
+
+    @staticmethod
+    def _format_storage_size(size_bytes: int) -> str:
+        """Format byte counts for cache/log summaries."""
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        value = float(size_bytes)
+        for unit in ("KB", "MB", "GB", "TB"):
+            value /= 1024.0
+            if value < 1024.0 or unit == "TB":
+                text = f"{value:.1f}".rstrip("0").rstrip(".")
+                return f"{text} {unit}"
+        return f"{size_bytes} B"
+
+    def _active_cache_settings(self) -> dict[str, object]:
+        """Return active remote cache settings, preferring current remote session state."""
+        descriptor = getattr(self, "_remote_descriptor", None)
+        if isinstance(descriptor, dict):
+            cache = descriptor.get("cache")
+            if isinstance(cache, dict):
+                return dict(cache)
+
+        raw = self._settings.get("last_remote_configuration", {})
+        if isinstance(raw, dict):
+            return {
+                "blocksize_mb": int(raw.get("cache_blocksize_mb", 2)),
+                "ram_buffer_mb": int(raw.get("cache_ram_buffer_mb", 1024)),
+                "cache_strategy": str(raw.get("cache_strategy", "Block")),
+                "max_blocks": max(1, int(raw.get("cache_ram_buffer_mb", 1024)) // max(1, int(raw.get("cache_blocksize_mb", 2)))),
+                "disk_mode": str(raw.get("disk_mode", "Disabled")),
+                "disk_location": str(raw.get("disk_location", str(Path.home() / ".cache/xconv2"))),
+                "disk_limit_gb": int(raw.get("disk_limit_gb", 10)),
+                "disk_expiry": str(raw.get("disk_expiry", "1 day")),
+            }
+        return {}
+
+    def _disk_cache_usage(self, location: Path) -> tuple[int, int]:
+        """Return total bytes and file count under the configured disk cache directory."""
+        return disk_cache_usage(location)
+
+    def _cache_summary_text(self) -> str:
+        """Build a human-readable summary of current cache configuration and usage."""
+        cache = self._active_cache_settings()
+        strategy = str(cache.get("cache_strategy", "None"))
+        blocksize_mb = int(cache.get("blocksize_mb", 0) or 0)
+        ram_buffer_mb = int(cache.get("ram_buffer_mb", 0) or 0)
+        max_blocks = int(cache.get("max_blocks", 0) or 0)
+        disk_mode = str(cache.get("disk_mode", "Disabled"))
+        disk_location = Path(str(cache.get("disk_location", str(Path.home() / ".cache/xconv2")))).expanduser()
+        disk_limit_gb = int(cache.get("disk_limit_gb", 0) or 0)
+        disk_expiry = str(cache.get("disk_expiry", "Never"))
+        disk_bytes, disk_files = self._disk_cache_usage(disk_location)
+        has_active_remote = bool(getattr(self, "_remote_session_id", None))
+
+        lines = [
+            "Remote Cache Summary",
+            "",
+            f"Active remote session: {'yes' if has_active_remote else 'no'}",
+            "",
+            "Memory cache",
+            f"  Strategy: {strategy}",
+            f"  Block size: {blocksize_mb} MB",
+            f"  RAM buffer: {ram_buffer_mb} MB",
+            f"  Max blocks: {max_blocks}",
+            "",
+            "Disk cache",
+            f"  Mode: {disk_mode}",
+            f"  Location: {disk_location}",
+            f"  Usage: {self._format_storage_size(disk_bytes)} across {disk_files} files",
+            f"  Limit: {disk_limit_gb} GB",
+            f"  Expiry: {disk_expiry}",
+        ]
+        return "\n".join(lines)
+
+    def _flush_configured_disk_cache(self) -> bool:
+        """Flush configured disk cache contents after user confirmation."""
+        cache = self._active_cache_settings()
+        disk_location = Path(str(cache.get("disk_location", str(Path.home() / ".cache/xconv2")))).expanduser()
+        if not disk_location.exists():
+            self._show_status_message(f"Cache directory does not exist: {disk_location}")
+            return True
+
+        response = QMessageBox.question(
+            self,
+            "Flush Cache",
+            f"Delete all files under cache location?\n\n{disk_location}",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if response != QMessageBox.Yes:
+            return False
+
+        release_remote = getattr(self, "_release_remote_session_if_active", None)
+        if callable(release_remote):
+            release_remote()
+
+        try:
+            for child in disk_location.iterdir():
+                if child.is_dir() and not child.is_symlink():
+                    import shutil
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+        except OSError:
+            logger.exception("Failed to flush cache directory: %s", disk_location)
+            self._show_status_message(f"Failed to flush cache: {disk_location}", is_error=True)
+            return False
+
+        self._show_status_message(f"Flushed cache: {disk_location}")
+        return True
+
+    def _prune_configured_disk_cache(self) -> bool:
+        """Prune configured disk cache by expiry and size limit."""
+        cache = self._active_cache_settings()
+        disk_location = Path(str(cache.get("disk_location", str(Path.home() / ".cache/xconv2")))).expanduser()
+        disk_limit_gb = int(cache.get("disk_limit_gb", 0) or 0)
+        disk_expiry = parse_disk_expiry_seconds(cache.get("disk_expiry"))
+
+        release_remote = getattr(self, "_release_remote_session_if_active", None)
+        if callable(release_remote):
+            release_remote()
+
+        summary = prune_disk_cache(
+            disk_location,
+            limit_bytes=disk_limit_gb * 1024 * 1024 * 1024,
+            expiry_seconds=disk_expiry,
+        )
+        self._show_status_message(
+            f"Pruned cache: removed {summary['removed_files']} files from {disk_location}"
+        )
+        return True
+
+    def _show_cache_manager(self) -> None:
+        """Open the in-app cache manager dialog."""
+        if self._cache_manager_dialog is None:
+            self._cache_manager_dialog = CacheManagerDialog(self)
+        else:
+            self._cache_manager_dialog.refresh_summary()
+
+        self._cache_manager_dialog.show()
+        self._cache_manager_dialog.raise_()
+        self._cache_manager_dialog.activateWindow()
 
     def _refresh_recent_menu(self) -> None:
         """Refresh the Recent submenu from the persisted log file."""
@@ -1148,6 +1335,22 @@ class CFVCore(QMainWindow):
     def _refresh_plot_summary(self) -> None:
         """Update plot summary text and plot button availability."""
         self.selection_controller.refresh_plot_summary()
+
+    def _clear_loaded_data_views(self) -> None:
+        """Clear field, slider, details, and plot UI for a fresh dataset open."""
+        self.current_file_path = None
+        self.setWindowTitle(self.base_window_title)
+        self.current_selection_info_text = "No selection info available."
+        info_widget = getattr(self, "plot_info_output", None)
+        if info_widget is not None:
+            info_widget.setPlainText(self.current_selection_info_text)
+
+        self._set_field_list_hint("Open a file to see fields")
+        self.build_dynamic_sliders({})
+        self._set_selection_info_panel_visible(True)
+        self._update_selection_info_toggle_button()
+        self._set_plot_loading(False)
+        self._clear_plot_canvas("Waiting for data...")
 
     def on_slider_moved(self, name: str, val: object, label: QLabel) -> None:
         """Handle slider movement events."""

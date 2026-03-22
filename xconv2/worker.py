@@ -292,6 +292,7 @@ def _prepare_remote_session(
             descriptor_hash=descriptor_hash,
             message=message,
         ),
+        cache=descriptor.get("cache") if isinstance(descriptor.get("cache"), dict) else None,
     )
     entry = RemoteSessionEntry(
         session_id=session_id,

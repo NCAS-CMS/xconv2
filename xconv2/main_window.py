@@ -375,6 +375,8 @@ class CFVMain(CFVCore):
         if not isinstance(config, dict):
             return
 
+        config = CFVMain._with_cache_defaults(self, config)
+
         prepared_config = self._prepare_ssh_config_for_auth(config)
         if prepared_config is None:
             return
@@ -407,6 +409,7 @@ class CFVMain(CFVCore):
             return
 
         self._release_remote_session_if_active()
+        self._clear_loaded_data_views()
 
         descriptor = spec_to_descriptor(spec, cache=config.get("cache") if isinstance(config, dict) else None)
         session_id = uuid.uuid4().hex
@@ -484,6 +487,8 @@ class CFVMain(CFVCore):
         if not isinstance(config, dict):
             return
 
+        config = CFVMain._with_cache_defaults(self, config)
+
         prepared_config = self._prepare_ssh_config_for_auth(config)
         if prepared_config is None:
             return
@@ -512,6 +517,7 @@ class CFVMain(CFVCore):
             return
 
         self._release_remote_session_if_active()
+        self._clear_loaded_data_views()
         descriptor = spec_to_descriptor(spec, cache=config.get("cache") if isinstance(config, dict) else None)
         session_id = uuid.uuid4().hex
         descriptor_hash = remote_descriptor_hash(descriptor)
@@ -682,6 +688,31 @@ class CFVMain(CFVCore):
             return config, remote_path, matched_alias, False
 
         return None, "", "", False
+
+    def _with_cache_defaults(self, config: dict[str, object]) -> dict[str, object]:
+        """Attach persisted cache settings when a remote config omits cache."""
+        merged = dict(config)
+        existing_cache = merged.get("cache")
+        if isinstance(existing_cache, dict):
+            return merged
+
+        raw = self._settings.get("last_remote_configuration", {})
+        if not isinstance(raw, dict):
+            return merged
+
+        blocksize_mb = int(raw.get("cache_blocksize_mb", 2))
+        ram_buffer_mb = int(raw.get("cache_ram_buffer_mb", 1024))
+        merged["cache"] = {
+            "blocksize_mb": blocksize_mb,
+            "ram_buffer_mb": ram_buffer_mb,
+            "cache_strategy": str(raw.get("cache_strategy", "Block")),
+            "max_blocks": max(1, ram_buffer_mb // max(1, blocksize_mb)),
+            "disk_mode": str(raw.get("disk_mode", "Disabled")),
+            "disk_location": str(raw.get("disk_location", str(Path.home() / ".cache/xconv2"))),
+            "disk_limit_gb": int(raw.get("disk_limit_gb", 10)),
+            "disk_expiry": str(raw.get("disk_expiry", "1 day")),
+        }
+        return merged
 
     def _configure_remote_for_uri(self, uri: str) -> None:
         """Open Configure Remote pre-populated for URI-driven add-new workflows."""
@@ -1184,6 +1215,7 @@ class CFVMain(CFVCore):
             return
         if not ok or config is None:
             return
+        config = CFVMain._with_cache_defaults(self, config)
         self._open_remote_from_config(config)
 
     def _choose_uris(self) -> None:

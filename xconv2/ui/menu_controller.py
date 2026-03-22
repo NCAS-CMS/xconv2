@@ -56,6 +56,10 @@ class MenuController:
         view_logs_action.triggered.connect(self.host._view_logs)
         xconv_menu.addAction(view_logs_action)
 
+        cache_manager_action = QAction("Manage Cache...", self.host)
+        cache_manager_action.triggered.connect(self.host._show_cache_manager)
+        xconv_menu.addAction(cache_manager_action)
+
         file_menu = menu_bar.addMenu("&File")
 
 

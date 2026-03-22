@@ -25,8 +25,37 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from xconv2.cache_utils import parse_disk_expiry_seconds, prune_disk_cache
+
 
 logger = logging.getLogger(__name__)
+
+
+class _ConfiguredRemoteFileSystem:
+    """Proxy filesystem that injects default open kwargs for read caching."""
+
+    def __init__(self, filesystem: Any, *, open_defaults: dict[str, Any]) -> None:
+        self._filesystem = filesystem
+        self._open_defaults = dict(open_defaults)
+        self.protocol = getattr(filesystem, "protocol", None)
+
+    def open(self, path: str, mode: str = "rb", **kwargs: Any):
+        """Open a path while applying configured cache defaults for reads."""
+        return self._filesystem.open(path, mode=mode, **self._merge_open_kwargs(mode, kwargs))
+
+    def _open(self, path: str, mode: str = "rb", **kwargs: Any):
+        """Delegate low-level open while applying configured cache defaults for reads."""
+        return self._filesystem._open(path, mode=mode, **self._merge_open_kwargs(mode, kwargs))
+
+    def _merge_open_kwargs(self, mode: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+        if "r" not in mode:
+            return kwargs
+        merged = dict(self._open_defaults)
+        merged.update(kwargs)
+        return merged
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._filesystem, name)
 
 
 @dataclass(frozen=True)
@@ -130,6 +159,99 @@ def _emit_log(log: Callable[[str], None] | None, message: str) -> None:
     """Write a line to the optional connection log callback."""
     if log is not None:
         log(message)
+
+
+def _memory_cache_type(strategy: object) -> str | None:
+    """Map UI memory cache strategy labels to fsspec cache types."""
+    value = str(strategy or "").strip().lower()
+    if value == "block":
+        return "bytes"
+    if value == "readahead":
+        return "readahead"
+    if value == "whole-file":
+        return "all"
+    return None
+
+
+def _apply_cache_configuration(
+    filesystem: Any,
+    *,
+    cache: dict[str, Any] | None = None,
+    log: Callable[[str], None] | None = None,
+) -> Any:
+    """Apply optional disk and in-memory caching wrappers to a filesystem."""
+    if not isinstance(cache, dict):
+        return filesystem
+
+    configured = filesystem
+    disk_wrapped = False
+    block_size = max(1, int(cache.get("blocksize_mb", 2))) * 1024 * 1024
+    disk_mode = str(cache.get("disk_mode", "Disabled")).strip().lower()
+    disk_location = str(cache.get("disk_location", "")).strip() or "TMP"
+    expiry_time = parse_disk_expiry_seconds(cache.get("disk_expiry"))
+    disk_limit_gb = int(cache.get("disk_limit_gb", 0) or 0)
+
+    if disk_mode in {"blocks", "files"}:
+        try:
+            import fsspec  # type: ignore
+        except ImportError as exc:  # pragma: no cover - exercised at runtime
+            raise RuntimeError("fsspec is required for remote caching") from exc
+
+        cache_path = Path(disk_location).expanduser()
+        prune_summary = prune_disk_cache(
+            cache_path,
+            limit_bytes=disk_limit_gb * 1024 * 1024 * 1024,
+            expiry_seconds=expiry_time,
+            log=log,
+        )
+        if prune_summary["removed_files"]:
+            logger.info(
+                "Pruned remote disk cache removed_files=%d removed_bytes=%d total_bytes=%d",
+                prune_summary["removed_files"],
+                prune_summary["removed_bytes"],
+                prune_summary["total_bytes"],
+            )
+
+        protocol = "blockcache" if disk_mode == "blocks" else "filecache"
+        cache_kwargs: dict[str, Any] = {
+            "fs": configured,
+            "cache_storage": str(cache_path),
+            "expiry_time": expiry_time,
+            "check_files": False,
+        }
+        if disk_mode == "blocks":
+            cache_kwargs["block_size"] = block_size
+
+        configured = fsspec.filesystem(protocol, **cache_kwargs)
+        disk_wrapped = True
+        logger.info(
+            "Configured remote disk cache protocol=%s storage=%s expiry=%s",
+            protocol,
+            cache_path,
+            expiry_time,
+        )
+
+    cache_type = _memory_cache_type(cache.get("cache_strategy"))
+    if cache_type is not None:
+        if disk_wrapped:
+            logger.info(
+                "Skipping remote memory cache defaults because disk cache wrapper is active"
+            )
+            return configured
+        configured = _ConfiguredRemoteFileSystem(
+            configured,
+            open_defaults={
+                "cache_type": cache_type,
+                "block_size": block_size,
+            },
+        )
+        logger.info(
+            "Configured remote memory cache type=%s block_size=%d",
+            cache_type,
+            block_size,
+        )
+
+    return configured
 
 
 class _XconvHostKeyPolicy:
@@ -359,10 +481,15 @@ def build_remote_filesystem_spec(config: dict[str, Any]) -> RemoteFilesystemSpec
     raise ValueError(f"Unsupported remote protocol: {protocol}")
 
 
-def create_filesystem(spec: RemoteFilesystemSpec, log: Callable[[str], None] | None = None) -> Any:
+def create_filesystem(
+    spec: RemoteFilesystemSpec,
+    log: Callable[[str], None] | None = None,
+    cache: dict[str, Any] | None = None,
+) -> Any:
     """Create the underlying fsspec filesystem instance lazily."""
     if spec.proxy_jump and spec.protocol == "sftp":
-        return _create_sftp_via_jump(spec, log=log)
+        base_filesystem = _create_sftp_via_jump(spec, log=log)
+        return _apply_cache_configuration(base_filesystem, cache=cache, log=log)
 
     try:
         import fsspec  # type: ignore
@@ -370,7 +497,8 @@ def create_filesystem(spec: RemoteFilesystemSpec, log: Callable[[str], None] | N
         raise RuntimeError("fsspec is required for remote navigation") from exc
 
     _emit_log(log, f"Connecting filesystem protocol {spec.protocol!r}")
-    return fsspec.filesystem(spec.protocol, **spec.storage_options)
+    base_filesystem = fsspec.filesystem(spec.protocol, **spec.storage_options)
+    return _apply_cache_configuration(base_filesystem, cache=cache, log=log)
 
 
 def normalize_remote_entries(entries: list[Any]) -> list[RemoteEntry]:
@@ -637,7 +765,10 @@ class RemoteFileNavigatorDialog(QDialog):
             self._filesystem: Any | None = None
             self._list_callback: Callable[[str], list[RemoteEntry]] | None = list_callback
         else:
-            self._filesystem = filesystem or create_filesystem(self._spec)
+            self._filesystem = filesystem or create_filesystem(
+                self._spec,
+                cache=config.get("cache") if isinstance(config, dict) else None,
+            )
             self._list_callback = None
 
         layout = QVBoxLayout(self)
@@ -940,7 +1071,11 @@ class RemoteFileNavigatorDialog(QDialog):
         filesystem: Any | None = None
         _log_line("Starting remote login...")
         try:
-            filesystem = create_filesystem(spec, log=_log_line)
+            filesystem = create_filesystem(
+                spec,
+                log=_log_line,
+                cache=config.get("cache") if isinstance(config, dict) else None,
+            )
             _log_line(f"Checking remote root: {spec.root_path or '/'}")
             listing = filesystem.ls(spec.root_path, detail=True)
             if not isinstance(listing, list):

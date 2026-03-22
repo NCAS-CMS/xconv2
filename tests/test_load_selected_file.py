@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from dataclasses import dataclass, field
+import types
 
 import pytest
 
@@ -378,6 +379,159 @@ def test_https_locations_from_configure_are_passed_to_open_dialog(monkeypatch: p
     # Open dialog should receive merged HTTPS aliases from settings/config state.
     CFVMain._choose_remote(window)
     assert captured_state.get("https_locations") == configured_https
+
+
+def test_choose_remote_injects_cache_defaults_when_open_dialog_returns_no_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DummyRemoteFlowWindow:
+        def __init__(self) -> None:
+            self._settings = {
+                "last_remote_configuration": {
+                    "cache_blocksize_mb": 4,
+                    "cache_ram_buffer_mb": 2048,
+                    "cache_strategy": "Readahead",
+                    "disk_mode": "Blocks",
+                    "disk_location": "/tmp/xconv-cache",
+                    "disk_limit_gb": 5,
+                    "disk_expiry": "7 days",
+                },
+                "last_remote_open": {},
+            }
+            self.saved = 0
+            self.opened_config: dict[str, object] | None = None
+
+        def _save_settings(self) -> None:
+            self.saved += 1
+
+        def _open_remote_from_config(self, config: dict[str, object]) -> None:
+            self.opened_config = dict(config)
+
+        def _with_cache_defaults(self, config: dict[str, object]) -> dict[str, object]:
+            return CFVMain._with_cache_defaults(self, config)
+
+    window = _DummyRemoteFlowWindow()
+
+    monkeypatch.setattr(
+        main_window.RemoteOpenDialog,
+        "get_configuration",
+        lambda _parent, state=None: (
+            {"protocol": "HTTPS", "remote": {"mode": "Select from existing", "alias": "archive", "details": {"url": "https://example.org"}}},
+            True,
+            dict(state or {}),
+        ),
+    )
+
+    CFVMain._choose_remote(window)
+
+    assert window.opened_config is not None
+    cache = window.opened_config.get("cache")
+    assert isinstance(cache, dict)
+    assert cache == {
+        "blocksize_mb": 4,
+        "ram_buffer_mb": 2048,
+        "cache_strategy": "Readahead",
+        "max_blocks": 512,
+        "disk_mode": "Blocks",
+        "disk_location": "/tmp/xconv-cache",
+        "disk_limit_gb": 5,
+        "disk_expiry": "7 days",
+    }
+
+
+def test_open_remote_from_config_releases_existing_session_and_clears_loaded_ui(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DummyRemoteOpenWindow:
+        def __init__(self) -> None:
+            self._settings = {}
+            self.released = 0
+            self.cleared = 0
+            self._remote_session_id = None
+            self._remote_descriptor_hash = None
+            self._remote_descriptor = None
+            self._pending_prepare_log_dialog = None
+            self._pending_prepare_loop = None
+            self._pending_prepare_loop_ok = True
+            self._pending_prepare_failure_message = ""
+
+        def _prepare_ssh_config_for_auth(self, config: dict[str, object]) -> dict[str, object]:
+            return config
+
+        def _release_remote_session_if_active(self) -> None:
+            self.released += 1
+
+        def _clear_loaded_data_views(self) -> None:
+            self.cleared += 1
+
+        def _maybe_retry_ssh_authentication(self, _config: dict[str, object], _failure_message: str) -> bool:
+            return False
+
+        def _send_worker_control_task(self, _kind: str, _payload: dict[str, object]) -> None:
+            return None
+
+        def _make_worker_list_callback(self):
+            return lambda _path: []
+
+        def _show_status_message(self, _message: str, is_error: bool = False) -> None:
+            _ = is_error
+
+        def _set_window_title_for_file(self, _file_path: str) -> None:
+            return None
+
+        def _record_recent_uri(self, _uri: str, _host_alias: str | None = None) -> None:
+            return None
+
+        def _record_recent_file(self, _file_path: str) -> None:
+            return None
+
+        def _load_remote_selected_file(self, _uri: str, _remote_path: str) -> None:
+            return None
+
+    window = _DummyRemoteOpenWindow()
+
+    monkeypatch.setattr(
+        main_window,
+        "build_remote_filesystem_spec",
+        lambda _config: types.SimpleNamespace(display_name="HTTP"),
+    )
+    monkeypatch.setattr(main_window, "spec_to_descriptor", lambda _spec, cache=None: {"protocol": "http", "cache": cache})
+    monkeypatch.setattr(main_window, "remote_descriptor_hash", lambda _descriptor: "hash-1")
+
+    class _FakeLogDialog:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return None
+
+        def show(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        def exec(self) -> int:
+            return 0
+
+    class _FakeNavigator:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return None
+
+        def exec(self) -> int:
+            return QDialog.Rejected
+
+    monkeypatch.setattr(main_window, "RemoteLoginLogDialog", _FakeLogDialog)
+    monkeypatch.setattr(main_window, "RemoteFileNavigatorDialog", _FakeNavigator)
+    monkeypatch.setattr(main_window.QApplication, "processEvents", staticmethod(lambda: None))
+
+    class _FakeLoop:
+        def exec(self) -> None:
+            return None
+
+    monkeypatch.setattr(main_window, "QEventLoop", _FakeLoop)
+
+    CFVMain._open_remote_from_config(window, {"protocol": "HTTP", "remote": {"details": {"url": "http://server/public"}}})
+
+    assert window.released >= 1
+    assert window.cleared == 1
 
 
 def test_resolve_remote_uri_s3_prefers_recent_alias(monkeypatch: pytest.MonkeyPatch) -> None:
