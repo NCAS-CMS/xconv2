@@ -39,6 +39,7 @@ class ContourOptionsController:
 
     def __init__(self, host: "CFVCore") -> None:
         self.host = host
+        self._options_dialog: QDialog | None = None
 
     @staticmethod
     def _normalize_property_cell_text(value: object) -> str:
@@ -53,11 +54,19 @@ class ContourOptionsController:
         suggested_title: str | None = None,
     ) -> None:
         """Show contour options dialog and persist selected options."""
+        if self._options_dialog is not None and self._options_dialog.isVisible():
+            self._options_dialog.raise_()
+            self._options_dialog.activateWindow()
+            return
+
         existing = self.host.plot_options_by_kind.get("contour", {})
 
         dialog = QDialog(self.host)
+        self._options_dialog = dialog
         dialog.setWindowTitle("Contour Options")
+        dialog.setWindowModality(Qt.NonModal)
         dialog.resize(540, 360)
+        dialog.finished.connect(lambda _result: setattr(self, "_options_dialog", None))
 
         layout = QVBoxLayout(dialog)
         common = build_common_options_sections(
@@ -553,7 +562,9 @@ class ContourOptionsController:
         ok_button.clicked.connect(lambda: dialog.accept() if _apply_options() else None)
         plot_button.clicked.connect(_apply_options)
 
-        dialog.exec()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def show_annotation_properties_chooser(
         self,

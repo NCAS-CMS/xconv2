@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -40,14 +41,23 @@ class LineplotOptionsController:
 
     def __init__(self, host: "CFVCore") -> None:
         self.host = host
+        self._dialog: QDialog | None = None
 
     def show_lineplot_options_dialog(self) -> None:
         """Show lineplot options dialog and persist selected options."""
+        if self._dialog is not None and self._dialog.isVisible():
+            self._dialog.raise_()
+            self._dialog.activateWindow()
+            return
+
         existing = self.host.plot_options_by_kind.get("lineplot", {})
 
         dialog = QDialog(self.host)
+        self._dialog = dialog
         dialog.setWindowTitle("Lineplot Options")
+        dialog.setWindowModality(Qt.NonModal)
         dialog.resize(540, 320)
+        dialog.finished.connect(lambda _result: setattr(self, "_dialog", None))
 
         layout = QVBoxLayout(dialog)
 
@@ -161,4 +171,6 @@ class LineplotOptionsController:
         ok_button.clicked.connect(lambda: dialog.accept() if _apply_options() else None)
         plot_button.clicked.connect(_apply_options)
 
-        dialog.exec()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
