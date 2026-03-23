@@ -13,7 +13,6 @@ import time
 from io import BytesIO
 from pathlib import Path
 from typing import Any, NamedTuple
-from urllib.parse import urlparse
 
 import matplotlib
 import numpy as np
@@ -31,12 +30,12 @@ from . import xconv_cf_interface
 from . import lineplot as xconv_lineplot
 from . import cell_method_handler as xconv_cell_method_handler
 from . import __version__
-from .logging_utils import configure_logging
-from .ui.remote_file_navigator import (
+from .logging_utils import apply_runtime_log_level, configure_logging
+from .remote_access import (
+    RemoteAccessSession,
     create_filesystem,
     descriptor_to_spec,
-    normalize_remote_entries,
-    resolve_link_entries,
+    normalize_remote_datasets_for_cf_read as _normalize_remote_datasets_for_cf_read_shared,
 )
 
 # cf-plot may still call show(); in Agg mode this is non-interactive and noisy.
@@ -198,20 +197,10 @@ def _extract_task_headers(code: str) -> TaskHeaders:
 
 def _close_remote_session_entry(entry: RemoteSessionEntry) -> None:
     """Best-effort cleanup for cached remote session resources."""
-    filesystem = entry.filesystem
-    close = getattr(filesystem, "close", None)
-    if callable(close):
-        try:
-            close()
-        except Exception:
-            logger.exception("Failed to close remote filesystem for %s", entry.descriptor_hash)
-
-    jump_client = getattr(filesystem, "_xconv_jump_client", None)
-    if jump_client is not None:
-        try:
-            jump_client.close()
-        except Exception:
-            logger.exception("Failed to close jump client for %s", entry.descriptor_hash)
+    try:
+        RemoteAccessSession(entry.filesystem).close()
+    except Exception:
+        logger.exception("Failed to close remote session for %s", entry.descriptor_hash)
 
 
 def _send_remote_status(
@@ -340,12 +329,16 @@ def _read_remote_fields(
     datasets: str | list[str],
 ):
     """Read remote fields using the warmed filesystem and dataset path(s)."""
-    filesystem = entry.filesystem
+    session = RemoteAccessSession(entry.filesystem)
     normalized_datasets = _normalize_remote_datasets_for_cf_read(
         descriptor=descriptor,
         datasets=datasets,
     )
-    return cf.read(normalized_datasets, filesystem=filesystem)
+    return session.read_fields(
+        descriptor=descriptor,
+        datasets=normalized_datasets,
+        reader=cf.read,
+    )
 
 
 def _normalize_remote_datasets_for_cf_read(
@@ -354,40 +347,10 @@ def _normalize_remote_datasets_for_cf_read(
     datasets: str | list[str],
 ) -> str | list[str]:
     """Normalize remote dataset paths to forms cf.read can open with a filesystem."""
-    protocol = str(descriptor.get("protocol", "")).lower()
-    if protocol != "http":
-        return datasets
-
-    root_path = str(descriptor.get("root_path", "")).strip()
-    parsed_root = urlparse(root_path)
-    if parsed_root.scheme not in {"http", "https"} or not parsed_root.netloc:
-        return datasets
-
-    origin = f"{parsed_root.scheme}://{parsed_root.netloc}"
-    root_prefix = parsed_root.path.rstrip("/")
-
-    def _normalize_one(path: str) -> str:
-        text = str(path).strip()
-        parsed = urlparse(text)
-        if parsed.scheme in {"http", "https"} and parsed.netloc:
-            return text
-
-        if text.startswith("/"):
-            if root_prefix and (text == root_prefix or text.startswith(root_prefix + "/")):
-                return origin + text
-            if root_prefix:
-                return origin + root_prefix + text
-            return origin + text
-
-        suffix = text.lstrip("/")
-        if root_prefix:
-            return origin + root_prefix + "/" + suffix
-        return origin + "/" + suffix
-
-    if isinstance(datasets, list):
-        normalized = [_normalize_one(item) for item in datasets]
-    else:
-        normalized = _normalize_one(datasets)
+    normalized = _normalize_remote_datasets_for_cf_read_shared(
+        descriptor=descriptor,
+        datasets=datasets,
+    )
 
     logger.info(
         "REMOTE_OPEN normalized HTTP datasets from %r to %r",
@@ -395,6 +358,28 @@ def _normalize_remote_datasets_for_cf_read(
         normalized,
     )
     return normalized
+
+
+def _apply_worker_logging_configuration(
+    *,
+    level: int | str | None = None,
+    trace_remote_fs: bool | None = None,
+    trace_remote_file_io: bool | None = None,
+) -> None:
+    """Apply runtime logging settings for the worker and shared remote access."""
+    config = RemoteAccessSession.configure_logging(
+        level=level,
+        trace_filesystem=trace_remote_fs,
+        trace_file_io=trace_remote_file_io,
+    )
+    apply_runtime_log_level(config.level)
+    logging.getLogger("pyfive").setLevel(config.level)
+    logger.info(
+        "Logging configuration updated level=%s trace_remote_fs=%s trace_remote_file_io=%s",
+        logging.getLevelName(config.level),
+        config.trace_filesystem,
+        config.trace_file_io,
+    )
 
 
 def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) -> None:
@@ -420,6 +405,15 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
         _release_remote_session(session_id=session_id, descriptor_hash=descriptor_hash)
         return
 
+    if task_kind == "LOGGING_CONFIGURE":
+        _apply_worker_logging_configuration(
+            level=payload.get("level"),
+            trace_remote_fs=payload.get("trace_remote_fs"),
+            trace_remote_file_io=payload.get("trace_remote_file_io"),
+        )
+        send_to_gui("STATUS:Logging configuration updated")
+        return
+
     if task_kind == "REMOTE_LIST":
         if not isinstance(descriptor, dict) or not session_id or not descriptor_hash:
             raise ValueError("REMOTE_LIST requires session_id, descriptor_hash, and descriptor")
@@ -435,11 +429,8 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
         else:
             entry.last_used = time.monotonic()
         try:
-            raw = entry.filesystem.ls(path, detail=True)
-            if not isinstance(raw, list):
-                raw = []
-            entries = normalize_remote_entries(raw)
-            entries = resolve_link_entries(entries, entry.filesystem)
+            session = RemoteAccessSession(entry.filesystem)
+            entries = session.list_entries(path)
             send_to_gui("REMOTE_LIST_RESULT", {
                 "path": path,
                 "entries": entries,
@@ -676,12 +667,7 @@ def _emit_latest_plot_image() -> None:
 def main():
     """Entry point for the cf-worker command."""
     log_file = configure_logging()
-
-    # cf/cfdm (or a lazy dependency) suppresses the pyfive logger to WARNING
-    # during the first cf.read() call, after configure_logging() has already
-    # run.  Explicitly restoring INFO here ensures chunk-index and
-    # remote-access diagnostics reach the shared log file.
-    logging.getLogger("pyfive").setLevel(logging.INFO)
+    _apply_worker_logging_configuration(level=logging.INFO)
 
     logger.info("Worker starting")
     logger.info("Log file: %s", log_file)
@@ -715,10 +701,8 @@ def main():
                 headers.code,
             )
             # Some dependency paths can adjust logger levels at runtime.
-            # Re-assert expected levels so worker and pyfive diagnostics stay visible.
-            logging.getLogger().setLevel(logging.INFO)
-            logger.setLevel(logging.INFO)
-            logging.getLogger("pyfive").setLevel(logging.INFO)
+            # Re-assert the runtime logging policy before each task.
+            _apply_worker_logging_configuration()
             logger.info("Executing task block (%d lines, %d chars)", len(current_block), len(exec_code))
 
             if task_kind is not None:

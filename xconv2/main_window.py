@@ -32,15 +32,17 @@ from .cf_templates import (
     save_data_from_selection,
 )
 from .core_window import CFVCore
-from .ui.dialogs import OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog
-from .ui.remote_file_navigator import (
+from .remote_access import (
     RemoteEntry,
-    RemoteFileNavigatorDialog,
-    RemoteLoginLogDialog,
     _XconvHostKeyPolicy,
     build_remote_filesystem_spec,
     remote_descriptor_hash,
     spec_to_descriptor,
+)
+from .ui.dialogs import OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog
+from .ui.remote_file_navigator import (
+    RemoteFileNavigatorDialog,
+    RemoteLoginLogDialog,
 )
 
 logger = logging.getLogger(__name__)
@@ -408,7 +410,6 @@ class CFVMain(CFVCore):
             QMessageBox.critical(self, "Remote configuration invalid", str(exc))
             return
 
-        self._release_remote_session_if_active()
         self._clear_loaded_data_views()
 
         descriptor = spec_to_descriptor(spec, cache=config.get("cache") if isinstance(config, dict) else None)
@@ -443,10 +444,8 @@ class CFVMain(CFVCore):
             log_dialog.exec()
             failure_message = self._pending_prepare_failure_message
             if self._maybe_retry_ssh_authentication(config, failure_message):
-                self._release_remote_session_if_active()
                 self._open_remote_from_config(config)
                 return
-            self._release_remote_session_if_active()
             return
 
         log_dialog.close()
@@ -455,14 +454,12 @@ class CFVMain(CFVCore):
         list_callback = self._make_worker_list_callback()
         dialog = RemoteFileNavigatorDialog(self, config, spec=spec, list_callback=list_callback)
         if dialog.exec() != QDialog.Accepted:
-            self._release_remote_session_if_active()
             return
 
         selected_uri = dialog.selected_uri()
         selected_path = dialog.selected_path()
         if not selected_uri or not selected_path:
             self._show_status_message("Remote file selection was incomplete.", is_error=True)
-            self._release_remote_session_if_active()
             return
 
         remote = config.get("remote") if isinstance(config, dict) else None
@@ -516,7 +513,6 @@ class CFVMain(CFVCore):
             QMessageBox.critical(self, "Remote configuration invalid", str(exc))
             return
 
-        self._release_remote_session_if_active()
         self._clear_loaded_data_views()
         descriptor = spec_to_descriptor(spec, cache=config.get("cache") if isinstance(config, dict) else None)
         session_id = uuid.uuid4().hex
@@ -548,7 +544,6 @@ class CFVMain(CFVCore):
             log_dialog.exec()
             failure_message = self._pending_prepare_failure_message
             if self._maybe_retry_ssh_authentication(config, failure_message):
-                self._release_remote_session_if_active()
                 self._open_remote_uri_direct(
                     uri=uri,
                     remote_path=remote_path,
@@ -556,7 +551,6 @@ class CFVMain(CFVCore):
                     host_alias=host_alias,
                 )
                 return
-            self._release_remote_session_if_active()
             return
 
         log_dialog.close()
@@ -1576,6 +1570,28 @@ class CFVMain(CFVCore):
         CFVMain._record_pending_worker_task(self)
         logger.debug("Sending worker control task %s", kind)
         self.worker.write(task.encode())
+
+    def _apply_logging_configuration_from_ui(
+        self,
+        *,
+        trace_remote_fs: bool,
+        trace_remote_file_io: bool,
+        level_name: str,
+    ) -> None:
+        """Apply GUI logging config locally and forward it to the worker."""
+        super()._apply_logging_configuration_from_ui(
+            trace_remote_fs=trace_remote_fs,
+            trace_remote_file_io=trace_remote_file_io,
+            level_name=level_name,
+        )
+        self._send_worker_control_task(
+            "LOGGING_CONFIGURE",
+            {
+                "level": level_name,
+                "trace_remote_fs": trace_remote_fs,
+                "trace_remote_file_io": trace_remote_file_io,
+            },
+        )
 
     def _record_pending_worker_task(self) -> None:
         """Store worker task start times so completion statuses can show elapsed time."""

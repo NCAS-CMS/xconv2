@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -251,6 +252,7 @@ def test_apply_cache_configuration_wraps_block_disk_cache(monkeypatch) -> None:
         cache={
             "blocksize_mb": 4,
             "cache_strategy": "None",
+            "max_blocks": 128,
             "disk_mode": "Blocks",
             "disk_location": "/tmp/xconv-cache",
             "disk_expiry": "7 days",
@@ -266,7 +268,8 @@ def test_apply_cache_configuration_wraps_block_disk_cache(monkeypatch) -> None:
                 "cache_storage": "/tmp/xconv-cache",
                 "expiry_time": 7 * 24 * 60 * 60,
                 "check_files": False,
-                "block_size": 4 * 1024 * 1024,
+                "blocksize": 4 * 1024 * 1024,
+                "maxblocks": 128,
             },
         )
     ]
@@ -306,3 +309,50 @@ def test_apply_cache_configuration_skips_memory_wrapper_when_disk_cache_active(m
     wrapped.open("/data/file.nc", "rb")
     assert getattr(wrapped, "protocol", None) == "blockcache"
     assert blockcache_fs.calls == [("/data/file.nc", "rb", {})]
+
+
+def test_apply_cache_configuration_prunes_incompatible_blockcache_entries(monkeypatch, tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir(parents=True)
+
+    stale_data_name = "stale-hash"
+    (cache_dir / stale_data_name).write_bytes(b"stale")
+    (cache_dir / "cache").write_text(
+        json.dumps(
+            {
+                "bucket/old.nc": {
+                    "original": "bucket/old.nc",
+                    "fn": stale_data_name,
+                    "blocks": [0],
+                    "time": 1.0,
+                    "uid": "abc",
+                    "size": 1024,
+                    "blocksize": 50 * 1024 * 1024,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    calls: list[tuple[str, dict[str, object]]] = []
+    fake_fsspec = types.SimpleNamespace(
+        filesystem=lambda protocol, **kwargs: calls.append((protocol, kwargs)) or SimpleNamespace(protocol=protocol)
+    )
+    monkeypatch.setitem(sys.modules, "fsspec", fake_fsspec)
+
+    _apply_cache_configuration(
+        SimpleNamespace(protocol="s3"),
+        cache={
+            "blocksize_mb": 2,
+            "max_blocks": 64,
+            "cache_strategy": "None",
+            "disk_mode": "Blocks",
+            "disk_location": str(cache_dir),
+            "disk_expiry": "7 days",
+        },
+    )
+
+    payload = json.loads((cache_dir / "cache").read_text(encoding="utf-8"))
+    assert payload == {}
+    assert not (cache_dir / stale_data_name).exists()
+    assert calls

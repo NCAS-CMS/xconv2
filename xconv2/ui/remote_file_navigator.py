@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from pathlib import PurePosixPath
 from typing import Any, Callable
 
 from PySide6.QtCore import QTimer, Qt
@@ -27,22 +24,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from xconv2.cache_utils import parse_disk_expiry_seconds, prune_disk_cache
+from xconv2 import remote_access as remote_core
 
 
 logger = logging.getLogger(__name__)
-_TRACE_REMOTE_FS = os.getenv("XCONV2_REMOTE_FS_TRACE", "0").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
-_TRACE_REMOTE_FILE_IO = os.getenv("XCONV2_REMOTE_FS_TRACE_FILE_IO", "0").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
+
+
+def _current_remote_logging_configuration():
+    """Return the shared runtime remote logging configuration."""
+    return remote_core.RemoteAccessSession.logging_configuration()
 
 
 class _ConfiguredRemoteFileSystem:
@@ -139,7 +129,7 @@ def _wrap_filesystem_with_logging(filesystem: Any, *, label: str) -> Any:
     subclass the *actual* filesystem type and swizzle the instance's ``__class__``.
     Every attribute not explicitly overridden here is inherited correctly.
     """
-    if not _TRACE_REMOTE_FS:
+    if not _current_remote_logging_configuration().trace_filesystem:
         return filesystem
 
     base_cls = type(filesystem)
@@ -151,7 +141,7 @@ def _wrap_filesystem_with_logging(filesystem: Any, *, label: str) -> Any:
             "REMOTE_FS _open label=%s path=%r mode=%s elapsed_ms=%d",
             label, path, mode, int((time.perf_counter() - started) * 1000),
         )
-        if _TRACE_REMOTE_FILE_IO:
+        if _current_remote_logging_configuration().trace_file_io:
             return _LoggingFileHandleProxy(handle, label=label, path=path)
         return handle
 
@@ -162,7 +152,7 @@ def _wrap_filesystem_with_logging(filesystem: Any, *, label: str) -> Any:
             "REMOTE_FS open label=%s path=%r mode=%s elapsed_ms=%d",
             label, path, mode, int((time.perf_counter() - started) * 1000),
         )
-        if _TRACE_REMOTE_FILE_IO:
+        if _current_remote_logging_configuration().trace_file_io:
             return _LoggingFileHandleProxy(handle, label=label, path=path)
         return handle
 
@@ -278,41 +268,17 @@ def spec_to_descriptor(
     cache: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a JSON-safe descriptor for worker-side warm-up/open tasks."""
-    descriptor = {
-        "protocol": spec.protocol,
-        "storage_options": dict(spec.storage_options),
-        "root_path": spec.root_path,
-        "display_name": spec.display_name,
-        "uri_scheme": spec.uri_scheme,
-        "uri_authority": spec.uri_authority,
-        "proxy_jump": spec.proxy_jump,
-    }
-    if cache is not None:
-        descriptor["cache"] = dict(cache)
-    return descriptor
+    return remote_core.spec_to_descriptor(spec, cache=cache)
 
 
 def descriptor_to_spec(descriptor: dict[str, Any]) -> RemoteFilesystemSpec:
     """Rebuild a filesystem spec from a worker/UI transport descriptor."""
-    return RemoteFilesystemSpec(
-        protocol=str(descriptor.get("protocol", "")),
-        storage_options=dict(descriptor.get("storage_options", {})),
-        root_path=str(descriptor.get("root_path", "")),
-        display_name=str(descriptor.get("display_name", "Remote")),
-        uri_scheme=str(descriptor.get("uri_scheme", "")),
-        uri_authority=str(descriptor.get("uri_authority", "")),
-        proxy_jump=(
-            str(descriptor["proxy_jump"])
-            if descriptor.get("proxy_jump")
-            else None
-        ),
-    )
+    return remote_core.descriptor_to_spec(descriptor)
 
 
 def remote_descriptor_hash(descriptor: dict[str, Any]) -> str:
     """Create a stable hash for descriptor-keyed worker session reuse."""
-    normalized = json.dumps(descriptor, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return remote_core.remote_descriptor_hash(descriptor)
 
 
 def _value_from_keys(details: dict[str, Any], *keys: str) -> str:
@@ -326,23 +292,7 @@ def _value_from_keys(details: dict[str, Any], *keys: str) -> str:
 
 def _parse_proxy_jump(s: str) -> tuple[str | None, str, int]:
     """Parse a ProxyJump directive into (user, host, port). Only the first hop is used."""
-    first = s.split(",")[0].strip()
-    port = 22
-    user: str | None = None
-    if "@" in first:
-        user_part, rest = first.split("@", 1)
-        user = user_part or None
-    else:
-        rest = first
-    if ":" in rest:
-        host, port_str = rest.rsplit(":", 1)
-        try:
-            port = int(port_str)
-        except ValueError:
-            host = rest
-    else:
-        host = rest
-    return user, host, port
+    return remote_core._parse_proxy_jump(s)
 
 
 def _emit_log(log: Callable[[str], None] | None, message: str) -> None:
@@ -363,6 +313,61 @@ def _memory_cache_type(strategy: object) -> str | None:
     return None
 
 
+def _prune_incompatible_blockcache_entries(
+    cache_path: Path,
+    *,
+    block_size: int,
+    log: Callable[[str], None] | None = None,
+) -> None:
+    """Remove blockcache entries that were created with a different block size."""
+    index_path = cache_path / "cache"
+    if not index_path.is_file():
+        return
+
+    try:
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.exception("Failed to read blockcache index at %s", index_path)
+        return
+
+    if not isinstance(payload, dict):
+        return
+
+    removed = 0
+    for key, details in list(payload.items()):
+        if not isinstance(details, dict):
+            continue
+        existing_block_size = details.get("blocksize")
+        if not isinstance(existing_block_size, int) or existing_block_size == block_size:
+            continue
+
+        cache_file = details.get("fn")
+        if isinstance(cache_file, str) and cache_file:
+            try:
+                (cache_path / cache_file).unlink(missing_ok=True)
+            except OSError:
+                logger.exception("Failed to remove stale blockcache file %s", cache_file)
+
+        payload.pop(key, None)
+        removed += 1
+
+    if not removed:
+        return
+
+    try:
+        index_path.write_text(json.dumps(payload), encoding="utf-8")
+    except OSError:
+        logger.exception("Failed to write pruned blockcache index at %s", index_path)
+        return
+
+    message = (
+        f"Pruned {removed} incompatible blockcache entr"
+        f"{'y' if removed == 1 else 'ies'} for blocksize={block_size}."
+    )
+    _emit_log(log, message)
+    logger.info(message)
+
+
 def _apply_cache_configuration(
     filesystem: Any,
     *,
@@ -370,78 +375,7 @@ def _apply_cache_configuration(
     log: Callable[[str], None] | None = None,
 ) -> Any:
     """Apply optional disk and in-memory caching wrappers to a filesystem."""
-    if not isinstance(cache, dict):
-        return filesystem
-
-    configured = filesystem
-    disk_wrapped = False
-    block_size = max(1, int(cache.get("blocksize_mb", 2))) * 1024 * 1024
-    disk_mode = str(cache.get("disk_mode", "Disabled")).strip().lower()
-    disk_location = str(cache.get("disk_location", "")).strip() or "TMP"
-    expiry_time = parse_disk_expiry_seconds(cache.get("disk_expiry"))
-    disk_limit_gb = int(cache.get("disk_limit_gb", 0) or 0)
-
-    if disk_mode in {"blocks", "files"}:
-        try:
-            import fsspec  # type: ignore
-        except ImportError as exc:  # pragma: no cover - exercised at runtime
-            raise RuntimeError("fsspec is required for remote caching") from exc
-
-        cache_path = Path(disk_location).expanduser()
-        prune_summary = prune_disk_cache(
-            cache_path,
-            limit_bytes=disk_limit_gb * 1024 * 1024 * 1024,
-            expiry_seconds=expiry_time,
-            log=log,
-        )
-        if prune_summary["removed_files"]:
-            logger.info(
-                "Pruned remote disk cache removed_files=%d removed_bytes=%d total_bytes=%d",
-                prune_summary["removed_files"],
-                prune_summary["removed_bytes"],
-                prune_summary["total_bytes"],
-            )
-
-        protocol = "blockcache" if disk_mode == "blocks" else "filecache"
-        cache_kwargs: dict[str, Any] = {
-            "fs": configured,
-            "cache_storage": str(cache_path),
-            "expiry_time": expiry_time,
-            "check_files": False,
-        }
-        if disk_mode == "blocks":
-            cache_kwargs["block_size"] = block_size
-
-        configured = fsspec.filesystem(protocol, **cache_kwargs)
-        disk_wrapped = True
-        logger.info(
-            "Configured remote disk cache protocol=%s storage=%s expiry=%s",
-            protocol,
-            cache_path,
-            expiry_time,
-        )
-
-    cache_type = _memory_cache_type(cache.get("cache_strategy"))
-    if cache_type is not None:
-        if disk_wrapped:
-            logger.info(
-                "Skipping remote memory cache defaults because disk cache wrapper is active"
-            )
-            return configured
-        configured = _ConfiguredRemoteFileSystem(
-            configured,
-            open_defaults={
-                "cache_type": cache_type,
-                "block_size": block_size,
-            },
-        )
-        logger.info(
-            "Configured remote memory cache type=%s block_size=%d",
-            cache_type,
-            block_size,
-        )
-
-    return configured
+    return remote_core._apply_cache_configuration(filesystem, cache=cache, log=log)
 
 
 class _XconvHostKeyPolicy:
@@ -589,86 +523,7 @@ def _create_sftp_via_jump(spec: RemoteFilesystemSpec, log: Callable[[str], None]
 
 def build_remote_filesystem_spec(config: dict[str, Any]) -> RemoteFilesystemSpec:
     """Translate remote configuration state into fsspec filesystem arguments."""
-    protocol = str(config.get("protocol", "")).upper()
-    remote = config.get("remote", {})
-    if not isinstance(remote, dict):
-        raise ValueError("Remote configuration is malformed")
-
-    details = remote.get("details", {})
-    if not isinstance(details, dict):
-        details = {}
-
-    if protocol == "S3":
-        alias = str(remote.get("alias") or "S3")
-        url = _value_from_keys(details, "url") or _value_from_keys(remote, "url")
-        key = _value_from_keys(details, "accessKey", "access_key") or _value_from_keys(remote, "access_key")
-        secret = _value_from_keys(details, "secretKey", "secret_key") or _value_from_keys(remote, "secret_key")
-
-        storage_options: dict[str, Any] = {"anon": not (key and secret)}
-        if key and secret:
-            storage_options["key"] = key
-            storage_options["secret"] = secret
-        if url:
-            storage_options["client_kwargs"] = {"endpoint_url": url}
-
-        return RemoteFilesystemSpec(
-            protocol="s3",
-            storage_options=storage_options,
-            root_path="",
-            display_name=alias,
-            uri_scheme="s3",
-            uri_authority="",
-        )
-
-    if protocol == "SSH":
-        alias = str(remote.get("alias") or "SSH")
-        hostname = _value_from_keys(details, "hostname") or _value_from_keys(remote, "hostname")
-        user = _value_from_keys(details, "user") or _value_from_keys(remote, "user")
-        password = _value_from_keys(details, "password") or _value_from_keys(remote, "password")
-        proxyjump_password = _value_from_keys(details, "proxyjump_password") or _value_from_keys(remote, "proxyjump_password")
-        proxyjump_user = _value_from_keys(details, "proxyjump_user") or _value_from_keys(remote, "proxyjump_user")
-        identity_file = _value_from_keys(details, "identityfile", "identity_file") or _value_from_keys(remote, "identity_file")
-        if not hostname:
-            raise ValueError("SSH configuration is missing a hostname")
-
-        proxy_jump_raw = _value_from_keys(details, "proxyjump") or _value_from_keys(remote, "proxyjump")
-
-        storage_options = {"host": hostname}
-        if user:
-            storage_options["username"] = user
-        if password:
-            storage_options["password"] = password
-        if proxyjump_password:
-            storage_options["proxyjump_password"] = proxyjump_password
-        if proxyjump_user:
-            storage_options["proxyjump_username"] = proxyjump_user
-        if identity_file:
-            storage_options["key_filename"] = str(Path(identity_file).expanduser())
-
-        return RemoteFilesystemSpec(
-            protocol="sftp",
-            storage_options=storage_options,
-            root_path=".",
-            display_name=alias,
-            uri_scheme="ssh",
-            uri_authority=hostname,
-            proxy_jump=proxy_jump_raw or None,
-        )
-
-    if protocol in {"HTTP", "HTTPS"}:
-        url = _value_from_keys(details, "url", "base_url") or _value_from_keys(remote, "url", "base_url")
-        if not url:
-            raise ValueError("HTTPS remote navigation is not configured yet")
-        return RemoteFilesystemSpec(
-            protocol="http",
-            storage_options={},
-            root_path=url,
-            display_name="HTTPS",
-            uri_scheme="",
-            uri_authority="",
-        )
-
-    raise ValueError(f"Unsupported remote protocol: {protocol}")
+    return remote_core.build_remote_filesystem_spec(config)
 
 
 def create_filesystem(
@@ -677,102 +532,22 @@ def create_filesystem(
     cache: dict[str, Any] | None = None,
 ) -> Any:
     """Create the underlying fsspec filesystem instance lazily."""
-    if spec.proxy_jump and spec.protocol == "sftp":
-        base_filesystem = _wrap_filesystem_with_logging(
-            _create_sftp_via_jump(spec, log=log),
-            label=f"{spec.protocol}:{spec.display_name}",
-        )
-        return _apply_cache_configuration(base_filesystem, cache=cache, log=log)
-
-    try:
-        import fsspec  # type: ignore
-    except ImportError as exc:  # pragma: no cover - exercised at runtime
-        raise RuntimeError("fsspec is required for remote navigation") from exc
-
-    _emit_log(log, f"Connecting filesystem protocol {spec.protocol!r}")
-    base_filesystem = _wrap_filesystem_with_logging(
-        fsspec.filesystem(spec.protocol, **spec.storage_options),
-        label=f"{spec.protocol}:{spec.display_name}",
-    )
-    return _apply_cache_configuration(base_filesystem, cache=cache, log=log)
+    return remote_core.create_filesystem(spec, log=log, cache=cache)
 
 
 def normalize_remote_entries(entries: list[Any]) -> list[RemoteEntry]:
     """Normalize fsspec ls results into tree-friendly entries sorted dirs-first."""
-    normalized: list[RemoteEntry] = []
-    for entry in entries:
-        if isinstance(entry, str):
-            raw_path = entry
-            is_dir = raw_path.endswith("/")
-            size: int | None = None
-            is_link = False
-        elif isinstance(entry, dict):
-            raw_path = str(entry.get("name") or entry.get("Key") or "")
-            entry_type = str(entry.get("type", "")).lower()
-            is_dir = entry_type in {"directory", "dir"} or raw_path.endswith("/")
-            is_link = entry_type in {"link", "symlink"} or bool(entry.get("islink") or entry.get("is_link"))
-            raw_size = entry.get("size")
-            size = int(raw_size) if isinstance(raw_size, int) else None
-        else:
-            continue
-
-        cleaned = raw_path.rstrip("/") if raw_path not in {"", "/"} else raw_path
-        if not cleaned and raw_path not in {"", "/"}:
-            continue
-
-        if cleaned in {"", "/"}:
-            display_name = cleaned or "/"
-        else:
-            display_name = PurePosixPath(cleaned).name or cleaned
-
-        normalized.append(
-            RemoteEntry(
-                path=cleaned or raw_path,
-                name=display_name,
-                is_dir=is_dir,
-                size=size,
-                is_link=is_link,
-            )
-        )
-
-    return sorted(normalized, key=lambda item: (not item.is_dir, item.name.lower()))
+    return remote_core.normalize_remote_entries(entries)
 
 
 def resolve_link_entries(entries: list[RemoteEntry], filesystem: Any) -> list[RemoteEntry]:
     """Resolve symlink entries to determine if they target directories."""
-    resolved: list[RemoteEntry] = []
-    for entry in entries:
-        if not entry.is_link or entry.is_dir:
-            resolved.append(entry)
-            continue
-
-        try:
-            target_is_dir = bool(filesystem.isdir(entry.path))
-        except Exception:
-            target_is_dir = False
-
-        if target_is_dir:
-            resolved.append(
-                RemoteEntry(
-                    path=entry.path,
-                    name=entry.name,
-                    is_dir=True,
-                    size=entry.size,
-                    is_link=True,
-                )
-            )
-            continue
-
-        resolved.append(entry)
-
-    return sorted(resolved, key=lambda item: (not item.is_dir, item.name.lower()))
+    return remote_core.resolve_link_entries(entries, filesystem)
 
 
 def filter_hidden_entries(entries: list[RemoteEntry], *, show_hidden: bool) -> list[RemoteEntry]:
     """Optionally remove dot-prefixed entries from a normalized listing."""
-    if show_hidden:
-        return entries
-    return [entry for entry in entries if not entry.name.startswith(".")]
+    return remote_core.filter_hidden_entries(entries, show_hidden=show_hidden)
 
 
 _KNOWN_EXTENSIONS = frozenset((".nc", ".pp"))
@@ -781,54 +556,27 @@ _ZARR_METADATA_FILENAMES = frozenset((".zarray", ".zgroup", ".zmetadata", "zarr.
 
 def filter_type_entries(entries: list[RemoteEntry], *, show_all: bool) -> list[RemoteEntry]:
     """When show_all is False, keep only directories and .nc/.pp files."""
-    if show_all:
-        return entries
-    return [
-        entry for entry in entries
-        if entry.is_dir or PurePosixPath(entry.name).suffix.lower() in _KNOWN_EXTENSIONS
-    ]
+    return remote_core.filter_type_entries(entries, show_all=show_all)
 
 
 def format_size(size: int | None) -> str:
     """Format raw byte sizes using human-readable binary units."""
-    if size is None:
-        return ""
-    if size < 0:
-        return ""
-    if size < 1024:
-        return f"{size} B"
-
-    value = float(size)
-    units = ["KB", "MB", "GB", "TB"]
-    for unit in units:
-        value /= 1024.0
-        if value < 1024.0 or unit == units[-1]:
-            text = f"{value:.1f}".rstrip("0").rstrip(".")
-            return f"{text} {unit}"
-    return ""
+    return remote_core.format_size(size)
 
 
 def is_zarr_path(path: str) -> bool:
     """Return True when a path's leaf-name uses the .zarr suffix."""
-    name = PurePosixPath(path.rstrip("/") or path).name
-    return name.lower().endswith(".zarr")
+    return remote_core.is_zarr_path(path)
 
 
 def directory_contains_zarr_metadata(entries: list[RemoteEntry]) -> bool:
     """Return True when a directory listing looks like a Zarr store root."""
-    names = {entry.name for entry in entries}
-    return bool(names & _ZARR_METADATA_FILENAMES)
+    return remote_core.directory_contains_zarr_metadata(entries)
 
 
 def build_remote_uri(spec: RemoteFilesystemSpec, path: str) -> str:
     """Build a user-facing remote URI from a filesystem path."""
-    cleaned = path.strip()
-    if spec.uri_scheme == "s3":
-        return f"s3://{cleaned.lstrip('/')}"
-    if spec.uri_scheme == "ssh":
-        remote_path = cleaned if cleaned.startswith("/") else f"/{cleaned}"
-        return f"ssh://{spec.uri_authority}{remote_path}"
-    return cleaned
+    return remote_core.build_remote_uri(spec, path)
 
 
 class RemoteLoginLogDialog(QDialog):

@@ -29,3 +29,33 @@ def configure_logging(level: int = logging.INFO) -> Path:
         force=True,
     )
     return log_file
+
+
+def coerce_log_level(level: int | str | None, *, default: int = logging.INFO) -> int:
+    """Normalize logging level inputs from ints or level-name strings."""
+    if isinstance(level, int):
+        return level
+    if isinstance(level, str):
+        normalized = level.strip().upper()
+        if normalized:
+            resolved = getattr(logging, normalized, None)
+            if isinstance(resolved, int):
+                return resolved
+    return default
+
+
+def apply_runtime_log_level(level: int | str) -> int:
+    """Apply a new runtime log level while keeping console stderr at ERROR."""
+    resolved = coerce_log_level(level)
+    root = logging.getLogger()
+    root.setLevel(resolved)
+
+    for handler in root.handlers:
+        if isinstance(handler, logging.FileHandler):
+            handler.setLevel(resolved)
+
+    for name, existing in logging.root.manager.loggerDict.items():
+        if isinstance(existing, logging.Logger):
+            logging.getLogger(name).setLevel(resolved)
+
+    return resolved

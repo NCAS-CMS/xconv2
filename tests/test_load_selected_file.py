@@ -439,7 +439,7 @@ def test_choose_remote_injects_cache_defaults_when_open_dialog_returns_no_cache(
     }
 
 
-def test_open_remote_from_config_releases_existing_session_and_clears_loaded_ui(
+def test_open_remote_from_config_keeps_existing_session_and_clears_loaded_ui(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _DummyRemoteOpenWindow:
@@ -530,7 +530,7 @@ def test_open_remote_from_config_releases_existing_session_and_clears_loaded_ui(
 
     CFVMain._open_remote_from_config(window, {"protocol": "HTTP", "remote": {"details": {"url": "http://server/public"}}})
 
-    assert window.released >= 1
+    assert window.released == 0
     assert window.cleared == 1
 
 

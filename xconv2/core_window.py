@@ -60,7 +60,8 @@ from .ui.dialogs import OpenGlobDialog, OpenURIDialog, RemoteConfigurationDialog
 from .ui.remote_file_navigator import RemoteFileNavigatorDialog
 from .ui.settings_store import SettingsStore
 from .cache_utils import disk_cache_usage, parse_disk_expiry_seconds, prune_disk_cache
-from .logging_utils import get_log_file_path
+from .logging_utils import apply_runtime_log_level, get_log_file_path
+from .remote_access import RemoteAccessSession
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -74,6 +75,8 @@ STATUSBAR_ERROR_STYLE = "QStatusBar { color: #c62828; font-weight: 600; }"
 
 class LogViewerDialog(QDialog):
     """Tail and display the shared application log file."""
+
+    _LEVEL_NAMES = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
         # --- Filter controls ---
 
@@ -110,25 +113,27 @@ class LogViewerDialog(QDialog):
 
         # --- Advanced controls frame ---
         from PySide6.QtWidgets import QCheckBox, QComboBox, QHBoxLayout, QGroupBox, QPushButton
-        import os
         adv_group = QGroupBox("Advanced (option changes may require re-reading data)")
         adv_layout = QHBoxLayout()
 
         # Tracing checkboxes
         self.trace_fs_cb = QCheckBox("Trace remote FS")
         self.trace_fileio_cb = QCheckBox("Trace file I/O")
-        self.trace_fs_cb.setChecked(os.getenv("XCONV2_REMOTE_FS_TRACE", "0").strip().lower() in {"1","true","yes","on"})
-        self.trace_fileio_cb.setChecked(os.getenv("XCONV2_REMOTE_FS_TRACE_FILE_IO", "0").strip().lower() in {"1","true","yes","on"})
+        current_config = self._current_logging_configuration()
+        self.trace_fs_cb.setChecked(current_config.trace_filesystem)
+        self.trace_fileio_cb.setChecked(current_config.trace_file_io)
         adv_layout.addWidget(self.trace_fs_cb)
         adv_layout.addWidget(self.trace_fileio_cb)
 
         # Log level dropdown
         self.log_level_combo = QComboBox()
-        self.log_level_combo.addItems(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
-        import logging
-        current_level = logging.getLogger().getEffectiveLevel()
-        level_map = {10:0, 20:1, 30:2, 40:3, 50:4}
-        self.log_level_combo.setCurrentIndex(level_map.get(current_level, 1))
+        self.log_level_combo.addItems(self._LEVEL_NAMES)
+        current_level_name = logging.getLevelName(current_config.level)
+        try:
+            current_index = self._LEVEL_NAMES.index(current_level_name)
+        except ValueError:
+            current_index = 1
+        self.log_level_combo.setCurrentIndex(current_index)
         adv_layout.addWidget(QLabel("Log level:"))
         adv_layout.addWidget(self.log_level_combo)
 
@@ -152,25 +157,37 @@ class LogViewerDialog(QDialog):
         self._timer.timeout.connect(self._refresh_from_file)
 
     def _apply_advanced_options(self):
-        import os
-        import logging
-        # Set env vars for tracing (will only affect new processes)
+        host = self.parent()
         fs_trace = self.trace_fs_cb.isChecked()
         fileio_trace = self.trace_fileio_cb.isChecked()
-        os.environ["XCONV2_REMOTE_FS_TRACE"] = "1" if fs_trace else "0"
-        os.environ["XCONV2_REMOTE_FS_TRACE_FILE_IO"] = "1" if fileio_trace else "0"
+        level_name = self.log_level_combo.currentText()
 
-        # Set log level live for main process
-        level_str = self.log_level_combo.currentText()
-        level_val = getattr(logging, level_str, logging.INFO)
-        logging.getLogger().setLevel(level_val)
-        # Optionally: propagate to all known loggers
-        for name in logging.root.manager.loggerDict:
-            logging.getLogger(name).setLevel(level_val)
+        if host is not None and hasattr(host, "_apply_logging_configuration_from_ui"):
+            host._apply_logging_configuration_from_ui(
+                trace_remote_fs=fs_trace,
+                trace_remote_file_io=fileio_trace,
+                level_name=level_name,
+            )
+        else:
+            level_value = apply_runtime_log_level(level_name)
+            RemoteAccessSession.configure_logging(
+                level=level_value,
+                trace_filesystem=fs_trace,
+                trace_file_io=fileio_trace,
+            )
 
-        # Notify user about worker restart requirement for tracing
-        from PySide6.QtWidgets import QMessageBox
-        QMessageBox.information(self, "Advanced Options", "Tracing changes require a worker restart to take effect. Log level changes apply immediately.")
+        QMessageBox.information(
+            self,
+            "Advanced Options",
+            "Logging and tracing changes apply immediately. Existing and future worker sessions will use the updated settings.",
+        )
+
+    def _current_logging_configuration(self):
+        """Return the active runtime logging configuration from the parent host."""
+        host = self.parent()
+        if host is not None and hasattr(host, "_current_logging_configuration"):
+            return host._current_logging_configuration()
+        return RemoteAccessSession.logging_configuration()
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
@@ -337,6 +354,32 @@ class CFVCore(QMainWindow):
 
         self.setup_ui()
         self._setup_tray_icon()
+
+    def _current_logging_configuration(self):
+        """Return the current GUI-process runtime logging configuration."""
+        config = RemoteAccessSession.logging_configuration()
+        current_level = logging.getLogger().getEffectiveLevel()
+        if config.level == current_level:
+            return config
+        return RemoteAccessSession.configure_logging(level=current_level)
+
+    def _apply_logging_configuration_from_ui(
+        self,
+        *,
+        trace_remote_fs: bool,
+        trace_remote_file_io: bool,
+        level_name: str,
+    ) -> None:
+        """Apply GUI-process runtime logging updates from the log viewer."""
+        level_value = apply_runtime_log_level(level_name)
+        RemoteAccessSession.configure_logging(
+            level=level_value,
+            trace_filesystem=trace_remote_fs,
+            trace_file_io=trace_remote_file_io,
+        )
+        self._show_status_message(
+            f"Logging updated: {level_name} | remote FS trace={'on' if trace_remote_fs else 'off'} | file I/O trace={'on' if trace_remote_file_io else 'off'}"
+        )
 
     def _create_app_icon(self) -> QIcon:
         """Create application icon with a stable fallback chain."""
