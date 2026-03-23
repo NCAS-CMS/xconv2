@@ -71,11 +71,24 @@ STATUSBAR_NORMAL_STYLE = ""
 STATUSBAR_ERROR_STYLE = "QStatusBar { color: #c62828; font-weight: 600; }"
 
 
+
 class LogViewerDialog(QDialog):
     """Tail and display the shared application log file."""
 
+        # --- Filter controls ---
+
+
+
     def __init__(self, parent: QWidget | None, log_path: Path) -> None:
         super().__init__(parent)
+        # --- Filter controls and log line buffer: must be set before any timer/event ---
+        from PySide6.QtWidgets import QLineEdit, QPushButton, QHBoxLayout
+        self._log_lines = []  # Store all log lines for filtering
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("Filter log (substring, case-insensitive)")
+        self.filter_btn = QPushButton("Apply Filter")
+        self.filter_btn.clicked.connect(self._apply_filter)
+
         self._log_path = log_path
         self._read_pos = 0
 
@@ -85,10 +98,48 @@ class LogViewerDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(str(log_path)))
 
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(self.filter_edit)
+        filter_layout.addWidget(self.filter_btn)
+        layout.addLayout(filter_layout)
+
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setLineWrapMode(QPlainTextEdit.NoWrap)
         layout.addWidget(self.log_view, 1)
+
+        # --- Advanced controls frame ---
+        from PySide6.QtWidgets import QCheckBox, QComboBox, QHBoxLayout, QGroupBox, QPushButton
+        import os
+        adv_group = QGroupBox("Advanced (option changes may require re-reading data)")
+        adv_layout = QHBoxLayout()
+
+        # Tracing checkboxes
+        self.trace_fs_cb = QCheckBox("Trace remote FS")
+        self.trace_fileio_cb = QCheckBox("Trace file I/O")
+        self.trace_fs_cb.setChecked(os.getenv("XCONV2_REMOTE_FS_TRACE", "0").strip().lower() in {"1","true","yes","on"})
+        self.trace_fileio_cb.setChecked(os.getenv("XCONV2_REMOTE_FS_TRACE_FILE_IO", "0").strip().lower() in {"1","true","yes","on"})
+        adv_layout.addWidget(self.trace_fs_cb)
+        adv_layout.addWidget(self.trace_fileio_cb)
+
+        # Log level dropdown
+        self.log_level_combo = QComboBox()
+        self.log_level_combo.addItems(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
+        import logging
+        current_level = logging.getLogger().getEffectiveLevel()
+        level_map = {10:0, 20:1, 30:2, 40:3, 50:4}
+        self.log_level_combo.setCurrentIndex(level_map.get(current_level, 1))
+        adv_layout.addWidget(QLabel("Log level:"))
+        adv_layout.addWidget(self.log_level_combo)
+
+        # Apply/restart button
+        self.apply_btn = QPushButton("Apply (may restart worker)")
+        adv_layout.addWidget(self.apply_btn)
+        adv_group.setLayout(adv_layout)
+        layout.addWidget(adv_group)
+
+        # Connect signals
+        self.apply_btn.clicked.connect(self._apply_advanced_options)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         flush_button = buttons.addButton("Flush Log", QDialogButtonBox.ActionRole)
@@ -99,6 +150,27 @@ class LogViewerDialog(QDialog):
         self._timer = QTimer(self)
         self._timer.setInterval(300)
         self._timer.timeout.connect(self._refresh_from_file)
+
+    def _apply_advanced_options(self):
+        import os
+        import logging
+        # Set env vars for tracing (will only affect new processes)
+        fs_trace = self.trace_fs_cb.isChecked()
+        fileio_trace = self.trace_fileio_cb.isChecked()
+        os.environ["XCONV2_REMOTE_FS_TRACE"] = "1" if fs_trace else "0"
+        os.environ["XCONV2_REMOTE_FS_TRACE_FILE_IO"] = "1" if fileio_trace else "0"
+
+        # Set log level live for main process
+        level_str = self.log_level_combo.currentText()
+        level_val = getattr(logging, level_str, logging.INFO)
+        logging.getLogger().setLevel(level_val)
+        # Optionally: propagate to all known loggers
+        for name in logging.root.manager.loggerDict:
+            logging.getLogger(name).setLevel(level_val)
+
+        # Notify user about worker restart requirement for tracing
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(self, "Advanced Options", "Tracing changes require a worker restart to take effect. Log level changes apply immediately.")
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
@@ -120,6 +192,7 @@ class LogViewerDialog(QDialog):
             # File was truncated/rotated; reset view and start from top again.
             self._read_pos = 0
             self.log_view.clear()
+            self._log_lines = []
 
         if size == self._read_pos:
             return
@@ -135,10 +208,24 @@ class LogViewerDialog(QDialog):
         if not chunk:
             return
 
-        cursor = self.log_view.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        cursor.insertText(chunk)
-        self.log_view.setTextCursor(cursor)
+        # Store new lines for filtering
+        new_lines = chunk.splitlines(keepends=True)
+        self._log_lines.extend(new_lines)
+        self._apply_filter(refresh=True)
+
+    def _apply_filter(self, refresh=False):
+        """Apply filter to log lines and update the view."""
+        filt = self.filter_edit.text().strip().lower()
+        if filt:
+            filtered = [line for line in self._log_lines if filt in line.lower()]
+        else:
+            filtered = self._log_lines
+        self.log_view.setPlainText(''.join(filtered))
+        if not refresh:
+            # If user pressed filter, scroll to end
+            cursor = self.log_view.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            self.log_view.setTextCursor(cursor)
         self.log_view.ensureCursorVisible()
         scrollbar = self.log_view.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
