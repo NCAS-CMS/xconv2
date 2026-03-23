@@ -24,7 +24,7 @@ def configure_logging(level: int = logging.INFO) -> Path:
 
     logging.basicConfig(
         level=level,
-        format="%(asctime)s %(levelname)s %(processName)s %(name)s: %(message)s",
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         handlers=[file_handler, console_handler],
         force=True,
     )

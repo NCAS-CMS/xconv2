@@ -677,6 +677,12 @@ def main():
     """Entry point for the cf-worker command."""
     log_file = configure_logging()
 
+    # cf/cfdm (or a lazy dependency) suppresses the pyfive logger to WARNING
+    # during the first cf.read() call, after configure_logging() has already
+    # run.  Explicitly restoring INFO here ensures chunk-index and
+    # remote-access diagnostics reach the shared log file.
+    logging.getLogger("pyfive").setLevel(logging.INFO)
+
     logger.info("Worker starting")
     logger.info("Log file: %s", log_file)
     logger.info(
@@ -708,6 +714,11 @@ def main():
                 headers.task_payload,
                 headers.code,
             )
+            # Some dependency paths can adjust logger levels at runtime.
+            # Re-assert expected levels so worker and pyfive diagnostics stay visible.
+            logging.getLogger().setLevel(logging.INFO)
+            logger.setLevel(logging.INFO)
+            logging.getLogger("pyfive").setLevel(logging.INFO)
             logger.info("Executing task block (%d lines, %d chars)", len(current_block), len(exec_code))
 
             if task_kind is not None:

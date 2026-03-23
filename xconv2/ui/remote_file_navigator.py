@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -29,6 +31,18 @@ from xconv2.cache_utils import parse_disk_expiry_seconds, prune_disk_cache
 
 
 logger = logging.getLogger(__name__)
+_TRACE_REMOTE_FS = os.getenv("XCONV2_REMOTE_FS_TRACE", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+_TRACE_REMOTE_FILE_IO = os.getenv("XCONV2_REMOTE_FS_TRACE_FILE_IO", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 class _ConfiguredRemoteFileSystem:
@@ -56,6 +70,182 @@ class _ConfiguredRemoteFileSystem:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._filesystem, name)
+
+
+class _LoggingFileHandleProxy:
+    """Log file-handle operations on the underlying remote filesystem."""
+
+    def __init__(self, handle: Any, *, label: str, path: str) -> None:
+        self._handle = handle
+        self._label = label
+        self._path = path
+
+    def read(self, *args: Any, **kwargs: Any):
+        started = time.perf_counter()
+        result = self._handle.read(*args, **kwargs)
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        size = len(result) if isinstance(result, (bytes, bytearray, memoryview, str)) else "na"
+        logger.info(
+            "REMOTE_FS file_read label=%s path=%r request=%r size=%s elapsed_ms=%d",
+            self._label,
+            self._path,
+            args[0] if args else None,
+            size,
+            elapsed_ms,
+        )
+        return result
+
+    def seek(self, *args: Any, **kwargs: Any):
+        started = time.perf_counter()
+        result = self._handle.seek(*args, **kwargs)
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        logger.info(
+            "REMOTE_FS file_seek label=%s path=%r args=%r kwargs=%r elapsed_ms=%d result=%r",
+            self._label,
+            self._path,
+            args,
+            kwargs,
+            elapsed_ms,
+            result,
+        )
+        return result
+
+    def tell(self, *args: Any, **kwargs: Any):
+        return self._handle.tell(*args, **kwargs)
+
+    def close(self) -> Any:
+        logger.info("REMOTE_FS file_close label=%s path=%r", self._label, self._path)
+        return self._handle.close()
+
+    def __enter__(self):
+        self._handle.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._handle.__exit__(exc_type, exc, tb)
+
+    def __iter__(self):
+        return iter(self._handle)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._handle, name)
+
+
+def _wrap_filesystem_with_logging(filesystem: Any, *, label: str) -> Any:
+    """Return *filesystem* with logging wrappers injected on key I/O methods.
+
+    Rather than using a proxy class (which breaks fsspec's BlockCache because it
+    does ``getattr(type(self.fs), method)`` class-level lookups), we dynamically
+    subclass the *actual* filesystem type and swizzle the instance's ``__class__``.
+    Every attribute not explicitly overridden here is inherited correctly.
+    """
+    if not _TRACE_REMOTE_FS:
+        return filesystem
+
+    base_cls = type(filesystem)
+
+    def _open(self, path: str, mode: str = "rb", **kwargs: Any):
+        started = time.perf_counter()
+        handle = base_cls._open(self, path, mode=mode, **kwargs)
+        logger.info(
+            "REMOTE_FS _open label=%s path=%r mode=%s elapsed_ms=%d",
+            label, path, mode, int((time.perf_counter() - started) * 1000),
+        )
+        if _TRACE_REMOTE_FILE_IO:
+            return _LoggingFileHandleProxy(handle, label=label, path=path)
+        return handle
+
+    def open(self, path: str, mode: str = "rb", **kwargs: Any):
+        started = time.perf_counter()
+        handle = base_cls.open(self, path, mode=mode, **kwargs)
+        logger.info(
+            "REMOTE_FS open label=%s path=%r mode=%s elapsed_ms=%d",
+            label, path, mode, int((time.perf_counter() - started) * 1000),
+        )
+        if _TRACE_REMOTE_FILE_IO:
+            return _LoggingFileHandleProxy(handle, label=label, path=path)
+        return handle
+
+    def info(self, path: str, **kwargs: Any):
+        started = time.perf_counter()
+        result = base_cls.info(self, path, **kwargs)
+        logger.info(
+            "REMOTE_FS info label=%s path=%r elapsed_ms=%d",
+            label, path, int((time.perf_counter() - started) * 1000),
+        )
+        return result
+
+    def ls(self, path: str, detail: bool = True, **kwargs: Any):
+        started = time.perf_counter()
+        result = base_cls.ls(self, path, detail=detail, **kwargs)
+        logger.info(
+            "REMOTE_FS ls label=%s path=%r elapsed_ms=%d count=%d",
+            label, path, int((time.perf_counter() - started) * 1000),
+            len(result) if hasattr(result, "__len__") else -1,
+        )
+        return result
+
+    def glob(self, path: str, **kwargs: Any):
+        started = time.perf_counter()
+        result = base_cls.glob(self, path, **kwargs)
+        logger.info(
+            "REMOTE_FS glob label=%s path=%r elapsed_ms=%d count=%d",
+            label, path, int((time.perf_counter() - started) * 1000),
+            len(result) if hasattr(result, "__len__") else -1,
+        )
+        return result
+
+    def exists(self, path: str, **kwargs: Any):
+        started = time.perf_counter()
+        result = base_cls.exists(self, path, **kwargs)
+        logger.info(
+            "REMOTE_FS exists label=%s path=%r elapsed_ms=%d result=%r",
+            label, path, int((time.perf_counter() - started) * 1000), result,
+        )
+        return result
+
+    def cat_file(self, path: str, **kwargs: Any):
+        started = time.perf_counter()
+        result = base_cls.cat_file(self, path, **kwargs)
+        size = len(result) if isinstance(result, (bytes, bytearray, memoryview, str)) else "na"
+        logger.info(
+            "REMOTE_FS cat_file label=%s path=%r elapsed_ms=%d size=%s",
+            label, path, int((time.perf_counter() - started) * 1000), size,
+        )
+        return result
+
+    def head(self, path: str, size: int = 1024, **kwargs: Any):
+        started = time.perf_counter()
+        result = base_cls.head(self, path, size=size, **kwargs)
+        logger.info(
+            "REMOTE_FS head label=%s path=%r size=%d elapsed_ms=%d",
+            label, path, size, int((time.perf_counter() - started) * 1000),
+        )
+        return result
+
+    def read_block(self, path: str, offset: int, length: int, **kwargs: Any):
+        started = time.perf_counter()
+        result = base_cls.read_block(self, path, offset, length, **kwargs)
+        logger.info(
+            "REMOTE_FS read_block label=%s path=%r offset=%d length=%d elapsed_ms=%d",
+            label, path, offset, length, int((time.perf_counter() - started) * 1000),
+        )
+        return result
+
+    # Only override methods that actually exist on the base class so we don't
+    # accidentally shadow something with an AttributeError on call.
+    overrides: dict[str, Any] = {}
+    for name, fn in [
+        ("_open", _open), ("open", open), ("info", info), ("ls", ls),
+        ("glob", glob), ("exists", exists), ("cat_file", cat_file),
+        ("head", head), ("read_block", read_block),
+    ]:
+        if hasattr(base_cls, name):
+            overrides[name] = fn
+
+    proxy_cls = type(f"_Logging_{base_cls.__name__}", (base_cls,), overrides)
+    filesystem.__class__ = proxy_cls
+    return filesystem
 
 
 @dataclass(frozen=True)
@@ -488,7 +678,10 @@ def create_filesystem(
 ) -> Any:
     """Create the underlying fsspec filesystem instance lazily."""
     if spec.proxy_jump and spec.protocol == "sftp":
-        base_filesystem = _create_sftp_via_jump(spec, log=log)
+        base_filesystem = _wrap_filesystem_with_logging(
+            _create_sftp_via_jump(spec, log=log),
+            label=f"{spec.protocol}:{spec.display_name}",
+        )
         return _apply_cache_configuration(base_filesystem, cache=cache, log=log)
 
     try:
@@ -497,7 +690,10 @@ def create_filesystem(
         raise RuntimeError("fsspec is required for remote navigation") from exc
 
     _emit_log(log, f"Connecting filesystem protocol {spec.protocol!r}")
-    base_filesystem = fsspec.filesystem(spec.protocol, **spec.storage_options)
+    base_filesystem = _wrap_filesystem_with_logging(
+        fsspec.filesystem(spec.protocol, **spec.storage_options),
+        label=f"{spec.protocol}:{spec.display_name}",
+    )
     return _apply_cache_configuration(base_filesystem, cache=cache, log=log)
 
 

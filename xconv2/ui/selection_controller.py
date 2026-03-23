@@ -329,7 +329,7 @@ class SelectionController:
             return text
 
         time_units, calendar = parsed_time
-        logging.info("Formatting time coordinate value '%s' with units '%s' (%s)", text, time_units, delta)
+        #logging.info("Formatting time coordinate value '%s' with units '%s' (%s)", text, time_units, delta)
         if isinstance(value, str):
             try:
                 value = float(value)
