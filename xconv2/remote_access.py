@@ -207,23 +207,28 @@ class _ConfiguredRemoteFileSystem:
         return getattr(self._filesystem, name)
 
 
-class _LoggingFileHandleProxy:
-    """Log file-handle operations on the underlying remote filesystem."""
+def _instrument_file_handle_with_logging(handle: Any, *, label: str, path: str) -> Any:
+    """Attach logging to a file handle instance without changing its identity.
 
-    def __init__(self, handle: Any, *, label: str, path: str) -> None:
-        self._handle = handle
-        self._label = label
-        self._path = path
+    Blockcache mutates the returned handle object by attaching cache state to it.
+    A wrapper/proxy breaks that contract because subsequent ``read()`` calls act on
+    the inner handle instead of the cache-bearing outer object. Swizzling the handle
+    instance class preserves identity and cache semantics while still letting us log.
+    """
+    if getattr(handle, "_xconv_logging_wrapped_handle", False):
+        return handle
+
+    base_cls = type(handle)
 
     def read(self, *args: Any, **kwargs: Any):
         started = time.perf_counter()
-        result = self._handle.read(*args, **kwargs)
+        result = base_cls.read(self, *args, **kwargs)
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         size = len(result) if isinstance(result, (bytes, bytearray, memoryview, str)) else "na"
         logger.info(
             "REMOTE_FS file_read label=%s path=%r request=%r size=%s elapsed_ms=%d",
-            self._label,
-            self._path,
+            self._xconv_log_label,
+            self._xconv_log_path,
             args[0] if args else None,
             size,
             elapsed_ms,
@@ -232,12 +237,12 @@ class _LoggingFileHandleProxy:
 
     def seek(self, *args: Any, **kwargs: Any):
         started = time.perf_counter()
-        result = self._handle.seek(*args, **kwargs)
+        result = base_cls.seek(self, *args, **kwargs)
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         logger.info(
             "REMOTE_FS file_seek label=%s path=%r args=%r kwargs=%r elapsed_ms=%d result=%r",
-            self._label,
-            self._path,
+            self._xconv_log_label,
+            self._xconv_log_path,
             args,
             kwargs,
             elapsed_ms,
@@ -245,8 +250,43 @@ class _LoggingFileHandleProxy:
         )
         return result
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._handle, name)
+    def close(self):
+        logger.info("REMOTE_FS file_close label=%s path=%r", self._xconv_log_label, self._xconv_log_path)
+        return base_cls.close(self)
+
+    def _fetch_range(self, *args: Any, **kwargs: Any):
+        fetch = getattr(base_cls, "_fetch_range", None)
+        if not callable(fetch):
+            raise AttributeError("Underlying handle does not support _fetch_range")
+
+        started = time.perf_counter()
+        result = fetch(self, *args, **kwargs)
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        start = args[0] if len(args) > 0 else kwargs.get("start")
+        end = args[1] if len(args) > 1 else kwargs.get("end")
+        size = len(result) if isinstance(result, (bytes, bytearray, memoryview, str)) else "na"
+        logger.info(
+            "REMOTE_FS file_fetch_range label=%s path=%r start=%r end=%r size=%s elapsed_ms=%d",
+            self._xconv_log_label,
+            self._xconv_log_path,
+            start,
+            end,
+            size,
+            elapsed_ms,
+        )
+        return result
+
+    overrides: dict[str, Any] = {}
+    for name, fn in [("read", read), ("seek", seek), ("close", close), ("_fetch_range", _fetch_range)]:
+        if hasattr(base_cls, name):
+            overrides[name] = fn
+
+    proxy_cls = type(f"_LoggingHandle_{base_cls.__name__}", (base_cls,), overrides)
+    handle.__class__ = proxy_cls
+    handle._xconv_log_label = label
+    handle._xconv_log_path = path
+    handle._xconv_logging_wrapped_handle = True
+    return handle
 
 
 class _XconvHostKeyPolicy:
@@ -576,7 +616,7 @@ def _wrap_filesystem_with_logging(filesystem: Any, *, label: str) -> Any:
                 int((time.perf_counter() - started) * 1000),
             )
         if config.trace_file_io:
-            return _LoggingFileHandleProxy(handle, label=label, path=path)
+            return _instrument_file_handle_with_logging(handle, label=label, path=path)
         return handle
 
     def open(self, path: str, mode: str = "rb", **kwargs: Any):
@@ -592,11 +632,89 @@ def _wrap_filesystem_with_logging(filesystem: Any, *, label: str) -> Any:
                 int((time.perf_counter() - started) * 1000),
             )
         if config.trace_file_io:
-            return _LoggingFileHandleProxy(handle, label=label, path=path)
+            return _instrument_file_handle_with_logging(handle, label=label, path=path)
         return handle
 
+    def info(self, path: str, **kwargs: Any):
+        started = time.perf_counter()
+        result = base_cls.info(self, path, **kwargs)
+        config = RemoteAccessSession.logging_configuration()
+        if config.trace_filesystem:
+            logger.info(
+                "REMOTE_FS info label=%s path=%r elapsed_ms=%d",
+                label,
+                path,
+                int((time.perf_counter() - started) * 1000),
+            )
+        return result
+
+    def ls(self, path: str, detail: bool = True, **kwargs: Any):
+        started = time.perf_counter()
+        result = base_cls.ls(self, path, detail=detail, **kwargs)
+        config = RemoteAccessSession.logging_configuration()
+        if config.trace_filesystem:
+            logger.info(
+                "REMOTE_FS ls label=%s path=%r elapsed_ms=%d count=%d",
+                label,
+                path,
+                int((time.perf_counter() - started) * 1000),
+                len(result) if hasattr(result, "__len__") else -1,
+            )
+        return result
+
+    def cat_file(self, path: str, **kwargs: Any):
+        started = time.perf_counter()
+        result = base_cls.cat_file(self, path, **kwargs)
+        config = RemoteAccessSession.logging_configuration()
+        if config.trace_filesystem:
+            size = len(result) if isinstance(result, (bytes, bytearray, memoryview, str)) else "na"
+            logger.info(
+                "REMOTE_FS cat_file label=%s path=%r elapsed_ms=%d size=%s",
+                label,
+                path,
+                int((time.perf_counter() - started) * 1000),
+                size,
+            )
+        return result
+
+    def read_block(self, path: str, offset: int, length: int, **kwargs: Any):
+        started = time.perf_counter()
+        result = base_cls.read_block(self, path, offset, length, **kwargs)
+        config = RemoteAccessSession.logging_configuration()
+        if config.trace_filesystem:
+            logger.info(
+                "REMOTE_FS read_block label=%s path=%r offset=%d length=%d elapsed_ms=%d",
+                label,
+                path,
+                offset,
+                length,
+                int((time.perf_counter() - started) * 1000),
+            )
+        return result
+
+    def cat_ranges(self, paths: list[str], starts: list[int], ends: list[int], **kwargs: Any):
+        started = time.perf_counter()
+        result = base_cls.cat_ranges(self, paths, starts, ends, **kwargs)
+        config = RemoteAccessSession.logging_configuration()
+        if config.trace_filesystem:
+            logger.info(
+                "REMOTE_FS cat_ranges label=%s n=%d elapsed_ms=%d",
+                label,
+                len(paths),
+                int((time.perf_counter() - started) * 1000),
+            )
+        return result
+
     overrides: dict[str, Any] = {}
-    for name, fn in [("_open", _open), ("open", open)]:
+    for name, fn in [
+        ("_open", _open),
+        ("open", open),
+        ("info", info),
+        ("ls", ls),
+        ("cat_file", cat_file),
+        ("read_block", read_block),
+        ("cat_ranges", cat_ranges),
+    ]:
         if hasattr(base_cls, name):
             overrides[name] = fn
 
@@ -692,7 +810,10 @@ def _apply_cache_configuration(
             "check_files": False,
         }
         if disk_mode == "blocks":
-            _prune_incompatible_blockcache_entries(cache_path, block_size=block_size, log=log)
+            # Do not prune by blocksize here. fsspec persists the underlying file
+            # handle blocksize in the index, which is often different from our
+            # cache wrapper block size. Pruning on that field incorrectly evicts
+            # valid cache entries across session/filesystem recreation.
             cache_kwargs["blocksize"] = block_size
             cache_kwargs["maxblocks"] = max_blocks
 

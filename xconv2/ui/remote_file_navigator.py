@@ -62,23 +62,22 @@ class _ConfiguredRemoteFileSystem:
         return getattr(self._filesystem, name)
 
 
-class _LoggingFileHandleProxy:
-    """Log file-handle operations on the underlying remote filesystem."""
+def _instrument_file_handle_with_logging(handle: Any, *, label: str, path: str) -> Any:
+    """Attach logging to a file handle instance without changing its identity."""
+    if getattr(handle, "_xconv_logging_wrapped_handle", False):
+        return handle
 
-    def __init__(self, handle: Any, *, label: str, path: str) -> None:
-        self._handle = handle
-        self._label = label
-        self._path = path
+    base_cls = type(handle)
 
     def read(self, *args: Any, **kwargs: Any):
         started = time.perf_counter()
-        result = self._handle.read(*args, **kwargs)
+        result = base_cls.read(self, *args, **kwargs)
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         size = len(result) if isinstance(result, (bytes, bytearray, memoryview, str)) else "na"
         logger.info(
             "REMOTE_FS file_read label=%s path=%r request=%r size=%s elapsed_ms=%d",
-            self._label,
-            self._path,
+            self._xconv_log_label,
+            self._xconv_log_path,
             args[0] if args else None,
             size,
             elapsed_ms,
@@ -87,12 +86,12 @@ class _LoggingFileHandleProxy:
 
     def seek(self, *args: Any, **kwargs: Any):
         started = time.perf_counter()
-        result = self._handle.seek(*args, **kwargs)
+        result = base_cls.seek(self, *args, **kwargs)
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         logger.info(
             "REMOTE_FS file_seek label=%s path=%r args=%r kwargs=%r elapsed_ms=%d result=%r",
-            self._label,
-            self._path,
+            self._xconv_log_label,
+            self._xconv_log_path,
             args,
             kwargs,
             elapsed_ms,
@@ -100,25 +99,43 @@ class _LoggingFileHandleProxy:
         )
         return result
 
-    def tell(self, *args: Any, **kwargs: Any):
-        return self._handle.tell(*args, **kwargs)
+    def close(self):
+        logger.info("REMOTE_FS file_close label=%s path=%r", self._xconv_log_label, self._xconv_log_path)
+        return base_cls.close(self)
 
-    def close(self) -> Any:
-        logger.info("REMOTE_FS file_close label=%s path=%r", self._label, self._path)
-        return self._handle.close()
+    def _fetch_range(self, *args: Any, **kwargs: Any):
+        fetch = getattr(base_cls, "_fetch_range", None)
+        if not callable(fetch):
+            raise AttributeError("Underlying handle does not support _fetch_range")
 
-    def __enter__(self):
-        self._handle.__enter__()
-        return self
+        started = time.perf_counter()
+        result = fetch(self, *args, **kwargs)
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        start = args[0] if len(args) > 0 else kwargs.get("start")
+        end = args[1] if len(args) > 1 else kwargs.get("end")
+        size = len(result) if isinstance(result, (bytes, bytearray, memoryview, str)) else "na"
+        logger.info(
+            "REMOTE_FS file_fetch_range label=%s path=%r start=%r end=%r size=%s elapsed_ms=%d",
+            self._xconv_log_label,
+            self._xconv_log_path,
+            start,
+            end,
+            size,
+            elapsed_ms,
+        )
+        return result
 
-    def __exit__(self, exc_type, exc, tb):
-        return self._handle.__exit__(exc_type, exc, tb)
+    overrides: dict[str, Any] = {}
+    for name, fn in [("read", read), ("seek", seek), ("close", close), ("_fetch_range", _fetch_range)]:
+        if hasattr(base_cls, name):
+            overrides[name] = fn
 
-    def __iter__(self):
-        return iter(self._handle)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._handle, name)
+    proxy_cls = type(f"_LoggingHandle_{base_cls.__name__}", (base_cls,), overrides)
+    handle.__class__ = proxy_cls
+    handle._xconv_log_label = label
+    handle._xconv_log_path = path
+    handle._xconv_logging_wrapped_handle = True
+    return handle
 
 
 def _wrap_filesystem_with_logging(filesystem: Any, *, label: str) -> Any:
@@ -142,7 +159,7 @@ def _wrap_filesystem_with_logging(filesystem: Any, *, label: str) -> Any:
             label, path, mode, int((time.perf_counter() - started) * 1000),
         )
         if _current_remote_logging_configuration().trace_file_io:
-            return _LoggingFileHandleProxy(handle, label=label, path=path)
+            return _instrument_file_handle_with_logging(handle, label=label, path=path)
         return handle
 
     def open(self, path: str, mode: str = "rb", **kwargs: Any):
@@ -153,7 +170,7 @@ def _wrap_filesystem_with_logging(filesystem: Any, *, label: str) -> Any:
             label, path, mode, int((time.perf_counter() - started) * 1000),
         )
         if _current_remote_logging_configuration().trace_file_io:
-            return _LoggingFileHandleProxy(handle, label=label, path=path)
+            return _instrument_file_handle_with_logging(handle, label=label, path=path)
         return handle
 
     def info(self, path: str, **kwargs: Any):
@@ -635,7 +652,7 @@ class RemoteLoginLogDialog(QDialog):
         if not self._follow_log_output:
             return
         scrollbar = self.log_view.verticalScrollBar()
-        logger.info(
+        logger.debug(
             "REMOTE_LOG queue_scroll value=%d max=%d",
             scrollbar.value(),
             scrollbar.maximum(),

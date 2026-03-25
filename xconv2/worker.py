@@ -255,6 +255,13 @@ def _prepare_remote_session(
 
     entry = remote_session_pool.get(descriptor_hash)
     if entry is not None:
+        logger.info(
+            "REMOTE_SESSION reuse descriptor_hash=%s session_id=%s protocol=%s cache=%r",
+            descriptor_hash,
+            session_id,
+            descriptor.get("protocol"),
+            descriptor.get("cache"),
+        )
         entry.session_id = session_id
         entry.descriptor = descriptor
         entry.last_used = time.monotonic()
@@ -266,6 +273,13 @@ def _prepare_remote_session(
         )
         return entry
 
+    logger.info(
+        "REMOTE_SESSION create descriptor_hash=%s session_id=%s protocol=%s cache=%r",
+        descriptor_hash,
+        session_id,
+        descriptor.get("protocol"),
+        descriptor.get("cache"),
+    )
     _send_remote_status(
         "preparing",
         session_id=session_id,
@@ -458,6 +472,15 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
         if not uri or not paths:
             raise ValueError("REMOTE_OPEN requires uri and at least one path")
         datasets: str | list[str] = paths[0] if len(paths) == 1 else paths
+
+        logger.info(
+            "REMOTE_OPEN request session_id=%s descriptor_hash=%s uri=%s datasets=%r cache=%r",
+            session_id,
+            descriptor_hash,
+            uri,
+            datasets,
+            descriptor.get("cache") if isinstance(descriptor, dict) else None,
+        )
 
         _send_remote_status(
             "preparing",

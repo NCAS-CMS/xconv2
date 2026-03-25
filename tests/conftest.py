@@ -68,6 +68,8 @@ def minio_service():
         environment={
             "MINIO_ROOT_USER": MINIO_ACCESS_KEY,
             "MINIO_ROOT_PASSWORD": MINIO_SECRET_KEY,
+            # Expose Prometheus metrics without auth so tests can sample counters.
+            "MINIO_PROMETHEUS_AUTH_TYPE": "public",
         },
         # Use ephemeral host ports to avoid conflicts with local services.
         ports={f"{MINIO_PORT}/tcp": None, f"{MINIO_CONSOLE_PORT}/tcp": None},
@@ -94,6 +96,7 @@ def minio_service():
         secure=False,
     )
     setattr(minio_client, "endpoint_url", endpoint_url)
+    setattr(minio_client, "metrics_url", f"{endpoint_url}/minio/v2/metrics/cluster")
 
     try:
         for _ in range(30):

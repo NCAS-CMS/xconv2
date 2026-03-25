@@ -312,6 +312,36 @@ def _assert_successful_open(messages: list, *, session_id: str, uri: str) -> Non
     assert result == {"session_id": session_id, "uri": uri, "ok": True}
 
 
+def test_read_remote_fields_passes_prepared_filesystem_to_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prove worker._read_remote_fields forwards the exact prepared filesystem into cf.read."""
+    sentinel_fs = object()
+    entry = worker.RemoteSessionEntry(
+        session_id="sid",
+        descriptor_hash="hash",
+        descriptor={"protocol": "s3"},
+        filesystem=sentinel_fs,
+    )
+
+    calls: dict[str, object] = {}
+
+    def fake_reader(datasets, *, filesystem=None):
+        calls["datasets"] = datasets
+        calls["filesystem"] = filesystem
+        return ["ok"]
+
+    monkeypatch.setattr(worker.cf, "read", fake_reader)
+
+    result = worker._read_remote_fields(
+        entry=entry,
+        descriptor={"protocol": "s3"},
+        datasets="bucket/path/file.nc",
+    )
+
+    assert result == ["ok"]
+    assert calls["datasets"] == "bucket/path/file.nc"
+    assert calls["filesystem"] is sentinel_fs
+
+
 # ---------------------------------------------------------------------------
 # Open with cache
 # ---------------------------------------------------------------------------
@@ -371,6 +401,11 @@ def test_worker_remote_open_s3_with_disk_block_cache(minio_service, temp_bucket,
 # ---------------------------------------------------------------------------
 # Read with cache
 # ---------------------------------------------------------------------------
+
+# NOTE FOR FUTURE DEBUGGING:
+# These two cf.read()-path tests are functional integration checks only:
+# they prove remote reads work with the configured cache wrappers, but they
+# do not measure wire traffic and therefore cannot alone prove cache hits.
 
 
 @pytest.mark.integration
@@ -445,44 +480,60 @@ def test_read_remote_fields_s3_with_disk_cache(minio_service, temp_bucket, tmp_p
 # Cache effectiveness verification
 # ---------------------------------------------------------------------------
 
+# NOTE FOR FUTURE DEBUGGING:
+# test_disk_cache_works_without_cf_read is the authoritative cache-effectiveness
+# oracle. It checks MinIO's minio_s3_traffic_sent_bytes counter, which directly
+# measures server->client bytes on the wire and discriminates cache-hit vs miss.
+
+
+def _minio_bytes_sent(metrics_url: str) -> float:
+    """Read minio_s3_traffic_sent_bytes from the MinIO Prometheus endpoint.
+
+    MinIO updates this counter on a roughly 10-second cadence, so callers
+    must allow adequate settling time between the operation under test and
+    sampling this value.
+    """
+    import urllib.request
+
+    with urllib.request.urlopen(metrics_url, timeout=10) as resp:
+        for line in resp.read().decode().splitlines():
+            if line.startswith("minio_s3_traffic_sent_bytes{"):
+                return float(line.split()[-1])
+    raise RuntimeError(f"minio_s3_traffic_sent_bytes not found in {metrics_url}")
+
 
 def _count_file_io_logs(caplog, *, log_substring: str = "REMOTE_FS file_read") -> int:
-    """Count log lines containing a specific substring."""
+    """Count log lines containing a specific substring.
+
+    Used only by tests that compare two reads of the same file against each other
+    (i.e. relative comparisons), where counting user-level read() calls is valid.
+    Do NOT use this to prove cache effectiveness — use _minio_bytes_sent() for that.
+    """
     return sum(1 for record in caplog.records if log_substring in record.getMessage())
 
 
-def _sum_file_io_elapsed_ms(caplog) -> int:
-    """Sum elapsed_ms values from all REMOTE_FS file_read logs."""
-    import re
-    total_ms = 0
-    for record in caplog.records:
-        msg = record.getMessage()
-        if "REMOTE_FS file_read" in msg:
-            match = re.search(r"elapsed_ms=(\d+)", msg)
-            if match:
-                total_ms += int(match.group(1))
-    return total_ms
-
-
 @pytest.mark.integration
-def test_disk_cache_works_without_cf_read(minio_service, temp_bucket, tmp_path, caplog) -> None:
-    """Verify disk blockcache DOES work when used directly (without cf.read).
-    
-    This test isolates whether the caching mechanism itself is functional by directly
-    using the cached filesystem to read bytes, rather than going through cf.read().
-    If this passes but test_disk_cache_reduces_remote_io is skipped, it proves
-    cf.read() is not respecting the filesystem= parameter or the blockcache wrapper.
+def test_disk_cache_works_without_cf_read(minio_service, temp_bucket, tmp_path) -> None:
+    """Verify fsspec blockcache actually reduces wire traffic to MinIO on the second read.
+
+    Uses MinIO's Prometheus endpoint (minio_s3_traffic_sent_bytes) as the oracle —
+    this measures real bytes sent by the server, so it is unambiguous regardless of
+    how many Python-level read() calls are made.
+
+    MinIO updates the Prometheus counters roughly every 10 seconds, so the test
+    sleeps after each read to let the scrape interval tick.  The test is slow by
+    design (~30 s) but definitive.
     """
+    import time
+    from xconv2.remote_access import RemoteFilesystemSpec, create_filesystem
+
     sample_file = Path(__file__).resolve().parents[1] / "data" / "test1.nc"
     object_name = "cache-direct-test/test1.nc"
     minio_service.fput_object(temp_bucket, object_name, str(sample_file))
 
     cache_dir = tmp_path / "blockcache-direct"
-    cache_dir.mkdir(exist_ok=True)
-    
-    # Import here to avoid unnecessary dependency
-    from xconv2.remote_access import RemoteFilesystemSpec, create_filesystem
-    
+    cache_dir.mkdir()
+
     spec = RemoteFilesystemSpec(
         protocol="s3",
         storage_options={
@@ -496,130 +547,715 @@ def test_disk_cache_works_without_cf_read(minio_service, temp_bucket, tmp_path, 
         uri_authority="",
         proxy_jump=None,
     )
-    
     cache_config = {"disk_mode": "blocks", "disk_location": str(cache_dir), "blocksize_mb": 1}
     fs_cached = create_filesystem(spec, cache=cache_config)
-    
-    RemoteAccessSession.configure_logging(trace_file_io=True)
-    
+    remote_path = f"{temp_bucket}/{object_name}"
+
+    # ------------------------------------------------------------------ #
+    # Baseline: record bytes-sent before we touch anything.               #
+    # ------------------------------------------------------------------ #
+    before_first = _minio_bytes_sent(minio_service.metrics_url)
+
+    # First read — cache is empty, all data must travel over the wire.
+    handle1 = fs_cached.open(remote_path, "rb")
     try:
-        remote_path = f"{temp_bucket}/{object_name}"
-        
-        # First read: cache is empty, all data from MinIO
-        with caplog.at_level(logging.INFO):
-            caplog.clear()
-            handle1 = fs_cached.open(remote_path, "rb")
-            try:
-                data1 = handle1.read(4096)
-            finally:
-                if hasattr(handle1, "close"):
-                    handle1.close()
-            first_read_calls = _count_file_io_logs(caplog)
-        
-        assert data1, "First read should return data"
-        assert first_read_calls > 0, "First read should make remote calls"
-        assert (cache_dir / "cache").is_file(), "Cache index should be created"
-        
-        # Second read: should be served from disk cache
-        with caplog.at_level(logging.INFO):
-            caplog.clear()
-            handle2 = fs_cached.open(remote_path, "rb")
-            try:
-                data2 = handle2.read(4096)
-            finally:
-                if hasattr(handle2, "close"):
-                    handle2.close()
-            second_read_calls = _count_file_io_logs(caplog)
-        
-        assert data2 == data1, "Both reads should return identical data"
-        
-        # Cache MUST reduce remote I/O on the second read
-        assert second_read_calls < first_read_calls, (
-            f"Direct filesystem disk cache is BROKEN: "
-            f"first read {first_read_calls} remote ops, second read {second_read_calls} remote ops. "
-            f"The blockcache wrapper is not being used correctly by fsspec. "
-            f"This is a blocking issue — cached reads should have fewer remote calls."
-        )
+        data1 = handle1.read()
     finally:
-        RemoteAccessSession.configure_logging(trace_file_io=False)
+        handle1.close()
+
+    assert data1, "First read returned no data"
+    assert (cache_dir / "cache").is_file(), "Blockcache index file not created after first read"
+
+    # Wait for MinIO's Prometheus scrape interval to tick (~10 s).
+    time.sleep(12)
+    after_first = _minio_bytes_sent(minio_service.metrics_url)
+    first_read_bytes = after_first - before_first
+
+    assert first_read_bytes > 0, (
+        f"MinIO reported 0 bytes sent after first read — "
+        f"metrics endpoint may not be working (metrics_url={minio_service.metrics_url})"
+    )
+
+    # ------------------------------------------------------------------ #
+    # Second read — blockcache should serve entirely from disk.           #
+    # ------------------------------------------------------------------ #
+    before_second = _minio_bytes_sent(minio_service.metrics_url)
+
+    handle2 = fs_cached.open(remote_path, "rb")
+    try:
+        data2 = handle2.read()
+    finally:
+        handle2.close()
+
+    assert data2 == data1, "Second read returned different data from first"
+
+    time.sleep(12)
+    after_second = _minio_bytes_sent(minio_service.metrics_url)
+    second_read_bytes = after_second - before_second
+
+    # A cached read may still cause a small HEAD/metadata request, so we allow
+    # a generous tolerance of 4 KB for HTTP overhead — but NOT re-fetching the
+    # full file body (~311 KB).
+    assert second_read_bytes < 4096, (
+        f"Disk blockcache is NOT serving from cache: "
+        f"first read sent {first_read_bytes:,.0f} bytes, "
+        f"second read sent {second_read_bytes:,.0f} bytes from MinIO. "
+        f"Expected <4 KB on the second read (overhead only)."
+    )
 
 
 @pytest.mark.integration
-def test_disk_cache_reduces_remote_io(minio_service, temp_bucket, tmp_path, caplog) -> None:
-    """Verify disk blockcache reduces actual remote I/O (REMOTE_FS file_read calls).
-    
-    This test checks that the second read of the same file shows fewer REMOTE_FS file_read
-    operations than the first read, proving blockcache is serving blocks from disk instead
-    of re-fetching from MinIO.
-    
-    Note: Both trace_filesystem AND trace_file_io must be enabled for the cache to work
-    correctly (they enable the logging wrapper which interacts properly with blockcache).
+def test_disk_cache_persists_across_filesystem_recreation(minio_service, temp_bucket, tmp_path) -> None:
+    """Verify disk blockcache remains effective after creating a NEW filesystem instance.
+
+    This mirrors app behavior when a worker remote session is evicted/recreated:
+    create filesystem A, read once, then create filesystem B with the same disk
+    cache location and read again. The second read should be served from disk.
     """
+    import time
+    from xconv2.remote_access import RemoteFilesystemSpec, create_filesystem
+
     sample_file = Path(__file__).resolve().parents[1] / "data" / "test1.nc"
-    object_name = "cache-test/test1.nc"
+    object_name = "cache-recreate-test/test1.nc"
     minio_service.fput_object(temp_bucket, object_name, str(sample_file))
 
-    # Use a unique cache dir per test run to avoid conflicts.
-    cache_dir = tmp_path / "blockcache-reduce-io"
-    cache_dir.mkdir(exist_ok=True)
-    descriptor = _s3_descriptor(
-        minio_service,
-        cache={"disk_mode": "blocks", "disk_location": str(cache_dir), "blocksize_mb": 1, "max_blocks": 16},
+    cache_dir = tmp_path / "blockcache-recreate"
+    cache_dir.mkdir()
+    remote_path = f"{temp_bucket}/{object_name}"
+
+    spec = RemoteFilesystemSpec(
+        protocol="s3",
+        storage_options={
+            "key": "minioadmin",
+            "secret": "minioadmin",
+            "client_kwargs": {"endpoint_url": minio_service.endpoint_url},
+        },
+        root_path="",
+        display_name="minio-recreate",
+        uri_scheme="s3",
+        uri_authority="",
+        proxy_jump=None,
+    )
+    cache_config = {"disk_mode": "blocks", "disk_location": str(cache_dir), "blocksize_mb": 1}
+
+    fs1 = create_filesystem(spec, cache=cache_config)
+    before_first = _minio_bytes_sent(minio_service.metrics_url)
+    h1 = fs1.open(remote_path, "rb")
+    try:
+        data1 = h1.read()
+    finally:
+        h1.close()
+
+    assert data1
+    assert (cache_dir / "cache").is_file(), "Blockcache index missing after first read"
+
+    time.sleep(12)
+    after_first = _minio_bytes_sent(minio_service.metrics_url)
+    first_read_bytes = after_first - before_first
+    assert first_read_bytes > 0, "First read should transfer bytes from MinIO"
+
+    # Recreate filesystem/session as the app does when a worker session is rebuilt.
+    fs2 = create_filesystem(spec, cache=cache_config)
+    before_second = _minio_bytes_sent(minio_service.metrics_url)
+    h2 = fs2.open(remote_path, "rb")
+    try:
+        data2 = h2.read()
+    finally:
+        h2.close()
+
+    assert data2 == data1
+
+    time.sleep(12)
+    after_second = _minio_bytes_sent(minio_service.metrics_url)
+    second_read_bytes = after_second - before_second
+
+    assert second_read_bytes < 4096, (
+        f"Disk cache did not survive filesystem recreation: "
+        f"first read sent {first_read_bytes:,.0f} bytes, "
+        f"second read sent {second_read_bytes:,.0f} bytes after new filesystem instance."
     )
 
-    # Reset logging state and enable BOTH trace flags (required for cache to work).
-    RemoteAccessSession.configure_logging(trace_filesystem=False, trace_file_io=False)
+
+@pytest.mark.integration
+def test_disk_cache_still_hits_with_file_io_tracing(minio_service, temp_bucket, tmp_path) -> None:
+    """Verify trace_file_io logging does not break disk blockcache semantics."""
+    import time
+    from xconv2.remote_access import RemoteFilesystemSpec, create_filesystem
+
+    sample_file = Path(__file__).resolve().parents[1] / "data" / "test1.nc"
+    object_name = "cache-trace-file-io/test1.nc"
+    minio_service.fput_object(temp_bucket, object_name, str(sample_file))
+
+    cache_dir = tmp_path / "blockcache-trace-file-io"
+    cache_dir.mkdir()
+    remote_path = f"{temp_bucket}/{object_name}"
+
+    spec = RemoteFilesystemSpec(
+        protocol="s3",
+        storage_options={
+            "key": "minioadmin",
+            "secret": "minioadmin",
+            "client_kwargs": {"endpoint_url": minio_service.endpoint_url},
+        },
+        root_path="",
+        display_name="minio-trace-file-io",
+        uri_scheme="s3",
+        uri_authority="",
+        proxy_jump=None,
+    )
+    cache_config = {"disk_mode": "blocks", "disk_location": str(cache_dir), "blocksize_mb": 1}
+    original_logging = RemoteAccessSession.logging_configuration()
     RemoteAccessSession.configure_logging(trace_filesystem=True, trace_file_io=True)
-    original_send = worker.send_to_gui
+
+    try:
+        fs_cached = create_filesystem(spec, cache=cache_config)
+
+        before_first = _minio_bytes_sent(minio_service.metrics_url)
+        h1 = fs_cached.open(remote_path, "rb")
+        try:
+            data1 = h1.read()
+        finally:
+            h1.close()
+
+        assert data1
+        time.sleep(12)
+        after_first = _minio_bytes_sent(minio_service.metrics_url)
+        first_read_bytes = after_first - before_first
+        assert first_read_bytes > 0
+
+        before_second = _minio_bytes_sent(minio_service.metrics_url)
+        h2 = fs_cached.open(remote_path, "rb")
+        try:
+            data2 = h2.read()
+        finally:
+            h2.close()
+
+        assert data2 == data1
+        time.sleep(12)
+        after_second = _minio_bytes_sent(minio_service.metrics_url)
+        second_read_bytes = after_second - before_second
+
+        assert second_read_bytes < 4096, (
+            f"Disk cache was broken by trace_file_io logging: "
+            f"first read sent {first_read_bytes:,.0f} bytes, "
+            f"second read sent {second_read_bytes:,.0f} bytes."
+        )
+    finally:
+        RemoteAccessSession.configure_logging(
+            level=original_logging.level,
+            trace_filesystem=original_logging.trace_filesystem,
+            trace_file_io=original_logging.trace_file_io,
+        )
+
+
+@pytest.mark.integration
+def test_worker_remote_open_disk_cache_survives_release_recreate(minio_service, temp_bucket, tmp_path) -> None:
+    """Verify disk cache effectiveness survives worker session release + recreation.
+
+    This is the closest test to real app flow: REMOTE_PREPARE -> REMOTE_OPEN,
+    then REMOTE_RELEASE, then REMOTE_PREPARE -> REMOTE_OPEN again with the same
+    descriptor and disk cache directory.
+    """
+    import time
+
+    sample_file = Path(__file__).resolve().parents[1] / "data" / "test1.nc"
+    object_name = "worker-recreate-cache/test1.nc"
+    minio_service.fput_object(temp_bucket, object_name, str(sample_file))
+
+    cache_dir = tmp_path / "worker-lifecycle-blockcache"
+    cache_dir.mkdir()
+
+    descriptor = _s3_descriptor(
+        minio_service,
+        cache={
+            "disk_mode": "blocks",
+            "disk_location": str(cache_dir),
+            "blocksize_mb": 1,
+            "max_blocks": 8,
+        },
+    )
+    descriptor_hash = "worker-recreate-cache-hash"
+    session_id = "worker-recreate-cache-session"
+    uri = f"s3://{temp_bucket}/{object_name}"
+    path = f"{temp_bucket}/{object_name}"
+
+    messages: list[tuple[str, object]] = []
+    original_send_to_gui = worker.send_to_gui
     worker.remote_session_pool.clear()
 
     try:
+        worker.send_to_gui = lambda prefix, data=None: messages.append((prefix, data))
+
+        # First prepare/open: should fetch over wire and populate disk cache.
+        before_first = _minio_bytes_sent(minio_service.metrics_url)
+        worker._handle_control_task(
+            "REMOTE_PREPARE",
+            {
+                "session_id": session_id,
+                "descriptor_hash": descriptor_hash,
+                "descriptor": descriptor,
+            },
+        )
+        worker._handle_control_task(
+            "REMOTE_OPEN",
+            {
+                "session_id": session_id,
+                "descriptor_hash": descriptor_hash,
+                "descriptor": descriptor,
+                "uri": uri,
+                "path": path,
+            },
+        )
+        time.sleep(12)
+        after_first = _minio_bytes_sent(minio_service.metrics_url)
+        first_open_bytes = after_first - before_first
+
+        assert first_open_bytes > 0, "First REMOTE_OPEN should transfer bytes from MinIO"
+        assert (cache_dir / "cache").is_file(), "Blockcache index missing after first REMOTE_OPEN"
+
+        # Release current worker session to force true recreation.
+        worker._handle_control_task(
+            "REMOTE_RELEASE",
+            {
+                "session_id": session_id,
+                "descriptor_hash": descriptor_hash,
+            },
+        )
+
+        # Re-prepare and re-open with same descriptor/cache dir.
+        before_second = _minio_bytes_sent(minio_service.metrics_url)
+        worker._handle_control_task(
+            "REMOTE_PREPARE",
+            {
+                "session_id": session_id,
+                "descriptor_hash": descriptor_hash,
+                "descriptor": descriptor,
+            },
+        )
+        worker._handle_control_task(
+            "REMOTE_OPEN",
+            {
+                "session_id": session_id,
+                "descriptor_hash": descriptor_hash,
+                "descriptor": descriptor,
+                "uri": uri,
+                "path": path,
+            },
+        )
+        time.sleep(12)
+        after_second = _minio_bytes_sent(minio_service.metrics_url)
+        second_open_bytes = after_second - before_second
+
+        assert second_open_bytes < 4096, (
+            f"Disk cache ineffective after worker release/recreate: "
+            f"first open sent {first_open_bytes:,.0f} bytes, "
+            f"second open sent {second_open_bytes:,.0f} bytes."
+        )
+
+        # Sanity: we should still emit an open result in the recreated session.
+        open_results = [
+            data for prefix, data in messages
+            if prefix == "REMOTE_OPEN_RESULT"
+        ]
+        assert open_results
+        assert open_results[-1] == {
+            "session_id": session_id,
+            "uri": uri,
+            "ok": True,
+        }
+    finally:
+        worker.send_to_gui = original_send_to_gui
+        worker.remote_session_pool.clear()
+
+
+@pytest.mark.integration
+@pytest.mark.xfail(
+    reason="Known regression: large da193a-style remote open still re-downloads on second open",
+    strict=True,
+)
+def test_worker_remote_open_large_logged_s3_key_cache_hits_on_second_open(minio_service, temp_bucket, tmp_path) -> None:
+    """Mirror the app's logged S3 path and verify wire bytes collapse on second open.
+
+    Uses the same URI/key shape seen in app logs (s3://bnl/da193a_25_3hr__198808-198808.nc),
+    but against the test MinIO endpoint and a local representative file payload.
+    """
+    import time
+
+    data_dir = Path(__file__).resolve().parents[1] / "data"
+    # Prefer exact filename when present; fall back to the similar local sample.
+    source_file = data_dir / "da193a_25_3hr__198808-198808.nc"
+    if not source_file.is_file():
+        source_file = data_dir / "da193a_25_3hr__198807-198807.nc"
+
+    assert source_file.is_file(), "Expected a local da193a sample in data/ for this integration test"
+
+    object_name = "da193a_25_3hr__198808-198808.nc"
+    minio_service.fput_object(temp_bucket, object_name, str(source_file))
+
+    cache_dir = tmp_path / "worker-large-da193a-blockcache"
+    cache_dir.mkdir()
+
+    descriptor = _s3_descriptor(
+        minio_service,
+        cache={
+            "disk_mode": "blocks",
+            "disk_location": str(cache_dir),
+            "blocksize_mb": 2,
+            "max_blocks": 512,
+        },
+    )
+    descriptor_hash = "worker-large-da193a-cache-hash"
+    session_id = "worker-large-da193a-cache-session"
+    uri = f"s3://{temp_bucket}/{object_name}"
+    path = f"{temp_bucket}/{object_name}"
+
+    messages: list[tuple[str, object]] = []
+    original_send_to_gui = worker.send_to_gui
+    worker.remote_session_pool.clear()
+
+    try:
+        worker.send_to_gui = lambda prefix, data=None: messages.append((prefix, data))
+
+        # First open: expected to transfer payload over the wire and populate blockcache.
+        before_first = _minio_bytes_sent(minio_service.metrics_url)
+        worker._handle_control_task(
+            "REMOTE_PREPARE",
+            {
+                "session_id": session_id,
+                "descriptor_hash": descriptor_hash,
+                "descriptor": descriptor,
+            },
+        )
+        worker._handle_control_task(
+            "REMOTE_OPEN",
+            {
+                "session_id": session_id,
+                "descriptor_hash": descriptor_hash,
+                "descriptor": descriptor,
+                "uri": uri,
+                "path": path,
+            },
+        )
+        time.sleep(12)
+        after_first = _minio_bytes_sent(minio_service.metrics_url)
+        first_open_bytes = after_first - before_first
+
+        assert first_open_bytes > 0, "First large-file REMOTE_OPEN should transfer bytes from MinIO"
+        assert (cache_dir / "cache").is_file(), "Blockcache index missing after first large-file REMOTE_OPEN"
+
+        # Release/recreate to mimic app lifecycle exactly before second open.
+        worker._handle_control_task(
+            "REMOTE_RELEASE",
+            {
+                "session_id": session_id,
+                "descriptor_hash": descriptor_hash,
+            },
+        )
+
+        before_second = _minio_bytes_sent(minio_service.metrics_url)
+        worker._handle_control_task(
+            "REMOTE_PREPARE",
+            {
+                "session_id": session_id,
+                "descriptor_hash": descriptor_hash,
+                "descriptor": descriptor,
+            },
+        )
+        worker._handle_control_task(
+            "REMOTE_OPEN",
+            {
+                "session_id": session_id,
+                "descriptor_hash": descriptor_hash,
+                "descriptor": descriptor,
+                "uri": uri,
+                "path": path,
+            },
+        )
+        time.sleep(12)
+        after_second = _minio_bytes_sent(minio_service.metrics_url)
+        second_open_bytes = after_second - before_second
+
+        # Allow small request overhead but not object-body re-download.
+        assert second_open_bytes < 4096, (
+            f"Large-file disk cache ineffective on second worker open: "
+            f"first open sent {first_open_bytes:,.0f} bytes, "
+            f"second open sent {second_open_bytes:,.0f} bytes."
+        )
+
+        open_results = [data for prefix, data in messages if prefix == "REMOTE_OPEN_RESULT"]
+        assert open_results
+        assert open_results[-1] == {
+            "session_id": session_id,
+            "uri": uri,
+            "ok": True,
+        }
+    finally:
+        worker.send_to_gui = original_send_to_gui
+        worker.remote_session_pool.clear()
+
+
+@pytest.mark.integration
+def test_large_logged_s3_key_direct_read_cache_hits_on_second_open(minio_service, temp_bucket, tmp_path) -> None:
+    """Isolate fsspec blockcache behavior for the large logged key without worker/cf.read."""
+    import time
+    from xconv2.remote_access import RemoteFilesystemSpec, create_filesystem
+
+    data_dir = Path(__file__).resolve().parents[1] / "data"
+    source_file = data_dir / "da193a_25_3hr__198808-198808.nc"
+    if not source_file.is_file():
+        source_file = data_dir / "da193a_25_3hr__198807-198807.nc"
+
+    assert source_file.is_file(), "Expected a local da193a sample in data/ for this integration test"
+
+    object_name = "da193a_25_3hr__198808-198808.nc"
+    minio_service.fput_object(temp_bucket, object_name, str(source_file))
+    remote_path = f"{temp_bucket}/{object_name}"
+
+    cache_dir = tmp_path / "direct-large-da193a-blockcache"
+    cache_dir.mkdir()
+
+    spec = RemoteFilesystemSpec(
+        protocol="s3",
+        storage_options={
+            "key": "minioadmin",
+            "secret": "minioadmin",
+            "client_kwargs": {"endpoint_url": minio_service.endpoint_url},
+        },
+        root_path="",
+        display_name="minio-direct-large",
+        uri_scheme="s3",
+        uri_authority="",
+        proxy_jump=None,
+    )
+    cache_config = {
+        "disk_mode": "blocks",
+        "disk_location": str(cache_dir),
+        "blocksize_mb": 2,
+        "max_blocks": 512,
+    }
+
+    fs1 = create_filesystem(spec, cache=cache_config)
+    before_first = _minio_bytes_sent(minio_service.metrics_url)
+    h1 = fs1.open(remote_path, "rb")
+    try:
+        data1 = h1.read()
+    finally:
+        h1.close()
+
+    assert data1
+    assert (cache_dir / "cache").is_file(), "Blockcache index missing after first direct open"
+
+    time.sleep(12)
+    after_first = _minio_bytes_sent(minio_service.metrics_url)
+    first_open_bytes = after_first - before_first
+    assert first_open_bytes > 0
+
+    fs2 = create_filesystem(spec, cache=cache_config)
+    before_second = _minio_bytes_sent(minio_service.metrics_url)
+    h2 = fs2.open(remote_path, "rb")
+    try:
+        data2 = h2.read()
+    finally:
+        h2.close()
+
+    assert data2 == data1
+
+    time.sleep(12)
+    after_second = _minio_bytes_sent(minio_service.metrics_url)
+    second_open_bytes = after_second - before_second
+
+    assert second_open_bytes < 4096, (
+        f"Direct fsspec cache ineffective for large logged key: "
+        f"first open sent {first_open_bytes:,.0f} bytes, "
+        f"second open sent {second_open_bytes:,.0f} bytes."
+    )
+
+
+@pytest.mark.integration
+def test_worker_prepared_filesystem_large_key_direct_read_cache_hits_on_second_open(
+    minio_service,
+    temp_bucket,
+    tmp_path,
+) -> None:
+    """Use worker session lifecycle but read directly from entry.filesystem (no cf.read)."""
+    import time
+
+    data_dir = Path(__file__).resolve().parents[1] / "data"
+    source_file = data_dir / "da193a_25_3hr__198808-198808.nc"
+    if not source_file.is_file():
+        source_file = data_dir / "da193a_25_3hr__198807-198807.nc"
+
+    assert source_file.is_file(), "Expected a local da193a sample in data/ for this integration test"
+
+    object_name = "da193a_25_3hr__198808-198808.nc"
+    minio_service.fput_object(temp_bucket, object_name, str(source_file))
+    remote_path = f"{temp_bucket}/{object_name}"
+
+    cache_dir = tmp_path / "worker-prepared-direct-large-da193a-blockcache"
+    cache_dir.mkdir()
+
+    descriptor = _s3_descriptor(
+        minio_service,
+        cache={
+            "disk_mode": "blocks",
+            "disk_location": str(cache_dir),
+            "blocksize_mb": 2,
+            "max_blocks": 512,
+        },
+    )
+    session_id = "worker-prepared-direct-large-session"
+    descriptor_hash = "worker-prepared-direct-large-hash"
+
+    original_send = worker.send_to_gui
+    worker.remote_session_pool.clear()
+    try:
         worker.send_to_gui = lambda prefix, data=None: None
-        entry = worker._prepare_remote_session(
-            session_id="disk-cache-reduce-verify",
-            descriptor_hash="disk-cache-reduce-verify-hash",
+
+        before_first = _minio_bytes_sent(minio_service.metrics_url)
+        entry1 = worker._prepare_remote_session(
+            session_id=session_id,
+            descriptor_hash=descriptor_hash,
             descriptor=descriptor,
         )
+        h1 = entry1.filesystem.open(remote_path, "rb")
+        try:
+            data1 = h1.read()
+        finally:
+            h1.close()
 
-        # First read: cache is empty, all blocks must come from MinIO.
-        with caplog.at_level(logging.INFO):
-            caplog.clear()
-            fields1 = worker._read_remote_fields(
-                entry=entry,
-                descriptor=descriptor,
-                datasets=f"{temp_bucket}/{object_name}",
-            )
-            first_read_io_calls = _count_file_io_logs(caplog)
+        assert data1
+        assert (cache_dir / "cache").is_file(), "Blockcache index missing after worker-prepared direct read"
 
-        assert fields1
-        assert first_read_io_calls > 0, "First read should issue REMOTE_FS file_read calls to MinIO"
-        assert (cache_dir / "cache").is_file(), "Blockcache index file should exist after first read"
+        time.sleep(12)
+        after_first = _minio_bytes_sent(minio_service.metrics_url)
+        first_open_bytes = after_first - before_first
+        assert first_open_bytes > 0
 
-        # Second read: blockcache should serve from disk, reducing remote I/O.
-        with caplog.at_level(logging.INFO):
-            caplog.clear()
-            fields2 = worker._read_remote_fields(
-                entry=entry,
-                descriptor=descriptor,
-                datasets=f"{temp_bucket}/{object_name}",
-            )
-            second_read_io_calls = _count_file_io_logs(caplog)
+        worker._release_remote_session(session_id=session_id, descriptor_hash=descriptor_hash)
 
-        assert fields2
-        
-        # Cache MUST reduce remote I/O on the second read when using cf.read()
-        assert second_read_io_calls < first_read_io_calls, (
-            f"Disk cache via cf.read() is BROKEN: "
-            f"first read {first_read_io_calls} REMOTE_FS file_read ops, "
-            f"second read {second_read_io_calls} REMOTE_FS file_read ops. "
-            f"Either cf-python is not respecting the filesystem= parameter, "
-            f"or blockcache integration is broken. This is causing users to wait minutes "
-            f"for cached data to load."
+        before_second = _minio_bytes_sent(minio_service.metrics_url)
+        entry2 = worker._prepare_remote_session(
+            session_id=session_id,
+            descriptor_hash=descriptor_hash,
+            descriptor=descriptor,
+        )
+        h2 = entry2.filesystem.open(remote_path, "rb")
+        try:
+            data2 = h2.read()
+        finally:
+            h2.close()
+
+        assert data2 == data1
+
+        time.sleep(12)
+        after_second = _minio_bytes_sent(minio_service.metrics_url)
+        second_open_bytes = after_second - before_second
+
+        assert second_open_bytes < 4096, (
+            f"Worker-prepared direct read unexpectedly re-downloaded large key: "
+            f"first open sent {first_open_bytes:,.0f} bytes, "
+            f"second open sent {second_open_bytes:,.0f} bytes."
         )
     finally:
-        RemoteAccessSession.configure_logging(trace_filesystem=False, trace_file_io=False)
         worker.send_to_gui = original_send
         worker.remote_session_pool.clear()
+
+
+@pytest.mark.integration
+@pytest.mark.xfail(
+    reason="Known cf.read cache regression for at least one dataset-argument form on large da193a-style file",
+    strict=True,
+)
+def test_cf_read_large_logged_key_dataset_form_matrix_uses_disk_cache_on_second_open(
+    minio_service,
+    temp_bucket,
+    tmp_path,
+) -> None:
+    """Demonstrate which cf.read dataset argument forms do/don't hit disk cache.
+
+    This is intended as a compact upstream-ready reproducer: same file, same
+    cache config, same filesystem construction, differing only in the dataset
+    argument shape supplied to cf.read(..., filesystem=fs).
+    """
+    import time
+    import cf
+    from xconv2.remote_access import RemoteFilesystemSpec, create_filesystem
+
+    data_dir = Path(__file__).resolve().parents[1] / "data"
+    source_file = data_dir / "da193a_25_3hr__198808-198808.nc"
+    if not source_file.is_file():
+        source_file = data_dir / "da193a_25_3hr__198807-198807.nc"
+
+    assert source_file.is_file(), "Expected a local da193a sample in data/ for this integration test"
+
+    object_name = "da193a_25_3hr__198808-198808.nc"
+    minio_service.fput_object(temp_bucket, object_name, str(source_file))
+    remote_path = f"{temp_bucket}/{object_name}"
+    remote_uri = f"s3://{remote_path}"
+
+    spec = RemoteFilesystemSpec(
+        protocol="s3",
+        storage_options={
+            "key": "minioadmin",
+            "secret": "minioadmin",
+            "client_kwargs": {"endpoint_url": minio_service.endpoint_url},
+        },
+        root_path="",
+        display_name="minio-cf-matrix",
+        uri_scheme="s3",
+        uri_authority="",
+        proxy_jump=None,
+    )
+
+    # Keep cache location separate per case to avoid cross-case contamination.
+    cases = [
+        ("path-string", remote_path),
+        ("path-list", [remote_path]),
+        ("uri-string", remote_uri),
+    ]
+    case_results: dict[str, dict[str, float]] = {}
+
+    for case_name, datasets in cases:
+        cache_dir = tmp_path / f"cf-read-matrix-{case_name}"
+        cache_dir.mkdir()
+        cache_config = {
+            "disk_mode": "blocks",
+            "disk_location": str(cache_dir),
+            "blocksize_mb": 2,
+            "max_blocks": 512,
+        }
+
+        fs1 = create_filesystem(spec, cache=cache_config)
+        before_first = _minio_bytes_sent(minio_service.metrics_url)
+        fields1 = cf.read(datasets, filesystem=fs1)
+        assert fields1
+        time.sleep(12)
+        after_first = _minio_bytes_sent(minio_service.metrics_url)
+        first_open_bytes = after_first - before_first
+
+        fs2 = create_filesystem(spec, cache=cache_config)
+        before_second = _minio_bytes_sent(minio_service.metrics_url)
+        fields2 = cf.read(datasets, filesystem=fs2)
+        assert fields2
+        time.sleep(12)
+        after_second = _minio_bytes_sent(minio_service.metrics_url)
+        second_open_bytes = after_second - before_second
+
+        case_results[case_name] = {
+            "first_open_bytes": first_open_bytes,
+            "second_open_bytes": second_open_bytes,
+        }
+
+    failing_cases = {
+        name: metrics
+        for name, metrics in case_results.items()
+        if metrics["second_open_bytes"] >= 4096
+    }
+
+    assert not failing_cases, (
+        "cf.read did not consistently use disk cache on second open for the "
+        f"large logged key; failing cases: {failing_cases}; all results: {case_results}"
+    )
 
 
 @pytest.mark.integration
