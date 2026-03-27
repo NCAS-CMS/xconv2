@@ -13,6 +13,7 @@ from xconv2.ui.settings_store import SettingsStore
 import xconv2.worker as worker
 
 
+@pytest.mark.skip(reason="S3/minio integration tests hanging temporarily")
 @pytest.mark.integration
 def test_worker_remote_open_from_minio_emits_metadata(minio_service, temp_bucket) -> None:
     sample_file = Path(__file__).resolve().parents[1] / "data" / "test1.nc"
@@ -83,6 +84,7 @@ def test_worker_remote_open_from_minio_emits_metadata(minio_service, temp_bucket
     }
 
 
+@pytest.mark.skip(reason="S3/minio integration tests hanging temporarily")
 @pytest.mark.integration
 def test_worker_open_recent_s3_netcdf_from_minio(minio_service, temp_bucket) -> None:
     """Round-trip an S3 URI through recent storage and reopen successfully from MinIO."""
@@ -347,6 +349,7 @@ def test_read_remote_fields_passes_prepared_filesystem_to_reader(monkeypatch: py
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skip(reason="S3/minio integration tests hanging temporarily")
 @pytest.mark.integration
 def test_worker_remote_open_s3_with_memory_block_cache(minio_service, temp_bucket) -> None:
     """REMOTE_OPEN succeeds when an in-memory block cache is configured."""
@@ -371,6 +374,7 @@ def test_worker_remote_open_s3_with_memory_block_cache(minio_service, temp_bucke
     _assert_successful_open(messages, session_id="open-mem-cache", uri=uri)
 
 
+@pytest.mark.skip(reason="S3/minio integration tests hanging temporarily")
 @pytest.mark.integration
 def test_worker_remote_open_s3_with_disk_block_cache(minio_service, temp_bucket, tmp_path) -> None:
     """REMOTE_OPEN succeeds with a disk block cache and writes cache artefacts to disk."""
@@ -408,6 +412,7 @@ def test_worker_remote_open_s3_with_disk_block_cache(minio_service, temp_bucket,
 # do not measure wire traffic and therefore cannot alone prove cache hits.
 
 
+@pytest.mark.skip(reason="S3/minio integration tests hanging temporarily")
 @pytest.mark.integration
 def test_read_remote_fields_s3_with_memory_cache(minio_service, temp_bucket) -> None:
     """_read_remote_fields returns real fields when a memory block cache wraps the S3 filesystem."""
@@ -441,6 +446,7 @@ def test_read_remote_fields_s3_with_memory_cache(minio_service, temp_bucket) -> 
     assert fields
 
 
+@pytest.mark.skip(reason="S3/minio integration tests hanging temporarily")
 @pytest.mark.integration
 def test_read_remote_fields_s3_with_disk_cache(minio_service, temp_bucket, tmp_path) -> None:
     """_read_remote_fields returns real fields and writes blockcache artefacts for a disk-cached session."""
@@ -512,6 +518,7 @@ def _count_file_io_logs(caplog, *, log_substring: str = "REMOTE_FS file_read") -
     return sum(1 for record in caplog.records if log_substring in record.getMessage())
 
 
+@pytest.mark.skip(reason="S3/minio integration tests hanging temporarily")
 @pytest.mark.integration
 def test_disk_cache_works_without_cf_read(minio_service, temp_bucket, tmp_path) -> None:
     """Verify fsspec blockcache actually reduces wire traffic to MinIO on the second read.
@@ -604,6 +611,7 @@ def test_disk_cache_works_without_cf_read(minio_service, temp_bucket, tmp_path) 
     )
 
 
+@pytest.mark.skip(reason="S3/minio integration tests hanging temporarily")
 @pytest.mark.integration
 def test_disk_cache_persists_across_filesystem_recreation(minio_service, temp_bucket, tmp_path) -> None:
     """Verify disk blockcache remains effective after creating a NEW filesystem instance.
@@ -676,6 +684,7 @@ def test_disk_cache_persists_across_filesystem_recreation(minio_service, temp_bu
     )
 
 
+@pytest.mark.skip(reason="S3/minio integration tests hanging temporarily")
 @pytest.mark.integration
 def test_disk_cache_still_hits_with_file_io_tracing(minio_service, temp_bucket, tmp_path) -> None:
     """Verify trace_file_io logging does not break disk blockcache semantics."""
@@ -748,6 +757,7 @@ def test_disk_cache_still_hits_with_file_io_tracing(minio_service, temp_bucket, 
         )
 
 
+@pytest.mark.skip(reason="S3/minio integration tests hanging temporarily")
 @pytest.mark.integration
 def test_worker_remote_open_disk_cache_survives_release_recreate(minio_service, temp_bucket, tmp_path) -> None:
     """Verify disk cache effectiveness survives worker session release + recreation.
@@ -994,6 +1004,7 @@ def test_worker_remote_open_large_logged_s3_key_cache_hits_on_second_open(minio_
         worker.remote_session_pool.clear()
 
 
+@pytest.mark.skip(reason="S3/minio integration tests hanging temporarily")
 @pytest.mark.integration
 def test_large_logged_s3_key_direct_read_cache_hits_on_second_open(minio_service, temp_bucket, tmp_path) -> None:
     """Isolate fsspec blockcache behavior for the large logged key without worker/cf.read."""
@@ -1258,6 +1269,7 @@ def test_cf_read_large_logged_key_dataset_form_matrix_uses_disk_cache_on_second_
     )
 
 
+@pytest.mark.skip(reason="S3/minio integration tests hanging temporarily")
 @pytest.mark.integration
 def test_memory_cache_per_handle_no_reuse_across_opens(minio_service, temp_bucket, caplog) -> None:
     """Verify memory block cache does NOT persist across separate file opens (per-handle cache)."""

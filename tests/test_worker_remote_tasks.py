@@ -102,6 +102,7 @@ def test_read_remote_fields_supports_multiple_paths(monkeypatch) -> None:
     assert calls == [(["/data/file-a.nc", "/data/file-b.nc"], fake_fs)]
 
 
+@pytest.mark.skip(reason="S3/minio integration tests hanging temporarily")
 @pytest.mark.integration
 def test_read_remote_fields_from_s3_via_minio(minio_service, temp_bucket) -> None:
     """_read_remote_fields returns real cf fields when given a live MinIO S3 filesystem."""

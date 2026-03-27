@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from xconv2 import remote_access as remote_core
+from xconv2 import remote_fs
 
 
 logger = logging.getLogger(__name__)
@@ -309,7 +310,7 @@ def _value_from_keys(details: dict[str, Any], *keys: str) -> str:
 
 def _parse_proxy_jump(s: str) -> tuple[str | None, str, int]:
     """Parse a ProxyJump directive into (user, host, port). Only the first hop is used."""
-    return remote_core._parse_proxy_jump(s)
+    return remote_fs._parse_proxy_jump(s)
 
 
 def _emit_log(log: Callable[[str], None] | None, message: str) -> None:
@@ -392,7 +393,106 @@ def _apply_cache_configuration(
     log: Callable[[str], None] | None = None,
 ) -> Any:
     """Apply optional disk and in-memory caching wrappers to a filesystem."""
-    return remote_core._apply_cache_configuration(filesystem, cache=cache, log=log)
+    if cache is None:
+        cache = {}
+
+    disk_mode = str(cache.get("disk_mode", "Disabled")).strip().lower()
+    cache_strategy = str(cache.get("cache_strategy", "None")).strip().lower()
+    blocksize_mb = int(cache.get("blocksize_mb", 2) or 0)
+    blocksize_bytes = blocksize_mb * 1024 * 1024 if blocksize_mb > 0 else 2 * 1024 * 1024
+    max_blocks = int(cache.get("max_blocks", 128) or 0)
+    disk_location = str(cache.get("disk_location", "")).strip()
+    disk_expiry = str(cache.get("disk_expiry", "7 days")).strip()
+
+    from xconv2.cache_utils import parse_disk_expiry_seconds
+
+    import fsspec  # type: ignore
+
+    if disk_mode == "blocks":
+        expiry_seconds = parse_disk_expiry_seconds(disk_expiry)
+        _emit_log(
+            log,
+            f"Configuring block disk cache at {disk_location!r} with {blocksize_bytes} byte blocks, max {max_blocks} blocks, expiry {disk_expiry}",
+        )
+
+        try:
+            from pathlib import Path
+
+            cache_path = Path(disk_location).expanduser()
+            cache_path.mkdir(parents=True, exist_ok=True)
+
+            from xconv2.cache_utils import prune_disk_cache
+
+            prune_disk_cache(
+                cache_path,
+                limit_bytes=0,
+                expiry_seconds=expiry_seconds,
+                log=log,
+            )
+
+            # Check for incompatible blockcache entries and purge them.
+            metadata_path = cache_path / "cache"
+            if metadata_path.exists():
+                try:
+                    import json
+
+                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    filtered = {}
+                    for key, detail in metadata.items():
+                        if not isinstance(detail, dict):
+                            continue
+                        cached_blocksize = detail.get("blocksize")
+                        if isinstance(cached_blocksize, int) and cached_blocksize != blocksize_bytes:
+                            fn = str(detail.get("fn", "")).strip()
+                            if fn:
+                                fn_path = cache_path / fn
+                                try:
+                                    fn_path.unlink()
+                                except OSError:
+                                    pass
+                            _emit_log(
+                                log,
+                                f"Purged incompatible cache entry {key!r}: blocksize {cached_blocksize} != {blocksize_bytes}",
+                            )
+                        else:
+                            filtered[key] = detail
+                    if filtered != metadata:
+                        metadata_path.write_text(json.dumps(filtered), encoding="utf-8")
+                except Exception as e:
+                    _emit_log(log, f"Warning: could not check cache compatibility: {e}")
+        except Exception as e:
+            _emit_log(log, f"Warning: could not prepare cache directory: {e}")
+
+        return fsspec.filesystem(
+            "blockcache",
+            fs=filesystem,
+            cache_storage=disk_location,
+            expiry_time=expiry_seconds,
+            check_files=False,
+            blocksize=blocksize_bytes,
+            maxblocks=max_blocks,
+        )
+
+    if cache_strategy == "readahead":
+        _emit_log(log, f"Configuring readahead memory cache with {blocksize_bytes} byte blocks")
+
+        class _CachedFilesystemProxy:
+            def __init__(self, base_fs: Any) -> None:
+                self._base_fs = base_fs
+                self.protocol = getattr(base_fs, "protocol", None)
+
+            def open(self, path: str, mode: str = "rb", **kwargs: Any):
+                kwargs.setdefault("cache_type", "readahead")
+                kwargs.setdefault("block_size", blocksize_bytes)
+                return self._base_fs.open(path, mode=mode, **kwargs)
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._base_fs, name)
+
+        return _CachedFilesystemProxy(filesystem)
+
+    _emit_log(log, "No caching configured")
+    return filesystem
 
 
 class _XconvHostKeyPolicy:

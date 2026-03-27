@@ -34,7 +34,6 @@ from .cf_templates import (
 from .core_window import CFVCore
 from .remote_access import (
     RemoteEntry,
-    _XconvHostKeyPolicy,
     build_remote_filesystem_spec,
     remote_descriptor_hash,
     spec_to_descriptor,
@@ -43,6 +42,7 @@ from .ui.dialogs import OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDial
 from .ui.remote_file_navigator import (
     RemoteFileNavigatorDialog,
     RemoteLoginLogDialog,
+    _XconvHostKeyPolicy,
 )
 
 logger = logging.getLogger(__name__)

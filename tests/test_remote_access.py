@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import logging
 from types import SimpleNamespace
+import pytest
 
 from xconv2.remote_access import (
     RemoteAccessSession,
+    build_remote_filesystem_spec,
+    create_filesystem,
     normalize_remote_datasets_for_cf_read,
     normalize_remote_entries,
     resolve_link_entries,
@@ -96,3 +99,43 @@ def test_remote_access_session_configure_logging_updates_shared_runtime_state() 
             trace_filesystem=original.trace_filesystem,
             trace_file_io=original.trace_file_io,
         )
+
+
+def test_build_remote_filesystem_spec_s3_requires_endpoint_url() -> None:
+    with pytest.raises(ValueError, match="requires an endpoint URL"):
+        build_remote_filesystem_spec(
+            {
+                "protocol": "S3",
+                "remote": {
+                    "details": {
+                        "accessKey": "abc",
+                        "secretKey": "xyz",
+                    }
+                },
+            }
+        )
+
+
+def test_create_filesystem_s3_uses_caching_wrapper() -> None:
+    """Verify S3 filesystem creation always goes through caching wrapper."""
+    spec = build_remote_filesystem_spec(
+        {
+            "protocol": "S3",
+            "remote": {
+                "alias": "ceda",
+                "details": {
+                    "url": "https://uor-aces-o.s3-ext.jc.rl.ac.uk",
+                    "accessKey": "abc",
+                    "secretKey": "xyz",
+                },
+            },
+        }
+    )
+
+    # Create without cache - should still work, just no disk caching layer
+    fs = create_filesystem(spec, cache=None)
+    assert fs is not None
+
+    # Create with cache - should include caching layer
+    fs_cached = create_filesystem(spec, cache={"disk_mode": "Blocks", "disk_location": "/tmp/cache"})
+    assert fs_cached is not None

@@ -387,12 +387,33 @@ def _apply_worker_logging_configuration(
         trace_file_io=trace_remote_file_io,
     )
     apply_runtime_log_level(config.level)
-    logging.getLogger("pyfive").setLevel(config.level)
+
+    # Keep dependency internals quiet in normal operation; they are extremely
+    # chatty at INFO and can materially slow remote reads. Elevate only when
+    # explicit remote tracing is enabled for diagnostics.
+    noisy_dependency_level = (
+        config.level
+        if (config.trace_filesystem or config.trace_file_io)
+        else logging.WARNING
+    )
+    for name in (
+        "pyfive",
+        "cfdm",
+        "cfdm.read_write.netcdf.netcdfread",
+        "cfdm.read_write.read",
+        "cfdm.cellmethod",
+    ):
+        logging.getLogger(name).setLevel(noisy_dependency_level)
+
     logger.info(
-        "Logging configuration updated level=%s trace_remote_fs=%s trace_remote_file_io=%s",
+        (
+            "Logging configuration updated level=%s trace_remote_fs=%s "
+            "trace_remote_file_io=%s noisy_dependency_level=%s"
+        ),
         logging.getLevelName(config.level),
         config.trace_filesystem,
         config.trace_file_io,
+        logging.getLevelName(noisy_dependency_level),
     )
 
 

@@ -18,7 +18,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
@@ -26,6 +25,7 @@ from urllib.parse import urlparse
 
 from xconv2.cache_utils import parse_disk_expiry_seconds, prune_disk_cache
 from xconv2.logging_utils import coerce_log_level
+from xconv2.remote_fs import RemoteFileSystemFactory
 
 
 logger = logging.getLogger(__name__)
@@ -182,149 +182,6 @@ class RemoteAccessSession:
                 pass
 
 
-class _ConfiguredRemoteFileSystem:
-    """Proxy filesystem that injects default open kwargs for read caching."""
-
-    def __init__(self, filesystem: Any, *, open_defaults: dict[str, Any]) -> None:
-        self._filesystem = filesystem
-        self._open_defaults = dict(open_defaults)
-        self.protocol = getattr(filesystem, "protocol", None)
-
-    def open(self, path: str, mode: str = "rb", **kwargs: Any):
-        return self._filesystem.open(path, mode=mode, **self._merge_open_kwargs(mode, kwargs))
-
-    def _open(self, path: str, mode: str = "rb", **kwargs: Any):
-        return self._filesystem._open(path, mode=mode, **self._merge_open_kwargs(mode, kwargs))
-
-    def _merge_open_kwargs(self, mode: str, kwargs: dict[str, Any]) -> dict[str, Any]:
-        if "r" not in mode:
-            return kwargs
-        merged = dict(self._open_defaults)
-        merged.update(kwargs)
-        return merged
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._filesystem, name)
-
-
-def _instrument_file_handle_with_logging(handle: Any, *, label: str, path: str) -> Any:
-    """Attach logging to a file handle instance without changing its identity.
-
-    Blockcache mutates the returned handle object by attaching cache state to it.
-    A wrapper/proxy breaks that contract because subsequent ``read()`` calls act on
-    the inner handle instead of the cache-bearing outer object. Swizzling the handle
-    instance class preserves identity and cache semantics while still letting us log.
-    """
-    if getattr(handle, "_xconv_logging_wrapped_handle", False):
-        return handle
-
-    base_cls = type(handle)
-
-    def read(self, *args: Any, **kwargs: Any):
-        started = time.perf_counter()
-        result = base_cls.read(self, *args, **kwargs)
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        size = len(result) if isinstance(result, (bytes, bytearray, memoryview, str)) else "na"
-        logger.info(
-            "REMOTE_FS file_read label=%s path=%r request=%r size=%s elapsed_ms=%d",
-            self._xconv_log_label,
-            self._xconv_log_path,
-            args[0] if args else None,
-            size,
-            elapsed_ms,
-        )
-        return result
-
-    def seek(self, *args: Any, **kwargs: Any):
-        started = time.perf_counter()
-        result = base_cls.seek(self, *args, **kwargs)
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        logger.info(
-            "REMOTE_FS file_seek label=%s path=%r args=%r kwargs=%r elapsed_ms=%d result=%r",
-            self._xconv_log_label,
-            self._xconv_log_path,
-            args,
-            kwargs,
-            elapsed_ms,
-            result,
-        )
-        return result
-
-    def close(self):
-        logger.info("REMOTE_FS file_close label=%s path=%r", self._xconv_log_label, self._xconv_log_path)
-        return base_cls.close(self)
-
-    def _fetch_range(self, *args: Any, **kwargs: Any):
-        fetch = getattr(base_cls, "_fetch_range", None)
-        if not callable(fetch):
-            raise AttributeError("Underlying handle does not support _fetch_range")
-
-        started = time.perf_counter()
-        result = fetch(self, *args, **kwargs)
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        start = args[0] if len(args) > 0 else kwargs.get("start")
-        end = args[1] if len(args) > 1 else kwargs.get("end")
-        size = len(result) if isinstance(result, (bytes, bytearray, memoryview, str)) else "na"
-        logger.info(
-            "REMOTE_FS file_fetch_range label=%s path=%r start=%r end=%r size=%s elapsed_ms=%d",
-            self._xconv_log_label,
-            self._xconv_log_path,
-            start,
-            end,
-            size,
-            elapsed_ms,
-        )
-        return result
-
-    overrides: dict[str, Any] = {}
-    for name, fn in [("read", read), ("seek", seek), ("close", close), ("_fetch_range", _fetch_range)]:
-        if hasattr(base_cls, name):
-            overrides[name] = fn
-
-    proxy_cls = type(f"_LoggingHandle_{base_cls.__name__}", (base_cls,), overrides)
-    handle.__class__ = proxy_cls
-    handle._xconv_log_label = label
-    handle._xconv_log_path = path
-    handle._xconv_logging_wrapped_handle = True
-    return handle
-
-
-class _XconvHostKeyPolicy:
-    """Trust-on-first-use host key policy for Paramiko SSH clients."""
-
-    def __init__(self, parent: Any = None, log: Callable[[str], None] | None = None) -> None:
-        self._parent = parent
-        self._log = log
-
-    def missing_host_key(self, client: Any, hostname: str, key: Any) -> None:
-        import paramiko  # type: ignore
-
-        try:
-            fingerprint = ":".join(f"{b:02x}" for b in key.get_fingerprint())
-            key_type = key.get_name()
-        except Exception:
-            fingerprint = "<unavailable>"
-            key_type = "<unavailable>"
-
-        _emit_log(self._log, f"Unknown host key for {hostname!r}: {key_type} {fingerprint}")
-        from PySide6.QtWidgets import QMessageBox
-
-        answer = QMessageBox.question(
-            self._parent,
-            "Unknown Host Key",
-            f"The host {hostname!r} is not in known_hosts.\n\n"
-            f"Key type:    {key_type}\n"
-            f"Fingerprint: {fingerprint}\n\n"
-            "Trust this host key for the current session?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if answer == QMessageBox.Yes:
-            client._host_keys.add(hostname, key.get_name(), key)
-        else:
-            raise paramiko.SSHException(f"Host key for {hostname!r} rejected by user.")
-
-
 # ---------------------------------------------------------------------------
 # Utility functions: descriptors and logging
 # ---------------------------------------------------------------------------
@@ -380,33 +237,6 @@ def _value_from_keys(details: dict[str, Any], *keys: str) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
-
-
-def _parse_proxy_jump(s: str) -> tuple[str | None, str, int]:
-    """Parse a ProxyJump directive into ``(user, host, port)``."""
-    first = s.split(",")[0].strip()
-    port = 22
-    user: str | None = None
-    if "@" in first:
-        user_part, rest = first.split("@", 1)
-        user = user_part or None
-    else:
-        rest = first
-    if ":" in rest:
-        host, port_str = rest.rsplit(":", 1)
-        try:
-            port = int(port_str)
-        except ValueError:
-            host = rest
-    else:
-        host = rest
-    return user, host, port
-
-
-def _emit_log(log: Callable[[str], None] | None, message: str) -> None:
-    """Write a line to the optional connection log callback."""
-    if log is not None:
-        log(message)
 
 
 # ---------------------------------------------------------------------------
@@ -580,322 +410,8 @@ def build_remote_uri(spec: RemoteFilesystemSpec, path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Utility functions: caching and logging wrappers
-# ---------------------------------------------------------------------------
-
-
-def _memory_cache_type(strategy: object) -> str | None:
-    """Map UI memory cache strategy labels to fsspec cache types."""
-    value = str(strategy or "").strip().lower()
-    if value == "block":
-        return "bytes"
-    if value == "readahead":
-        return "readahead"
-    if value == "whole-file":
-        return "all"
-    return None
-
-
-def _wrap_filesystem_with_logging(filesystem: Any, *, label: str) -> Any:
-    """Inject optional tracing wrappers without breaking fsspec class lookups."""
-    if getattr(filesystem, "_xconv_logging_wrapped", False):
-        return filesystem
-
-    base_cls = type(filesystem)
-
-    def _open(self, path: str, mode: str = "rb", **kwargs: Any):
-        started = time.perf_counter()
-        handle = base_cls._open(self, path, mode=mode, **kwargs)
-        config = RemoteAccessSession.logging_configuration()
-        if config.trace_filesystem:
-            logger.info(
-                "REMOTE_FS _open label=%s path=%r mode=%s elapsed_ms=%d",
-                label,
-                path,
-                mode,
-                int((time.perf_counter() - started) * 1000),
-            )
-        if config.trace_file_io:
-            return _instrument_file_handle_with_logging(handle, label=label, path=path)
-        return handle
-
-    def open(self, path: str, mode: str = "rb", **kwargs: Any):
-        started = time.perf_counter()
-        handle = base_cls.open(self, path, mode=mode, **kwargs)
-        config = RemoteAccessSession.logging_configuration()
-        if config.trace_filesystem:
-            logger.info(
-                "REMOTE_FS open label=%s path=%r mode=%s elapsed_ms=%d",
-                label,
-                path,
-                mode,
-                int((time.perf_counter() - started) * 1000),
-            )
-        if config.trace_file_io:
-            return _instrument_file_handle_with_logging(handle, label=label, path=path)
-        return handle
-
-    def info(self, path: str, **kwargs: Any):
-        started = time.perf_counter()
-        result = base_cls.info(self, path, **kwargs)
-        config = RemoteAccessSession.logging_configuration()
-        if config.trace_filesystem:
-            logger.info(
-                "REMOTE_FS info label=%s path=%r elapsed_ms=%d",
-                label,
-                path,
-                int((time.perf_counter() - started) * 1000),
-            )
-        return result
-
-    def ls(self, path: str, detail: bool = True, **kwargs: Any):
-        started = time.perf_counter()
-        result = base_cls.ls(self, path, detail=detail, **kwargs)
-        config = RemoteAccessSession.logging_configuration()
-        if config.trace_filesystem:
-            logger.info(
-                "REMOTE_FS ls label=%s path=%r elapsed_ms=%d count=%d",
-                label,
-                path,
-                int((time.perf_counter() - started) * 1000),
-                len(result) if hasattr(result, "__len__") else -1,
-            )
-        return result
-
-    def cat_file(self, path: str, **kwargs: Any):
-        started = time.perf_counter()
-        result = base_cls.cat_file(self, path, **kwargs)
-        config = RemoteAccessSession.logging_configuration()
-        if config.trace_filesystem:
-            size = len(result) if isinstance(result, (bytes, bytearray, memoryview, str)) else "na"
-            logger.info(
-                "REMOTE_FS cat_file label=%s path=%r elapsed_ms=%d size=%s",
-                label,
-                path,
-                int((time.perf_counter() - started) * 1000),
-                size,
-            )
-        return result
-
-    def read_block(self, path: str, offset: int, length: int, **kwargs: Any):
-        started = time.perf_counter()
-        result = base_cls.read_block(self, path, offset, length, **kwargs)
-        config = RemoteAccessSession.logging_configuration()
-        if config.trace_filesystem:
-            logger.info(
-                "REMOTE_FS read_block label=%s path=%r offset=%d length=%d elapsed_ms=%d",
-                label,
-                path,
-                offset,
-                length,
-                int((time.perf_counter() - started) * 1000),
-            )
-        return result
-
-    def cat_ranges(self, paths: list[str], starts: list[int], ends: list[int], **kwargs: Any):
-        started = time.perf_counter()
-        result = base_cls.cat_ranges(self, paths, starts, ends, **kwargs)
-        config = RemoteAccessSession.logging_configuration()
-        if config.trace_filesystem:
-            logger.info(
-                "REMOTE_FS cat_ranges label=%s n=%d elapsed_ms=%d",
-                label,
-                len(paths),
-                int((time.perf_counter() - started) * 1000),
-            )
-        return result
-
-    overrides: dict[str, Any] = {}
-    for name, fn in [
-        ("_open", _open),
-        ("open", open),
-        ("info", info),
-        ("ls", ls),
-        ("cat_file", cat_file),
-        ("read_block", read_block),
-        ("cat_ranges", cat_ranges),
-    ]:
-        if hasattr(base_cls, name):
-            overrides[name] = fn
-
-    proxy_cls = type(f"_Logging_{base_cls.__name__}", (base_cls,), overrides)
-    filesystem.__class__ = proxy_cls
-    filesystem._xconv_logging_wrapped = True
-    return filesystem
-
-
-def _prune_incompatible_blockcache_entries(
-    cache_path: Path,
-    *,
-    block_size: int,
-    log: Callable[[str], None] | None = None,
-) -> None:
-    """Remove blockcache entries that were created with a different block size."""
-    index_path = cache_path / "cache"
-    if not index_path.is_file():
-        return
-
-    try:
-        payload = json.loads(index_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        logger.exception("Failed to read blockcache index at %s", index_path)
-        return
-
-    if not isinstance(payload, dict):
-        return
-
-    removed = 0
-    for key, details in list(payload.items()):
-        if not isinstance(details, dict):
-            continue
-        existing_block_size = details.get("blocksize")
-        if not isinstance(existing_block_size, int) or existing_block_size == block_size:
-            continue
-        cache_file = details.get("fn")
-        if isinstance(cache_file, str) and cache_file:
-            try:
-                (cache_path / cache_file).unlink(missing_ok=True)
-            except OSError:
-                logger.exception("Failed to remove stale blockcache file %s", cache_file)
-        payload.pop(key, None)
-        removed += 1
-
-    if not removed:
-        return
-
-    try:
-        index_path.write_text(json.dumps(payload), encoding="utf-8")
-    except OSError:
-        logger.exception("Failed to write pruned blockcache index at %s", index_path)
-        return
-
-    _emit_log(log, f"Pruned {removed} incompatible blockcache entries for blocksize={block_size}.")
-
-
-def _apply_cache_configuration(
-    filesystem: Any,
-    *,
-    cache: dict[str, Any] | None = None,
-    log: Callable[[str], None] | None = None,
-) -> Any:
-    """Apply optional disk and in-memory caching wrappers to a filesystem."""
-    if not isinstance(cache, dict):
-        return filesystem
-
-    configured = filesystem
-    disk_wrapped = False
-    block_size = max(1, int(cache.get("blocksize_mb", 2))) * 1024 * 1024
-    max_blocks = max(1, int(cache.get("max_blocks", 32)))
-    disk_mode = str(cache.get("disk_mode", "Disabled")).strip().lower()
-    disk_location = str(cache.get("disk_location", "")).strip() or "TMP"
-    expiry_time = parse_disk_expiry_seconds(cache.get("disk_expiry"))
-    disk_limit_gb = int(cache.get("disk_limit_gb", 0) or 0)
-
-    if disk_mode in {"blocks", "files"}:
-        import fsspec  # type: ignore
-
-        cache_path = Path(disk_location).expanduser()
-        prune_disk_cache(
-            cache_path,
-            limit_bytes=disk_limit_gb * 1024 * 1024 * 1024,
-            expiry_seconds=expiry_time,
-            log=log,
-        )
-
-        protocol = "blockcache" if disk_mode == "blocks" else "filecache"
-        cache_kwargs: dict[str, Any] = {
-            "fs": configured,
-            "cache_storage": str(cache_path),
-            "expiry_time": expiry_time,
-            "check_files": False,
-        }
-        if disk_mode == "blocks":
-            # Do not prune by blocksize here. fsspec persists the underlying file
-            # handle blocksize in the index, which is often different from our
-            # cache wrapper block size. Pruning on that field incorrectly evicts
-            # valid cache entries across session/filesystem recreation.
-            cache_kwargs["blocksize"] = block_size
-            cache_kwargs["maxblocks"] = max_blocks
-
-        configured = fsspec.filesystem(protocol, **cache_kwargs)
-        disk_wrapped = True
-
-    cache_type = _memory_cache_type(cache.get("cache_strategy"))
-    if cache_type is not None and not disk_wrapped:
-        configured = _ConfiguredRemoteFileSystem(
-            configured,
-            open_defaults={
-                "cache_type": cache_type,
-                "block_size": block_size,
-            },
-        )
-
-    return configured
-
-
-# ---------------------------------------------------------------------------
 # Utility functions: filesystem construction
 # ---------------------------------------------------------------------------
-
-
-def _create_sftp_via_jump(spec: RemoteFilesystemSpec, log: Callable[[str], None] | None = None) -> Any:
-    """Build an SFTP filesystem tunnelled through a ProxyJump host."""
-    import fsspec  # type: ignore
-    import paramiko  # type: ignore
-
-    assert spec.proxy_jump is not None
-    jump_user_override, jump_alias, jump_port = _parse_proxy_jump(spec.proxy_jump)
-
-    jump_hostname = jump_alias
-    jump_resolved_user: str | None = None
-    jump_key_filename: str | None = None
-    ssh_config_path = Path.home() / ".ssh/config"
-    if ssh_config_path.is_file():
-        try:
-            ssh_cfg = paramiko.SSHConfig.from_path(str(ssh_config_path))
-            looked_up = ssh_cfg.lookup(jump_alias)
-            jump_hostname = looked_up.get("hostname", jump_alias)
-            jump_resolved_user = looked_up.get("user")
-            identity = looked_up.get("identityfile")
-            if isinstance(identity, list) and identity:
-                jump_key_filename = str(Path(identity[0]).expanduser())
-            elif isinstance(identity, str) and identity:
-                jump_key_filename = str(Path(identity).expanduser())
-        except Exception:
-            pass
-
-    target_user = str(spec.storage_options.get("username", "")) or None
-    target_key = str(spec.storage_options.get("key_filename", "")) or None
-    explicit_jump_user = str(spec.storage_options.get("proxyjump_username", "")) or None
-    explicit_jump_password = str(spec.storage_options.get("proxyjump_password", "")) or None
-    effective_jump_user = explicit_jump_user or jump_user_override or jump_resolved_user or target_user
-    effective_jump_key = jump_key_filename or target_key
-
-    jump_connect: dict[str, Any] = {"hostname": jump_hostname, "port": jump_port}
-    if effective_jump_user:
-        jump_connect["username"] = effective_jump_user
-    if explicit_jump_password:
-        jump_connect["password"] = explicit_jump_password
-    if effective_jump_key:
-        jump_connect["key_filename"] = effective_jump_key
-
-    jump_client = paramiko.SSHClient()
-    jump_client.load_system_host_keys()
-    jump_client.set_missing_host_key_policy(_XconvHostKeyPolicy(log=log))
-    jump_client.connect(**jump_connect)
-
-    transport = jump_client.get_transport()
-    if transport is None:
-        jump_client.close()
-        raise RuntimeError(f"Could not establish transport to jump host {jump_hostname!r}")
-
-    target_host = str(spec.storage_options["host"])
-    channel = transport.open_channel("direct-tcpip", (target_host, 22), ("", 0))
-    connect_kwargs = dict(spec.storage_options)
-    connect_kwargs["sock"] = channel
-    fs = fsspec.filesystem(spec.protocol, **connect_kwargs)
-    fs._xconv_jump_client = jump_client
-    return fs
 
 
 def build_remote_filesystem_spec(config: dict[str, Any]) -> RemoteFilesystemSpec:
@@ -911,7 +427,10 @@ def build_remote_filesystem_spec(config: dict[str, Any]) -> RemoteFilesystemSpec
 
     if protocol == "S3":
         alias = str(remote.get("alias") or "S3")
-        url = _value_from_keys(details, "url") or _value_from_keys(remote, "url")
+        endpoint_url = _value_from_keys(details, "url") or _value_from_keys(remote, "url")
+        if not endpoint_url:
+            raise ValueError("S3 remote configuration requires an endpoint URL")
+
         key = _value_from_keys(details, "accessKey", "access_key") or _value_from_keys(remote, "access_key")
         secret = _value_from_keys(details, "secretKey", "secret_key") or _value_from_keys(remote, "secret_key")
 
@@ -919,8 +438,7 @@ def build_remote_filesystem_spec(config: dict[str, Any]) -> RemoteFilesystemSpec
         if key and secret:
             storage_options["key"] = key
             storage_options["secret"] = secret
-        if url:
-            storage_options["client_kwargs"] = {"endpoint_url": url}
+        storage_options["client_kwargs"] = {"endpoint_url": endpoint_url}
 
         return RemoteFilesystemSpec(
             protocol="s3",
@@ -988,17 +506,67 @@ def create_filesystem(
     cache: dict[str, Any] | None = None,
 ) -> Any:
     """Create the underlying fsspec filesystem instance lazily."""
-    if spec.proxy_jump and spec.protocol == "sftp":
-        base_filesystem = _wrap_filesystem_with_logging(
-            _create_sftp_via_jump(spec, log=log),
-            label=f"{spec.protocol}:{spec.display_name}",
-        )
-        return _apply_cache_configuration(base_filesystem, cache=cache, log=log)
+    cache_dir: str | None = None
+    if isinstance(cache, dict):
+        disk_mode = str(cache.get("disk_mode", "Disabled")).strip().lower()
+        if disk_mode in {"blocks", "files"}:
+            raw_location = str(cache.get("disk_location", "")).strip() or "TMP"
+            cache_path = Path(raw_location).expanduser()
+            prune_disk_cache(
+                cache_path,
+                limit_bytes=int(cache.get("disk_limit_gb", 0) or 0) * 1024 * 1024 * 1024,
+                expiry_seconds=parse_disk_expiry_seconds(cache.get("disk_expiry")),
+                log=log,
+            )
+            cache_dir = str(cache_path)
 
-    import fsspec  # type: ignore
+    if spec.protocol == "http":
+        return RemoteFileSystemFactory(
+            url=spec.root_path,
+            cache_dir=cache_dir,
+            credentials=dict(spec.storage_options),
+        ).fs
 
-    base_filesystem = _wrap_filesystem_with_logging(
-        fsspec.filesystem(spec.protocol, **spec.storage_options),
-        label=f"{spec.protocol}:{spec.display_name}",
-    )
-    return _apply_cache_configuration(base_filesystem, cache=cache, log=log)
+    if spec.protocol == "sftp":
+        host = str(spec.storage_options.get("host", "")).strip()
+        if not host:
+            raise ValueError("SFTP spec is missing host")
+
+        user = str(spec.storage_options.get("username", "")).strip()
+        port = spec.storage_options.get("port")
+        authority = f"{user + '@' if user else ''}{host}"
+        if isinstance(port, int):
+            authority = f"{authority}:{port}"
+
+        root_path = spec.root_path or "."
+        remote_path = root_path if root_path.startswith("/") else f"/{root_path}"
+        credentials = dict(spec.storage_options)
+        if spec.proxy_jump:
+            credentials["proxy_jump"] = spec.proxy_jump
+
+        return RemoteFileSystemFactory(
+            url=f"ssh://{authority}{remote_path}",
+            cache_dir=cache_dir,
+            credentials=credentials,
+        ).fs
+
+    if spec.protocol == "s3":
+        endpoint_url = str(spec.storage_options.get("client_kwargs", {}).get("endpoint_url", "")).strip()
+        if not endpoint_url:
+            raise ValueError("S3 filesystem requires storage_options.client_kwargs.endpoint_url")
+
+        # Extract endpoint host and construct an endpoint-style URL for the factory.
+        parsed_endpoint = urlparse(endpoint_url)
+        endpoint_host = (parsed_endpoint.netloc or parsed_endpoint.path).strip().strip("/")
+        if not endpoint_host:
+            raise ValueError(f"Invalid S3 endpoint URL: {endpoint_url!r}")
+
+        # Delegate to factory which handles caching and ShimmyFS wrapping consistently.
+        synthetic_url = f"s3://{endpoint_host}/bucket"
+        return RemoteFileSystemFactory(
+            url=synthetic_url,
+            cache_dir=cache_dir,
+            credentials=dict(spec.storage_options),
+        ).fs
+
+    raise ValueError(f"Unsupported filesystem protocol for create_filesystem: {spec.protocol!r}")
