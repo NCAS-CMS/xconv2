@@ -93,12 +93,14 @@ class RemoteSessionEntry:
         descriptor_hash: str,
         descriptor: dict[str, Any],
         filesystem: Any,
+        session: RemoteAccessSession | None = None,
     ) -> None:
         now = time.monotonic()
         self.session_id = session_id
         self.descriptor_hash = descriptor_hash
         self.descriptor = descriptor
         self.filesystem = filesystem
+        self.session = session or RemoteAccessSession(filesystem)
         self.created_at = now
         self.last_used = now
 
@@ -198,7 +200,7 @@ def _extract_task_headers(code: str) -> TaskHeaders:
 def _close_remote_session_entry(entry: RemoteSessionEntry) -> None:
     """Best-effort cleanup for cached remote session resources."""
     try:
-        RemoteAccessSession(entry.filesystem).close()
+        entry.session.close()
     except Exception:
         logger.exception("Failed to close remote session for %s", entry.descriptor_hash)
 
@@ -343,7 +345,7 @@ def _read_remote_fields(
     datasets: str | list[str],
 ):
     """Read remote fields using the warmed filesystem and dataset path(s)."""
-    session = RemoteAccessSession(entry.filesystem)
+    session = entry.session
     normalized_datasets = _normalize_remote_datasets_for_cf_read(
         descriptor=descriptor,
         datasets=datasets,
@@ -464,8 +466,7 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
         else:
             entry.last_used = time.monotonic()
         try:
-            session = RemoteAccessSession(entry.filesystem)
-            entries = session.list_entries(path)
+            entries = entry.session.list_entries(path)
             send_to_gui("REMOTE_LIST_RESULT", {
                 "path": path,
                 "entries": entries,

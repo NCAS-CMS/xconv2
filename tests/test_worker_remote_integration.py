@@ -13,7 +13,7 @@ from xconv2.ui.settings_store import SettingsStore
 import xconv2.worker as worker
 
 
-@pytest.mark.skip(reason="S3/minio integration tests hanging temporarily")
+
 @pytest.mark.integration
 def test_worker_remote_open_from_minio_emits_metadata(minio_service, temp_bucket) -> None:
     sample_file = Path(__file__).resolve().parents[1] / "data" / "test1.nc"
@@ -315,8 +315,19 @@ def _assert_successful_open(messages: list, *, session_id: str, uri: str) -> Non
 
 
 def test_read_remote_fields_passes_prepared_filesystem_to_reader(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Prove worker._read_remote_fields forwards the exact prepared filesystem into cf.read."""
-    sentinel_fs = object()
+    """Prove worker._read_remote_fields opens prepared remote datasets before cf.read."""
+
+    class _FakeFilesystem:
+        def __init__(self) -> None:
+            self.open_calls: list[tuple[str, str]] = []
+
+        def open(self, path: str, mode: str):
+            from io import BytesIO
+
+            self.open_calls.append((path, mode))
+            return BytesIO(b"remote-bytes")
+
+    sentinel_fs = _FakeFilesystem()
     entry = worker.RemoteSessionEntry(
         session_id="sid",
         descriptor_hash="hash",
@@ -340,8 +351,9 @@ def test_read_remote_fields_passes_prepared_filesystem_to_reader(monkeypatch: py
     )
 
     assert result == ["ok"]
-    assert calls["datasets"] == "bucket/path/file.nc"
-    assert calls["filesystem"] is sentinel_fs
+    assert sentinel_fs.open_calls == [("bucket/path/file.nc", "rb")]
+    assert getattr(calls["datasets"], "read", None) is not None
+    assert calls["filesystem"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -879,10 +891,6 @@ def test_worker_remote_open_disk_cache_survives_release_recreate(minio_service, 
 
 
 @pytest.mark.integration
-@pytest.mark.xfail(
-    reason="Known regression: large da193a-style remote open still re-downloads on second open",
-    strict=True,
-)
 def test_worker_remote_open_large_logged_s3_key_cache_hits_on_second_open(minio_service, temp_bucket, tmp_path) -> None:
     """Mirror the app's logged S3 path and verify wire bytes collapse on second open.
 
@@ -1173,20 +1181,16 @@ def test_worker_prepared_filesystem_large_key_direct_read_cache_hits_on_second_o
 
 
 @pytest.mark.integration
-@pytest.mark.xfail(
-    reason="Known cf.read cache regression for at least one dataset-argument form on large da193a-style file",
-    strict=True,
-)
 def test_cf_read_large_logged_key_dataset_form_matrix_uses_disk_cache_on_second_open(
     minio_service,
     temp_bucket,
     tmp_path,
 ) -> None:
-    """Demonstrate which cf.read dataset argument forms do/don't hit disk cache.
+    """Demonstrate handle-based cf.read forms hit disk cache on second open.
 
     This is intended as a compact upstream-ready reproducer: same file, same
-    cache config, same filesystem construction, differing only in the dataset
-    argument shape supplied to cf.read(..., filesystem=fs).
+    cache config, same filesystem construction, differing only in the handle
+    argument shape supplied to cf.read(...).
     """
     import time
     import cf
@@ -1220,9 +1224,8 @@ def test_cf_read_large_logged_key_dataset_form_matrix_uses_disk_cache_on_second_
 
     # Keep cache location separate per case to avoid cross-case contamination.
     cases = [
-        ("path-string", remote_path),
-        ("path-list", [remote_path]),
-        ("uri-string", remote_uri),
+        ("handle-single", remote_path),
+        ("handle-list", [remote_path]),
     ]
     case_results: dict[str, dict[str, float]] = {}
 
@@ -1238,7 +1241,16 @@ def test_cf_read_large_logged_key_dataset_form_matrix_uses_disk_cache_on_second_
 
         fs1 = create_filesystem(spec, cache=cache_config)
         before_first = _minio_bytes_sent(minio_service.metrics_url)
-        fields1 = cf.read(datasets, filesystem=fs1)
+        if isinstance(datasets, list):
+            handles1 = [fs1.open(path, "rb") for path in datasets]
+            try:
+                fields1 = cf.read(handles1)
+            finally:
+                for handle in handles1:
+                    handle.close()
+        else:
+            with fs1.open(datasets, "rb") as handle1:
+                fields1 = cf.read(handle1)
         assert fields1
         time.sleep(12)
         after_first = _minio_bytes_sent(minio_service.metrics_url)
@@ -1246,7 +1258,16 @@ def test_cf_read_large_logged_key_dataset_form_matrix_uses_disk_cache_on_second_
 
         fs2 = create_filesystem(spec, cache=cache_config)
         before_second = _minio_bytes_sent(minio_service.metrics_url)
-        fields2 = cf.read(datasets, filesystem=fs2)
+        if isinstance(datasets, list):
+            handles2 = [fs2.open(path, "rb") for path in datasets]
+            try:
+                fields2 = cf.read(handles2)
+            finally:
+                for handle in handles2:
+                    handle.close()
+        else:
+            with fs2.open(datasets, "rb") as handle2:
+                fields2 = cf.read(handle2)
         assert fields2
         time.sleep(12)
         after_second = _minio_bytes_sent(minio_service.metrics_url)

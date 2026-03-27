@@ -11,6 +11,7 @@ class _DummyFS:
     def __init__(self) -> None:
         self.open_calls: list[tuple[str, str, dict]] = []
         self.glob_calls: list[str] = []
+        self.existing_paths: set[str] = set()
 
     def open(self, path: str, mode: str = "rb", **kwargs):
         self.open_calls.append((path, mode, dict(kwargs)))
@@ -19,6 +20,9 @@ class _DummyFS:
     def glob(self, pattern: str):
         self.glob_calls.append(pattern)
         return []
+
+    def exists(self, path: str) -> bool:
+        return path in self.existing_paths
 
 
 def test_shimmy_open_injects_default_block_size() -> None:
@@ -62,6 +66,22 @@ def test_shimmy_list_files_filters_globbed_paths() -> None:
 def test_shimmy_list_files_returns_root_path_without_glob() -> None:
     fs = remote_fs.ShimmyFS(_DummyFS(), root_path="https://example/data.nc")
     assert fs.list_files() == ["https://example/data.nc"]
+
+
+def test_shimmy_glob_falls_back_to_exists_for_exact_path() -> None:
+    base = _DummyFS()
+    base.existing_paths.add("bucket/file.nc")
+    fs = remote_fs.ShimmyFS(base)
+
+    assert fs.glob("bucket/file.nc") == ["bucket/file.nc"]
+
+
+def test_shimmy_glob_does_not_fallback_for_patterns() -> None:
+    base = _DummyFS()
+    base.existing_paths.add("bucket/file.nc")
+    fs = remote_fs.ShimmyFS(base)
+
+    assert fs.glob("bucket/*.nc") == []
 
 
 def test_shimmy_flush_cache_removes_cache_dir(tmp_path: Path) -> None:

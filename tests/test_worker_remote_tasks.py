@@ -66,9 +66,13 @@ def test_read_remote_fields_uses_filesystem_keyword(monkeypatch) -> None:
         descriptor={"protocol": "sftp"},
         filesystem=fake_fs,
     )
-    calls: list[tuple[str, object]] = []
+    calls: list[tuple[bytes, object]] = []
 
-    monkeypatch.setattr(worker.cf, "read", lambda datasets, filesystem=None: calls.append((datasets, filesystem)) or ["fields"])
+    def _fake_read(datasets, filesystem=None):
+        calls.append((datasets.read(), filesystem))
+        return ["fields"]
+
+    monkeypatch.setattr(worker.cf, "read", _fake_read)
 
     fields = worker._read_remote_fields(
         entry=entry,
@@ -77,7 +81,8 @@ def test_read_remote_fields_uses_filesystem_keyword(monkeypatch) -> None:
     )
 
     assert fields == ["fields"]
-    assert calls == [("/data/file.nc", fake_fs)]
+    assert fake_fs.open_calls == [("/data/file.nc", "rb")]
+    assert calls == [(b"remote-bytes", None)]
 
 
 def test_read_remote_fields_supports_multiple_paths(monkeypatch) -> None:
@@ -88,9 +93,13 @@ def test_read_remote_fields_supports_multiple_paths(monkeypatch) -> None:
         descriptor={"protocol": "sftp"},
         filesystem=fake_fs,
     )
-    calls: list[tuple[object, object]] = []
+    calls: list[tuple[list[bytes], object]] = []
 
-    monkeypatch.setattr(worker.cf, "read", lambda datasets, filesystem=None: calls.append((datasets, filesystem)) or ["fields"])
+    def _fake_read(datasets, filesystem=None):
+        calls.append(([handle.read() for handle in datasets], filesystem))
+        return ["fields"]
+
+    monkeypatch.setattr(worker.cf, "read", _fake_read)
 
     fields = worker._read_remote_fields(
         entry=entry,
@@ -99,7 +108,11 @@ def test_read_remote_fields_supports_multiple_paths(monkeypatch) -> None:
     )
 
     assert fields == ["fields"]
-    assert calls == [(["/data/file-a.nc", "/data/file-b.nc"], fake_fs)]
+    assert fake_fs.open_calls == [
+        ("/data/file-a.nc", "rb"),
+        ("/data/file-b.nc", "rb"),
+    ]
+    assert calls == [([b"remote-bytes", b"remote-bytes"], None)]
 
 
 @pytest.mark.skip(reason="S3/minio integration tests hanging temporarily")

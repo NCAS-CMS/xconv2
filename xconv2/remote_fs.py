@@ -43,6 +43,25 @@ class ShimmyFS(fsspec.AbstractFileSystem):
         logger.info("Opening %s with block_size=%s", path, kwargs["block_size"])
         return self.fs.open(path, mode, **kwargs)
 
+    def glob(self, path, **kwargs):
+        matches = self.fs.glob(path, **kwargs)
+        if matches:
+            return matches
+
+        # cfdm/cf probes datasets via filesystem.glob even for exact paths.
+        # Some wrapped remote filesystems return [] for exact keys unless a
+        # wildcard is present, so fall back to exists(path) in that case.
+        if any(token in str(path) for token in "*?["):
+            return matches
+
+        try:
+            if self.fs.exists(path):
+                return [path]
+        except Exception:
+            return matches
+
+        return matches
+
     def __getattr__(self, name):
         return getattr(self.fs, name)
 

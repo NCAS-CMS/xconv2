@@ -36,14 +36,34 @@ def test_remote_access_list_entries_normalizes_and_resolves_links() -> None:
     assert entries[1].is_link is True
 
 
-def test_remote_access_read_fields_normalizes_http_datasets() -> None:
-    calls: list[tuple[object, object]] = []
+def test_remote_access_read_fields_opens_http_dataset_handles() -> None:
+    calls: list[object] = []
+
+    class _Handle:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    class _Fs:
+        def __init__(self) -> None:
+            self.paths: list[str] = []
+
+        def open(self, path: str, mode: str = "rb", **kwargs):
+            assert mode == "rb"
+            assert kwargs == {}
+            self.paths.append(path)
+            return _Handle(path)
 
     def _reader(datasets, filesystem=None):
         calls.append((datasets, filesystem))
         return ["fields"]
 
-    fs = SimpleNamespace()
+    fs = _Fs()
     session = RemoteAccessSession(fs)
     result = session.read_fields(
         descriptor={"protocol": "http", "root_path": "https://server/public/canari"},
@@ -52,9 +72,54 @@ def test_remote_access_read_fields_normalizes_http_datasets() -> None:
     )
 
     assert result == ["fields"]
-    assert calls == [
-        ("https://server/public/canari/data.nc", fs),
-    ]
+    assert fs.paths == ["https://server/public/canari/data.nc"]
+    assert len(calls) == 1
+    handle, filesystem = calls[0]
+    assert getattr(handle, "path", None) == "https://server/public/canari/data.nc"
+    assert filesystem is None
+
+
+def test_remote_access_read_fields_opens_s3_dataset_handles() -> None:
+    calls: list[object] = []
+
+    class _Handle:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    class _Fs:
+        def __init__(self) -> None:
+            self.paths: list[str] = []
+
+        def open(self, path: str, mode: str = "rb", **kwargs):
+            assert mode == "rb"
+            assert kwargs == {}
+            self.paths.append(path)
+            return _Handle(path)
+
+    def _reader(datasets, filesystem=None):
+        calls.append((datasets, filesystem))
+        return ["fields"]
+
+    fs = _Fs()
+    session = RemoteAccessSession(fs)
+    result = session.read_fields(
+        descriptor={"protocol": "s3", "root_path": ""},
+        datasets="bucket/data.nc",
+        reader=_reader,
+    )
+
+    assert result == ["fields"]
+    assert fs.paths == ["bucket/data.nc"]
+    assert len(calls) == 1
+    handle, filesystem = calls[0]
+    assert getattr(handle, "path", None) == "bucket/data.nc"
+    assert filesystem is None
 
 
 def test_normalize_remote_datasets_for_cf_read_passthrough_non_http() -> None:
@@ -139,3 +204,22 @@ def test_create_filesystem_s3_uses_caching_wrapper() -> None:
     # Create with cache - should include caching layer
     fs_cached = create_filesystem(spec, cache={"disk_mode": "Blocks", "disk_location": "/tmp/cache"})
     assert fs_cached is not None
+
+
+def test_create_filesystem_s3_accepts_schemeless_endpoint_with_bucket_path() -> None:
+    spec = build_remote_filesystem_spec(
+        {
+            "protocol": "S3",
+            "remote": {
+                "alias": "local-minio",
+                "details": {
+                    "url": "localhost:50686/bucket",
+                    "accessKey": "abc",
+                    "secretKey": "xyz",
+                },
+            },
+        }
+    )
+
+    fs = create_filesystem(spec, cache=None)
+    assert fs is not None

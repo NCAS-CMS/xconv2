@@ -105,6 +105,18 @@ class RemoteAccessSession:
 
     def __init__(self, filesystem: Any) -> None:
         self.filesystem = filesystem
+        self._open_handles: list[Any] = []
+
+    def _close_open_handles(self) -> None:
+        """Close any file handles retained for lazy remote field access."""
+        while self._open_handles:
+            handle = self._open_handles.pop()
+            close = getattr(handle, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
 
     @classmethod
     def configure_logging(
@@ -153,20 +165,35 @@ class RemoteAccessSession:
     ) -> Any:
         """
         Read fields with descriptor-aware dataset normalization.
-        The reader is expected to accept datasets and an optional filesystem"
-        For example, this is currenlty used to wrap cf.read with auto-normalization of 
-        HTTP paths. When we want to simplify our code, we may choose to 
-        move the normalization logic into the worker,and emit the filesytem so that 
-        cf.read can be used directly from the worker code.  #FIXME
+
+        All remote reads are performed from open file handles so downstream
+        readers do not need to rediscover datasets via filesystem-specific
+        glob/list operations.
         """
         normalized = normalize_remote_datasets_for_cf_read(
             descriptor=descriptor,
             datasets=datasets,
         )
-        return reader(normalized, filesystem=self.filesystem)
+
+        self._close_open_handles()
+        try:
+            if isinstance(normalized, list):
+                self._open_handles = [self.filesystem.open(path, "rb") for path in normalized]
+                opened: Any = list(self._open_handles)
+            else:
+                handle = self.filesystem.open(normalized, "rb")
+                self._open_handles = [handle]
+                opened = handle
+
+            return reader(opened)
+        except Exception:
+            self._close_open_handles()
+            raise
 
     def close(self) -> None:
         """Best-effort cleanup for filesystem and jump-host resources."""
+        self._close_open_handles()
+
         close = getattr(self.filesystem, "close", None)
         if callable(close):
             try:
@@ -555,14 +582,26 @@ def create_filesystem(
         if not endpoint_url:
             raise ValueError("S3 filesystem requires storage_options.client_kwargs.endpoint_url")
 
-        # Extract endpoint host and construct an endpoint-style URL for the factory.
-        parsed_endpoint = urlparse(endpoint_url)
-        endpoint_host = (parsed_endpoint.netloc or parsed_endpoint.path).strip().strip("/")
+        # Extract endpoint host and optional path-style bucket hint.
+        normalized_endpoint = endpoint_url if "://" in endpoint_url else f"https://{endpoint_url}"
+        parsed_endpoint = urlparse(normalized_endpoint)
+
+        endpoint_host = (parsed_endpoint.netloc or "").strip()
+        endpoint_path_parts = [part for part in parsed_endpoint.path.split("/") if part]
+
+        if not endpoint_host:
+            # Handle schemeless values such as "host:port/bucket".
+            raw_parts = [part for part in endpoint_url.strip("/").split("/") if part]
+            if raw_parts:
+                endpoint_host = raw_parts[0]
+                endpoint_path_parts = raw_parts[1:]
+
         if not endpoint_host:
             raise ValueError(f"Invalid S3 endpoint URL: {endpoint_url!r}")
 
         # Delegate to factory which handles caching and ShimmyFS wrapping consistently.
-        synthetic_url = f"s3://{endpoint_host}/bucket"
+        bucket_hint = endpoint_path_parts[0] if endpoint_path_parts else "bucket"
+        synthetic_url = f"s3://{endpoint_host}/{bucket_hint}"
         return RemoteFileSystemFactory(
             url=synthetic_url,
             cache_dir=cache_dir,
