@@ -43,7 +43,7 @@ class MenuController:
             "}"
         )
 
-        xconv_menu = menu_bar.addMenu("xconv")
+        xconv_menu = menu_bar.addMenu("Xconv")
         settings_action = QAction("Settings...", self.host)
         settings_action.triggered.connect(self.host._show_settings_dialog)
         xconv_menu.addAction(settings_action)
@@ -52,13 +52,20 @@ class MenuController:
         configure_remote_action.triggered.connect(self.host._configure_remote)
         xconv_menu.addAction(configure_remote_action)
 
+        cache_manager_action = QAction("Manage Cache...", self.host)
+        cache_manager_action.triggered.connect(self.host._show_cache_manager)
+        xconv_menu.addAction(cache_manager_action)
+
         view_logs_action = QAction("View Logs", self.host)
         view_logs_action.triggered.connect(self.host._view_logs)
         xconv_menu.addAction(view_logs_action)
 
-        cache_manager_action = QAction("Manage Cache...", self.host)
-        cache_manager_action.triggered.connect(self.host._show_cache_manager)
-        xconv_menu.addAction(cache_manager_action)
+        xconv_menu.addSeparator()
+
+        quit_action = QAction("Quit", self.host)
+        quit_action.setShortcut(QKeySequence.StandardKey.Quit)
+        quit_action.triggered.connect(self.host._quit_application)
+        xconv_menu.addAction(quit_action)
 
         file_menu = menu_bar.addMenu("&File")
 
@@ -89,11 +96,6 @@ class MenuController:
         self.refresh_recent_menu()
 
         file_menu.addSeparator()
-
-        quit_action = QAction("Quit", self.host)
-        quit_action.setShortcut(QKeySequence.StandardKey.Quit)
-        quit_action.triggered.connect(self.host._quit_application)
-        file_menu.addAction(quit_action)
 
         self._setup_help_menu(menu_bar, menu_font_size_px, menu_font_weight)
 

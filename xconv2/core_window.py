@@ -137,8 +137,8 @@ class LogViewerDialog(QDialog):
         adv_layout.addWidget(QLabel("Log level:"))
         adv_layout.addWidget(self.log_level_combo)
 
-        # Apply/restart button
-        self.apply_btn = QPushButton("Apply (may restart worker)")
+        # Apply button
+        self.apply_btn = QPushButton("Apply")
         adv_layout.addWidget(self.apply_btn)
         adv_group.setLayout(adv_layout)
         layout.addWidget(adv_group)
@@ -176,11 +176,7 @@ class LogViewerDialog(QDialog):
                 trace_file_io=fileio_trace,
             )
 
-        QMessageBox.information(
-            self,
-            "Advanced Options",
-            "Logging and tracing changes apply immediately. Existing and future worker sessions will use the updated settings.",
-        )
+        # No extra confirmation dialog needed: logging updates are message-based and immediate.
 
     def _current_logging_configuration(self):
         """Return the active runtime logging configuration from the parent host."""
