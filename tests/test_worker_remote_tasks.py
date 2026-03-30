@@ -203,21 +203,21 @@ def test_apply_worker_logging_configuration_updates_remote_runtime_state() -> No
     original_pyfive_level = pyfive_logger.level
     try:
         worker._apply_worker_logging_configuration(
-            level="DEBUG",
-            trace_remote_fs=True,
-            trace_remote_file_io=True,
+            scope_levels={
+                "all": "WARNING",
+                "pyfive": "DEBUG",
+                "xconv2": "INFO",
+            },
         )
 
         updated = worker.RemoteAccessSession.logging_configuration()
-        assert updated.level == logging.DEBUG
-        assert updated.trace_filesystem is True
-        assert updated.trace_file_io is True
+        assert updated.scope_level("all") == logging.WARNING
+        assert updated.scope_level("pyfive") == logging.DEBUG
+        assert updated.scope_level("xconv2") == logging.INFO
         assert pyfive_logger.level == logging.DEBUG
     finally:
         worker._apply_worker_logging_configuration(
-            level=original.level,
-            trace_remote_fs=original.trace_filesystem,
-            trace_remote_file_io=original.trace_file_io,
+            scope_levels=original.scope_levels,
         )
         pyfive_logger.setLevel(original_pyfive_level)
 
@@ -236,17 +236,19 @@ def test_handle_control_task_logging_configure_forwards_runtime_settings(monkeyp
     worker._handle_control_task(
         "LOGGING_CONFIGURE",
         {
-            "level": "ERROR",
-            "trace_remote_fs": True,
-            "trace_remote_file_io": False,
+            "scope_levels": {
+                "all": "ERROR",
+                "xconv2": "DEBUG",
+            },
         },
     )
 
     assert calls == [
         {
-            "level": "ERROR",
-            "trace_remote_fs": True,
-            "trace_remote_file_io": False,
+            "scope_levels": {
+                "all": "ERROR",
+                "xconv2": "DEBUG",
+            },
         }
     ]
     assert messages == [("STATUS:Logging configuration updated", None)]

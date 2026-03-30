@@ -726,7 +726,12 @@ def test_disk_cache_still_hits_with_file_io_tracing(minio_service, temp_bucket, 
     )
     cache_config = {"disk_mode": "blocks", "disk_location": str(cache_dir), "blocksize_mb": 1}
     original_logging = RemoteAccessSession.logging_configuration()
-    RemoteAccessSession.configure_logging(trace_filesystem=True, trace_file_io=True)
+    RemoteAccessSession.configure_logging(
+        scope_levels={
+            "all": "WARNING",
+            "xconv2": "DEBUG",
+        }
+    )
 
     try:
         fs_cached = create_filesystem(spec, cache=cache_config)
@@ -763,9 +768,7 @@ def test_disk_cache_still_hits_with_file_io_tracing(minio_service, temp_bucket, 
         )
     finally:
         RemoteAccessSession.configure_logging(
-            level=original_logging.level,
-            trace_filesystem=original_logging.trace_filesystem,
-            trace_file_io=original_logging.trace_file_io,
+            scope_levels=original_logging.scope_levels,
         )
 
 
@@ -1304,8 +1307,18 @@ def test_memory_cache_per_handle_no_reuse_across_opens(minio_service, temp_bucke
     )
 
     # Reset logging state first, in case previous tests left it dirty.
-    RemoteAccessSession.configure_logging(trace_file_io=False)
-    RemoteAccessSession.configure_logging(trace_file_io=True)
+    RemoteAccessSession.configure_logging(
+        scope_levels={
+            "all": "WARNING",
+            "xconv2": "WARNING",
+        }
+    )
+    RemoteAccessSession.configure_logging(
+        scope_levels={
+            "all": "WARNING",
+            "xconv2": "DEBUG",
+        }
+    )
     original_send = worker.send_to_gui
     worker.remote_session_pool.clear()
 
@@ -1350,6 +1363,11 @@ def test_memory_cache_per_handle_no_reuse_across_opens(minio_service, temp_bucke
             f"First: {first_read_io_calls} calls, Second: {second_read_io_calls} calls"
         )
     finally:
-        RemoteAccessSession.configure_logging(trace_file_io=False)
+        RemoteAccessSession.configure_logging(
+            scope_levels={
+                "all": "WARNING",
+                "xconv2": "WARNING",
+            }
+        )
         worker.send_to_gui = original_send
         worker.remote_session_pool.clear()

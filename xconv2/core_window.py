@@ -22,11 +22,14 @@ from PySide6.QtCore import QTimer, Qt, QUrl
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -60,7 +63,14 @@ from .ui.dialogs import OpenGlobDialog, OpenURIDialog, RemoteConfigurationDialog
 from .ui.remote_file_navigator import RemoteFileNavigatorDialog
 from .ui.settings_store import SettingsStore
 from .cache_utils import disk_cache_usage, parse_disk_expiry_seconds, prune_disk_cache
-from .logging_utils import apply_runtime_log_level, get_log_file_path
+from .logging_utils import (
+    LOG_LEVEL_OPTIONS,
+    LOG_SCOPE_DISPLAY_NAMES,
+    LOG_SCOPE_ORDER,
+    apply_scoped_runtime_logging,
+    get_log_file_path,
+    summarize_scope_levels,
+)
 from .remote_access import RemoteAccessSession
 
 logger = logging.getLogger(__name__)
@@ -76,11 +86,7 @@ STATUSBAR_ERROR_STYLE = "QStatusBar { color: #c62828; font-weight: 600; }"
 class LogViewerDialog(QDialog):
     """Tail and display the shared application log file."""
 
-    _LEVEL_NAMES = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-
-        # --- Filter controls ---
-
-
+    _SCOPE_ORDER = LOG_SCOPE_ORDER
 
     def __init__(self, parent: QWidget | None, log_path: Path) -> None:
         super().__init__(parent)
@@ -111,40 +117,14 @@ class LogViewerDialog(QDialog):
         self.log_view.setLineWrapMode(QPlainTextEdit.NoWrap)
         layout.addWidget(self.log_view, 1)
 
-        # --- Advanced controls frame ---
-        from PySide6.QtWidgets import QCheckBox, QComboBox, QHBoxLayout, QGroupBox, QPushButton
-        adv_group = QGroupBox("Advanced (option changes may require re-reading data)")
-        adv_layout = QHBoxLayout()
-
-        # Tracing checkboxes
-        self.trace_fs_cb = QCheckBox("Trace remote FS")
-        self.trace_fileio_cb = QCheckBox("Trace file I/O")
-        current_config = self._current_logging_configuration()
-        self.trace_fs_cb.setChecked(current_config.trace_filesystem)
-        self.trace_fileio_cb.setChecked(current_config.trace_file_io)
-        adv_layout.addWidget(self.trace_fs_cb)
-        adv_layout.addWidget(self.trace_fileio_cb)
-
-        # Log level dropdown
-        self.log_level_combo = QComboBox()
-        self.log_level_combo.addItems(self._LEVEL_NAMES)
-        current_level_name = logging.getLevelName(current_config.level)
-        try:
-            current_index = self._LEVEL_NAMES.index(current_level_name)
-        except ValueError:
-            current_index = 1
-        self.log_level_combo.setCurrentIndex(current_index)
-        adv_layout.addWidget(QLabel("Log level:"))
-        adv_layout.addWidget(self.log_level_combo)
-
-        # Apply button
-        self.apply_btn = QPushButton("Apply")
-        adv_layout.addWidget(self.apply_btn)
-        adv_group.setLayout(adv_layout)
-        layout.addWidget(adv_group)
-
-        # Connect signals
-        self.apply_btn.clicked.connect(self._apply_advanced_options)
+        controls_layout = QHBoxLayout()
+        self.log_status_label = QLabel()
+        self.log_status_label.setWordWrap(True)
+        controls_layout.addWidget(self.log_status_label, 1)
+        self.configure_logging_button = QPushButton("Configure Logging")
+        self.configure_logging_button.clicked.connect(self._open_logging_configuration)
+        controls_layout.addWidget(self.configure_logging_button)
+        layout.addLayout(controls_layout)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         flush_button = buttons.addButton("Flush Log", QDialogButtonBox.ActionRole)
@@ -155,28 +135,30 @@ class LogViewerDialog(QDialog):
         self._timer = QTimer(self)
         self._timer.setInterval(300)
         self._timer.timeout.connect(self._refresh_from_file)
+        self._refresh_logging_status_label()
 
-    def _apply_advanced_options(self):
+    def _open_logging_configuration(self) -> None:
+        current = self._current_logging_configuration()
+        dialog = ScopedLoggingConfigDialog(
+            self,
+            scope_levels=current.scope_levels,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        selected_scope_levels = dialog.selected_scope_levels()
         host = self.parent()
-        fs_trace = self.trace_fs_cb.isChecked()
-        fileio_trace = self.trace_fileio_cb.isChecked()
-        level_name = self.log_level_combo.currentText()
-
         if host is not None and hasattr(host, "_apply_logging_configuration_from_ui"):
-            host._apply_logging_configuration_from_ui(
-                trace_remote_fs=fs_trace,
-                trace_remote_file_io=fileio_trace,
-                level_name=level_name,
-            )
+            host._apply_logging_configuration_from_ui(scope_levels=selected_scope_levels)
         else:
-            level_value = apply_runtime_log_level(level_name)
-            RemoteAccessSession.configure_logging(
-                level=level_value,
-                trace_filesystem=fs_trace,
-                trace_file_io=fileio_trace,
-            )
+            applied = apply_scoped_runtime_logging(selected_scope_levels)
+            RemoteAccessSession.configure_logging(scope_levels=applied)
 
-        # No extra confirmation dialog needed: logging updates are message-based and immediate.
+        self._refresh_logging_status_label()
+
+    def _refresh_logging_status_label(self) -> None:
+        config = self._current_logging_configuration()
+        self.log_status_label.setText(f"Logging: {summarize_scope_levels(config.scope_levels)}")
 
     def _current_logging_configuration(self):
         """Return the active runtime logging configuration from the parent host."""
@@ -187,6 +169,7 @@ class LogViewerDialog(QDialog):
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
+        self._refresh_logging_status_label()
         self._refresh_from_file()
         self._timer.start()
 
@@ -256,6 +239,83 @@ class LogViewerDialog(QDialog):
             self.log_view.clear()
         finally:
             self._timer.start()
+
+
+class ScopedLoggingConfigDialog(QDialog):
+    """Configure per-scope runtime logging levels."""
+
+    def __init__(self, parent: QWidget | None, *, scope_levels: dict[str, int]) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Configure Logging")
+        self.resize(620, 420)
+
+        self._rows: dict[str, dict[str, QCheckBox]] = {}
+        self._groups: dict[str, QButtonGroup] = {}
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Choose logging level per scope (Warn, Info, Debug)."))
+
+        grid_container = QGroupBox("Scopes")
+        grid = QGridLayout(grid_container)
+        grid.addWidget(QLabel("Scope"), 0, 0)
+        grid.addWidget(QLabel("Warn"), 0, 1)
+        grid.addWidget(QLabel("Info"), 0, 2)
+        grid.addWidget(QLabel("Debug"), 0, 3)
+
+        for row_index, scope in enumerate(LOG_SCOPE_ORDER, start=1):
+            label = QLabel(LOG_SCOPE_DISPLAY_NAMES.get(scope, scope))
+            grid.addWidget(label, row_index, 0)
+
+            group = QButtonGroup(self)
+            group.setExclusive(True)
+            self._groups[scope] = group
+
+            level_checks: dict[str, QCheckBox] = {}
+            for col_index, level_name in enumerate(LOG_LEVEL_OPTIONS, start=1):
+                check = QCheckBox()
+                group.addButton(check)
+                grid.addWidget(check, row_index, col_index, alignment=Qt.AlignCenter)
+                level_checks[level_name] = check
+            self._rows[scope] = level_checks
+
+            current_level_name = logging.getLevelName(scope_levels.get(scope, logging.WARNING))
+            if current_level_name not in level_checks:
+                current_level_name = "WARNING"
+            level_checks[current_level_name].setChecked(True)
+
+        layout.addWidget(grid_container, 1)
+
+        self.apply_all_button = QPushButton("Apply 'All' Level To All Scopes")
+        self.apply_all_button.clicked.connect(self._apply_all_level_to_all_scopes)
+        layout.addWidget(self.apply_all_button)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _selected_level_name(self, scope: str) -> str:
+        levels = self._rows.get(scope, {})
+        for candidate in LOG_LEVEL_OPTIONS:
+            check = levels.get(candidate)
+            if check is not None and check.isChecked():
+                return candidate
+        return "WARNING"
+
+    def _apply_all_level_to_all_scopes(self) -> None:
+        all_level_name = self._selected_level_name("all")
+        for scope, levels in self._rows.items():
+            if scope == "all":
+                continue
+            check = levels.get(all_level_name)
+            if check is not None:
+                check.setChecked(True)
+
+    def selected_scope_levels(self) -> dict[str, str]:
+        selected: dict[str, str] = {}
+        for scope in self._rows:
+            selected[scope] = self._selected_level_name(scope)
+        return selected
 
 
 class CacheManagerDialog(QDialog):
@@ -353,28 +413,18 @@ class CFVCore(QMainWindow):
 
     def _current_logging_configuration(self):
         """Return the current GUI-process runtime logging configuration."""
-        config = RemoteAccessSession.logging_configuration()
-        current_level = logging.getLogger().getEffectiveLevel()
-        if config.level == current_level:
-            return config
-        return RemoteAccessSession.configure_logging(level=current_level)
+        return RemoteAccessSession.logging_configuration()
 
     def _apply_logging_configuration_from_ui(
         self,
         *,
-        trace_remote_fs: bool,
-        trace_remote_file_io: bool,
-        level_name: str,
+        scope_levels: dict[str, int | str],
     ) -> None:
         """Apply GUI-process runtime logging updates from the log viewer."""
-        level_value = apply_runtime_log_level(level_name)
-        RemoteAccessSession.configure_logging(
-            level=level_value,
-            trace_filesystem=trace_remote_fs,
-            trace_file_io=trace_remote_file_io,
-        )
+        applied = apply_scoped_runtime_logging(scope_levels)
+        RemoteAccessSession.configure_logging(scope_levels=applied)
         self._show_status_message(
-            f"Logging updated: {level_name} | remote FS trace={'on' if trace_remote_fs else 'off'} | file I/O trace={'on' if trace_remote_file_io else 'off'}"
+            f"Logging updated: {summarize_scope_levels(applied)}"
         )
 
     def _create_app_icon(self) -> QIcon:

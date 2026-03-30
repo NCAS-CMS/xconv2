@@ -5,6 +5,54 @@ import sys
 from pathlib import Path
 
 
+LOG_SCOPE_ORDER = (
+    "all",
+    "pyfive",
+    "p5rem",
+    "fsspec",
+    "paramiko",
+    "xconv2",
+    "cfdm_cf_python",
+    "cfplot",
+)
+
+LOG_SCOPE_DISPLAY_NAMES = {
+    "all": "All",
+    "pyfive": "pyfive",
+    "p5rem": "p5rem",
+    "fsspec": "fsspec",
+    "paramiko": "paramiko",
+    "xconv2": "xconv2",
+    "cfdm_cf_python": "cfdm and cf-python",
+    "cfplot": "cfplot",
+}
+
+LOG_SCOPE_LOGGERS = {
+    "pyfive": ("pyfive",),
+    "p5rem": ("p5rem",),
+    "fsspec": ("fsspec",),
+    "paramiko": ("paramiko",),
+    "xconv2": ("xconv2",),
+    "cfdm_cf_python": ("cfdm", "cf"),
+    # Placeholder row for future cfplot logger integration.
+    "cfplot": ("cfplot", "cf_plot", "cfp"),
+}
+
+LOG_LEVEL_OPTIONS = ("WARNING", "INFO", "DEBUG")
+
+
+def _set_logger_family_level(logger_name: str, level: int) -> None:
+    """Apply *level* to a logger and any already-instantiated descendants."""
+    logging.getLogger(logger_name).setLevel(level)
+
+    prefix = logger_name + "."
+    for existing_name, existing in logging.root.manager.loggerDict.items():
+        if not isinstance(existing, logging.Logger):
+            continue
+        if existing_name.startswith(prefix):
+            logging.getLogger(existing_name).setLevel(level)
+
+
 def get_log_file_path() -> Path:
     """Return the shared application log file path, creating directories as needed."""
     log_dir = Path.home() / ".xconv2" / "logs"
@@ -44,18 +92,54 @@ def coerce_log_level(level: int | str | None, *, default: int = logging.INFO) ->
     return default
 
 
-def apply_runtime_log_level(level: int | str) -> int:
-    """Apply a new runtime log level while keeping console stderr at ERROR."""
-    resolved = coerce_log_level(level)
+def normalize_scope_levels(
+    scope_levels: dict[str, int | str] | None,
+    *,
+    default: int = logging.WARNING,
+) -> dict[str, int]:
+    """Return a complete and normalized scope->level mapping."""
+    normalized = {scope: default for scope in LOG_SCOPE_ORDER}
+    if not scope_levels:
+        return normalized
+
+    for scope, level in scope_levels.items():
+        key = str(scope)
+        if key not in normalized:
+            continue
+        normalized[key] = coerce_log_level(level, default=normalized[key])
+
+    return normalized
+
+
+def apply_scoped_runtime_logging(scope_levels: dict[str, int | str]) -> dict[str, int]:
+    """Apply scoped runtime logging while keeping stderr output at ERROR."""
+    normalized = normalize_scope_levels(scope_levels)
+    all_level = normalized["all"]
+
     root = logging.getLogger()
-    root.setLevel(resolved)
+    root.setLevel(all_level)
+
+    file_handler_level = min(normalized.values())
 
     for handler in root.handlers:
         if isinstance(handler, logging.FileHandler):
-            handler.setLevel(resolved)
+            handler.setLevel(file_handler_level)
+        elif isinstance(handler, logging.StreamHandler):
+            handler.setLevel(logging.ERROR)
 
-    for name, existing in logging.root.manager.loggerDict.items():
-        if isinstance(existing, logging.Logger):
-            logging.getLogger(name).setLevel(resolved)
+    for scope, logger_names in LOG_SCOPE_LOGGERS.items():
+        level = normalized.get(scope, all_level)
+        for logger_name in logger_names:
+            _set_logger_family_level(logger_name, level)
 
-    return resolved
+    return normalized
+
+
+def summarize_scope_levels(scope_levels: dict[str, int | str]) -> str:
+    """Return compact human-readable scope status text."""
+    normalized = normalize_scope_levels(scope_levels)
+    parts: list[str] = []
+    for scope in LOG_SCOPE_ORDER:
+        label = LOG_SCOPE_DISPLAY_NAMES.get(scope, scope)
+        parts.append(f"{label}={logging.getLevelName(normalized[scope])}")
+    return " | ".join(parts)

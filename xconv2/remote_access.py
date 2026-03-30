@@ -24,7 +24,7 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 from xconv2.cache_utils import parse_disk_expiry_seconds, prune_disk_cache
-from xconv2.logging_utils import coerce_log_level
+from xconv2.logging_utils import normalize_scope_levels
 from xconv2.remote_fs import RemoteFileSystemFactory
 
 
@@ -62,11 +62,18 @@ __all__ = [
 
 @dataclass(frozen=True)
 class RemoteLoggingConfiguration:
-    """Runtime logging controls for remote filesystem tracing."""
+    """Runtime logging controls for module scopes."""
 
-    level: int = logging.INFO
-    trace_filesystem: bool = False
-    trace_file_io: bool = False
+    scope_levels: dict[str, int]
+
+    def scope_level(self, scope: str) -> int:
+        return int(self.scope_levels.get(scope, self.scope_levels.get("all", logging.WARNING)))
+
+    def should_trace_filesystem(self) -> bool:
+        return self.scope_level("xconv2") <= logging.INFO
+
+    def should_trace_file_io(self) -> bool:
+        return self.scope_level("xconv2") <= logging.DEBUG
 
 
 @dataclass(frozen=True)
@@ -101,7 +108,7 @@ class RemoteFilesystemSpec:
 class RemoteAccessSession:
     """Shared remote access facade for listing and reading via one filesystem."""
 
-    _logging_configuration = RemoteLoggingConfiguration()
+    _logging_configuration = RemoteLoggingConfiguration(scope_levels=normalize_scope_levels(None))
 
     def __init__(self, filesystem: Any) -> None:
         self.filesystem = filesystem
@@ -122,24 +129,13 @@ class RemoteAccessSession:
     def configure_logging(
         cls,
         *,
-        level: int | str | None = None,
-        trace_filesystem: bool | None = None,
-        trace_file_io: bool | None = None,
+        scope_levels: dict[str, int | str] | None = None,
     ) -> RemoteLoggingConfiguration:
         """Update shared runtime logging settings for remote access."""
-        current = cls._logging_configuration
+        if scope_levels is None:
+            return cls._logging_configuration
         cls._logging_configuration = RemoteLoggingConfiguration(
-            level=coerce_log_level(level, default=current.level) if level is not None else current.level,
-            trace_filesystem=(
-                current.trace_filesystem
-                if trace_filesystem is None
-                else bool(trace_filesystem)
-            ),
-            trace_file_io=(
-                current.trace_file_io
-                if trace_file_io is None
-                else bool(trace_file_io)
-            ),
+            scope_levels=normalize_scope_levels(scope_levels),
         )
         return cls._logging_configuration
 

@@ -12,6 +12,7 @@ from xconv2.remote_access import (
     normalize_remote_entries,
     resolve_link_entries,
 )
+from xconv2.logging_utils import apply_scoped_runtime_logging
 
 
 def test_remote_access_list_entries_normalizes_and_resolves_links() -> None:
@@ -149,21 +150,46 @@ def test_remote_access_session_configure_logging_updates_shared_runtime_state() 
     original = RemoteAccessSession.logging_configuration()
     try:
         updated = RemoteAccessSession.configure_logging(
-            level="DEBUG",
-            trace_filesystem=True,
-            trace_file_io=True,
+            scope_levels={
+                "all": "WARNING",
+                "xconv2": "DEBUG",
+                "fsspec": "INFO",
+            },
         )
 
-        assert updated.level == logging.DEBUG
-        assert updated.trace_filesystem is True
-        assert updated.trace_file_io is True
+        assert updated.scope_level("xconv2") == logging.DEBUG
+        assert updated.scope_level("fsspec") == logging.INFO
+        assert updated.scope_level("all") == logging.WARNING
         assert RemoteAccessSession.logging_configuration() == updated
     finally:
         RemoteAccessSession.configure_logging(
-            level=original.level,
-            trace_filesystem=original.trace_filesystem,
-            trace_file_io=original.trace_file_io,
+            scope_levels=original.scope_levels,
         )
+
+
+def test_apply_scoped_runtime_logging_updates_existing_fsspec_child_loggers() -> None:
+    cached_logger = logging.getLogger("fsspec.cached")
+    http_logger = logging.getLogger("fsspec.http")
+    original_cached_level = cached_logger.level
+    original_http_level = http_logger.level
+
+    try:
+        cached_logger.setLevel(logging.WARNING)
+        http_logger.setLevel(logging.ERROR)
+
+        applied = apply_scoped_runtime_logging(
+            {
+                "all": "WARNING",
+                "fsspec": "DEBUG",
+            }
+        )
+
+        assert applied["fsspec"] == logging.DEBUG
+        assert cached_logger.level == logging.DEBUG
+        assert http_logger.level == logging.DEBUG
+    finally:
+        cached_logger.setLevel(original_cached_level)
+        http_logger.setLevel(original_http_level)
 
 
 def test_build_remote_filesystem_spec_s3_requires_endpoint_url() -> None:

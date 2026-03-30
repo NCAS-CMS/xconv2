@@ -147,7 +147,7 @@ def _wrap_filesystem_with_logging(filesystem: Any, *, label: str) -> Any:
     subclass the *actual* filesystem type and swizzle the instance's ``__class__``.
     Every attribute not explicitly overridden here is inherited correctly.
     """
-    if not _current_remote_logging_configuration().trace_filesystem:
+    if not _current_remote_logging_configuration().should_trace_filesystem():
         return filesystem
 
     base_cls = type(filesystem)
@@ -159,7 +159,7 @@ def _wrap_filesystem_with_logging(filesystem: Any, *, label: str) -> Any:
             "REMOTE_FS _open label=%s path=%r mode=%s elapsed_ms=%d",
             label, path, mode, int((time.perf_counter() - started) * 1000),
         )
-        if _current_remote_logging_configuration().trace_file_io:
+        if _current_remote_logging_configuration().should_trace_file_io():
             return _instrument_file_handle_with_logging(handle, label=label, path=path)
         return handle
 
@@ -170,7 +170,7 @@ def _wrap_filesystem_with_logging(filesystem: Any, *, label: str) -> Any:
             "REMOTE_FS open label=%s path=%r mode=%s elapsed_ms=%d",
             label, path, mode, int((time.perf_counter() - started) * 1000),
         )
-        if _current_remote_logging_configuration().trace_file_io:
+        if _current_remote_logging_configuration().should_trace_file_io():
             return _instrument_file_handle_with_logging(handle, label=label, path=path)
         return handle
 

@@ -30,7 +30,7 @@ from . import xconv_cf_interface
 from . import lineplot as xconv_lineplot
 from . import cell_method_handler as xconv_cell_method_handler
 from . import __version__
-from .logging_utils import apply_runtime_log_level, configure_logging
+from .logging_utils import apply_scoped_runtime_logging, configure_logging
 from .remote_access import (
     RemoteAccessSession,
     create_filesystem,
@@ -378,44 +378,18 @@ def _normalize_remote_datasets_for_cf_read(
 
 def _apply_worker_logging_configuration(
     *,
-    level: int | str | None = None,
-    trace_remote_fs: bool | None = None,
-    trace_remote_file_io: bool | None = None,
+    scope_levels: dict[str, int | str] | None = None,
 ) -> None:
     """Apply runtime logging settings for the worker and shared remote access."""
-    config = RemoteAccessSession.configure_logging(
-        level=level,
-        trace_filesystem=trace_remote_fs,
-        trace_file_io=trace_remote_file_io,
-    )
-    apply_runtime_log_level(config.level)
+    if scope_levels is None:
+        scope_levels = RemoteAccessSession.logging_configuration().scope_levels
 
-    # Keep dependency internals quiet in normal operation; they are extremely
-    # chatty at INFO and can materially slow remote reads. Elevate only when
-    # explicit remote tracing is enabled for diagnostics.
-    noisy_dependency_level = (
-        config.level
-        if (config.trace_filesystem or config.trace_file_io)
-        else logging.WARNING
-    )
-    for name in (
-        "pyfive",
-        "cfdm",
-        "cfdm.read_write.netcdf.netcdfread",
-        "cfdm.read_write.read",
-        "cfdm.cellmethod",
-    ):
-        logging.getLogger(name).setLevel(noisy_dependency_level)
+    applied = apply_scoped_runtime_logging(scope_levels)
+    config = RemoteAccessSession.configure_logging(scope_levels=applied)
 
     logger.info(
-        (
-            "Logging configuration updated level=%s trace_remote_fs=%s "
-            "trace_remote_file_io=%s noisy_dependency_level=%s"
-        ),
-        logging.getLevelName(config.level),
-        config.trace_filesystem,
-        config.trace_file_io,
-        logging.getLevelName(noisy_dependency_level),
+        "Logging configuration updated scopes=%s",
+        config.scope_levels,
     )
 
 
@@ -444,9 +418,7 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
 
     if task_kind == "LOGGING_CONFIGURE":
         _apply_worker_logging_configuration(
-            level=payload.get("level"),
-            trace_remote_fs=payload.get("trace_remote_fs"),
-            trace_remote_file_io=payload.get("trace_remote_file_io"),
+            scope_levels=payload.get("scope_levels") if isinstance(payload.get("scope_levels"), dict) else None,
         )
         send_to_gui("STATUS:Logging configuration updated")
         return
@@ -712,7 +684,12 @@ def _emit_latest_plot_image() -> None:
 def main():
     """Entry point for the cf-worker command."""
     log_file = configure_logging()
-    _apply_worker_logging_configuration(level=logging.INFO)
+    _apply_worker_logging_configuration(
+        scope_levels={
+            "all": "INFO",
+            "xconv2": "INFO",
+        }
+    )
 
     logger.info("Worker starting")
     logger.info("Log file: %s", log_file)

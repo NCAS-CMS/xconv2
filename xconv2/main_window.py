@@ -1585,22 +1585,16 @@ class CFVMain(CFVCore):
     def _apply_logging_configuration_from_ui(
         self,
         *,
-        trace_remote_fs: bool,
-        trace_remote_file_io: bool,
-        level_name: str,
+        scope_levels: dict[str, int | str],
     ) -> None:
         """Apply GUI logging config locally and forward it to the worker."""
         super()._apply_logging_configuration_from_ui(
-            trace_remote_fs=trace_remote_fs,
-            trace_remote_file_io=trace_remote_file_io,
-            level_name=level_name,
+            scope_levels=scope_levels,
         )
         self._send_worker_control_task(
             "LOGGING_CONFIGURE",
             {
-                "level": level_name,
-                "trace_remote_fs": trace_remote_fs,
-                "trace_remote_file_io": trace_remote_file_io,
+                "scope_levels": scope_levels,
             },
         )
 
