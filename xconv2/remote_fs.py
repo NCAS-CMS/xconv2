@@ -62,6 +62,15 @@ class ShimmyFS(fsspec.AbstractFileSystem):
 
         return matches
 
+    def ls(self, path, detail=True, **kwargs):
+        """List objects at path, forwarding directly to the wrapped filesystem.
+        
+        This explicit implementation ensures we don't use AbstractFileSystem's
+        implementation, which breaks with CachingFileSystem. Instead, we directly
+        forward to the wrapped filesystem's ls() method.
+        """
+        return self.fs.ls(path, detail=detail, **kwargs)
+
     def __getattr__(self, name):
         return getattr(self.fs, name)
 
@@ -333,9 +342,10 @@ class RemoteFileSystemFactory:
             wrapped_fs = CachingFileSystem(
                 fs=base_fs,
                 cache_storage=cache_dir,
+                blocksize=block_size,
                 check_files=False,
             )
-            logger.info("Caching enabled using cache dir: %s", cache_dir)
+            logger.info("Caching enabled using cache dir: %s with blocksize=%s", cache_dir, block_size)
         else:
             wrapped_fs = base_fs
             logger.info("Caching disabled; using base filesystem directly")

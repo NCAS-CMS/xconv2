@@ -268,3 +268,40 @@ def test_factory_rejects_invalid_filesystem_mode() -> None:
             url="https://example.org/file.nc",
             filesystem_mode="filecache",
         )
+
+
+def test_shimmy_ls_forwards_to_wrapped_filesystem() -> None:
+    """Test that ShimmyFS.ls() properly forwards to the wrapped filesystem.
+    
+    This is critical for remote browsing to work with CachingFileSystem,
+    as we need to bypass AbstractFileSystem.ls() and call directly to the
+    wrapped filesystem's implementation.
+    """
+    class _LsTrackingFS(_DummyFS):
+        def __init__(self) -> None:
+            super().__init__()
+            self.ls_calls: list[tuple[str, dict]] = []
+        
+        def ls(self, path: str, detail: bool = True, **kwargs):
+            self.ls_calls.append((path, {"detail": detail, **kwargs}))
+            return [
+                {"name": f"{path}/file1.txt", "size": 100, "type": "file"},
+                {"name": f"{path}/file2.txt", "size": 200, "type": "file"},
+            ]
+    
+    base = _LsTrackingFS()
+    fs = remote_fs.ShimmyFS(base)
+    
+    # Call ls() on ShimmyFS
+    result = fs.ls("/test", detail=True)
+    
+    # Verify the wrapped filesystem's ls() was called directly
+    assert len(base.ls_calls) == 1
+    path, kwargs = base.ls_calls[0]
+    assert path == "/test"
+    assert kwargs["detail"] is True
+    
+    # Verify the result is correct
+    assert len(result) == 2
+    assert result[0]["name"] == "/test/file1.txt"
+    assert result[1]["name"] == "/test/file2.txt"
