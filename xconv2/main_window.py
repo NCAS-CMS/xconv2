@@ -1182,6 +1182,7 @@ class CFVMain(CFVCore):
         state = raw_state if isinstance(raw_state, dict) else {}
         if isinstance(state, dict):
             merged_http: dict[str, object] = {}
+            merged_ssh_runtime_preferences: dict[str, object] = {}
 
             configured_state = self._settings.get("last_remote_configuration")
             if isinstance(configured_state, dict):
@@ -1190,6 +1191,9 @@ class CFVMain(CFVCore):
                     cfg_http = configured_state.get("http_locations")
                 if isinstance(cfg_http, dict):
                     merged_http.update(cfg_http)
+                cfg_ssh_prefs = configured_state.get("ssh_runtime_preferences")
+                if isinstance(cfg_ssh_prefs, dict):
+                    merged_ssh_runtime_preferences.update(cfg_ssh_prefs)
 
             http_locations = self._settings.get("remote_https_locations")
             if not isinstance(http_locations, dict):
@@ -1197,9 +1201,16 @@ class CFVMain(CFVCore):
             if isinstance(http_locations, dict):
                 merged_http.update(http_locations)
 
-            if merged_http:
+            open_state_ssh_prefs = state.get("ssh_runtime_preferences") if isinstance(state, dict) else None
+            if isinstance(open_state_ssh_prefs, dict):
+                merged_ssh_runtime_preferences.update(open_state_ssh_prefs)
+
+            if merged_http or merged_ssh_runtime_preferences:
                 state = dict(state)
-                state["https_locations"] = dict(merged_http)
+                if merged_http:
+                    state["https_locations"] = dict(merged_http)
+                if merged_ssh_runtime_preferences:
+                    state["ssh_runtime_preferences"] = dict(merged_ssh_runtime_preferences)
 
         config, ok, next_state = RemoteOpenDialog.get_configuration(self, state=state)
         self._settings["last_remote_open"] = next_state

@@ -1,10 +1,21 @@
 import logging
+from pathlib import PurePosixPath
 from pathlib import Path
 from time import perf_counter
 from urllib.parse import urlparse
 
 import fsspec
 from fsspec.implementations.cached import CachingFileSystem
+
+try:
+    from p5rem import bootstrap_session
+except ImportError:
+    bootstrap_session = None
+
+try:
+    from p5rem.cache import P5RemCache
+except ImportError:
+    P5RemCache = None
 
 
 logger = logging.getLogger(__name__)
@@ -108,7 +119,160 @@ class ShimmyFS(fsspec.AbstractFileSystem):
     def get_file_like(self, path=None):
         """Returns a file-like object for the given path."""
         target_path = path or self.root_path
+
+
         return self.fs.open(target_path, "rb")
+
+
+class P5RemFilesystem:
+    """Filesystem wrapper around a p5rem session for SSH/SFTP access."""
+
+    protocol = "ssh"
+
+    def __init__(self, session):
+        """Initialize with a p5remSession instance."""
+        self.session = session
+
+    @staticmethod
+    def _entry_path(parent: str, child: str) -> str:
+        """Join remote POSIX-like paths without introducing double slashes."""
+        child_clean = str(child).strip()
+        if not child_clean:
+            return str(parent)
+        if child_clean.startswith("/"):
+            return child_clean
+        base = str(parent).strip()
+        if base in {"", "."}:
+            return child_clean
+        if base == "/":
+            return f"/{child_clean}"
+        return str(PurePosixPath(base) / child_clean)
+
+    @staticmethod
+    def _is_dir_from_stat(info: dict[str, object]) -> bool:
+        """Best-effort directory detection from heterogeneous stat payloads."""
+        type_value = str(info.get("type", "")).strip().lower()
+        if type_value in {"dir", "directory"}:
+            return True
+        if type_value == "file":
+            return False
+        return bool(info.get("is_dir", False))
+
+    def ls(self, path, detail=True, **kwargs):
+        """List directory contents."""
+        entries = self.session.list(path)
+        if not detail:
+            names: list[str] = []
+            for entry in entries:
+                if isinstance(entry, dict) and "name" in entry:
+                    names.append(str(entry["name"]))
+                else:
+                    names.append(self._entry_path(str(path), str(entry)))
+            return names
+
+        normalized: list[dict[str, object]] = []
+        for entry in entries:
+            if isinstance(entry, dict) and "name" in entry:
+                normalized.append(entry)
+                continue
+
+            entry_path = self._entry_path(str(path), str(entry))
+            stat_info: dict[str, object] = {}
+            try:
+                stat_payload = self.session.stat(entry_path)
+                if isinstance(stat_payload, dict):
+                    stat_info = stat_payload
+            except Exception:
+                stat_info = {}
+
+            is_dir = self._is_dir_from_stat(stat_info)
+            size_value = stat_info.get("size")
+            size: int | None = int(size_value) if isinstance(size_value, int) else None
+            normalized.append(
+                {
+                    "name": entry_path,
+                    "size": size,
+                    "type": "directory" if is_dir else "file",
+                }
+            )
+
+        return normalized
+
+    def open(self, path, mode="rb", **kwargs):
+        """Open a file for reading."""
+        if "w" in mode or "a" in mode:
+            raise ValueError("p5rem filesystem is read-only")
+        return self.session.open(path)
+
+    def exists(self, path, **kwargs):
+        """Check if a path exists."""
+        try:
+            self.session.stat(path)
+            return True
+        except Exception:
+            return False
+
+    def isdir(self, path, **kwargs):
+        """Check if a path is a directory."""
+        try:
+            info = self.session.stat(path)
+            return info.get("type") == "dir"
+        except Exception:
+            return False
+
+    def isfile(self, path, **kwargs):
+        """Check if a path is a file."""
+        try:
+            info = self.session.stat(path)
+            return info.get("type") == "file"
+        except Exception:
+            return False
+
+    def stat(self, path, **kwargs):
+        """Get file information."""
+        return self.session.stat(path)
+
+    def glob(self, path, **kwargs):
+        """Glob is not implemented for p5rem."""
+        raise NotImplementedError("glob is not implemented for p5rem filesystem")
+
+    def close(self):
+        """Close the session."""
+        if hasattr(self.session, "close"):
+            self.session.close()
+
+
+def _p5rem_startup_error_details(session: object, exc: Exception) -> str:
+    """Build an actionable startup error string when the remote p5rem server exits."""
+    parts = [f"{exc.__class__.__name__}: {exc}"]
+    proc = getattr(session, "process", None)
+    if proc is None:
+        return "; ".join(parts)
+
+    poll = getattr(proc, "poll", None)
+    rc: int | None = None
+    if callable(poll):
+        try:
+            rc = poll()
+        except Exception:
+            rc = None
+    if rc is not None:
+        parts.append(f"remote server exited with status {rc}")
+
+        stderr = getattr(proc, "stderr", None)
+        if stderr is not None:
+            try:
+                raw = stderr.read()
+                if isinstance(raw, bytes):
+                    text = raw.decode("utf-8", errors="replace").strip()
+                else:
+                    text = str(raw).strip()
+                if text:
+                    parts.append(f"remote stderr: {text}")
+            except Exception:
+                pass
+
+    return "; ".join(parts)
 
 
 def _parse_proxy_jump(s: str) -> tuple[str | None, str, int]:
@@ -313,42 +477,94 @@ class RemoteFileSystemFactory:
                 self.root_path = url
 
             case "ssh" | "sftp":
+                if bootstrap_session is None:
+                    raise ImportError("p5rem is required for SSH/SFTP support. Install it with: pip install p5rem")
+                
                 parsed = urlparse(url)
                 if not parsed.hostname:
                     raise ValueError(f"Missing SSH hostname in URL {url!r}")
 
-                if "proxy_jump" not in storage_options and storage_options.get("proxyjump"):
-                    storage_options["proxy_jump"] = storage_options["proxyjump"]
-
-                storage_options["host"] = parsed.hostname
-                if parsed.username and "username" not in storage_options:
-                    storage_options["username"] = parsed.username
-                if parsed.password and "password" not in storage_options:
-                    storage_options["password"] = parsed.password
-                if parsed.port and "port" not in storage_options:
-                    storage_options["port"] = parsed.port
+                host = parsed.hostname
+                username = parsed.username or str(storage_options.get("username", "")).strip() or None
+                password = parsed.password or str(storage_options.get("password", "")).strip() or None
+                port = parsed.port or storage_options.get("port")
+                key_filename = str(storage_options.get("key_filename", "")).strip() or None
+                remote_python = str(storage_options.get("remote_python", "")).strip() or "python3"
+                login_shell_raw = storage_options.get("login_shell")
+                if isinstance(login_shell_raw, str):
+                    login_shell = login_shell_raw.strip().lower() in {"1", "true", "yes", "on"}
+                else:
+                    login_shell = bool(login_shell_raw)
 
                 self.root_path = parsed.path or "."
+                
+                # Bootstrap p5rem session with the hostname and credentials
+                # p5rem handles its own caching via diskcache when use_cache=True
+                logger.info(
+                    "Bootstrapping p5rem session to %s:%s (use_cache=%s, remote_python=%s, login_shell=%s)",
+                    host,
+                    port or 22,
+                    self.use_cache,
+                    remote_python,
+                    login_shell,
+                )
+                try:
+                    session = bootstrap_session(
+                        host=host,
+                        username=username,
+                        password=password,
+                        port=port,
+                        key_filename=key_filename,
+                        remote_python=remote_python,
+                        login_shell=login_shell,
+                        use_cache=self.use_cache,
+                        timeout=10.0,
+                    )
 
-                if storage_options.get("proxy_jump"):
-                    base_fs = _create_sftp_via_jump(storage_options)
-                else:
-                    base_fs = fsspec.filesystem("sftp", **storage_options)
+                    # Validate the remote server immediately so startup failures
+                    # (e.g. missing deps/remote interpreter issues) surface as
+                    # clear connection errors instead of deferred EOF during ls().
+                    session.heartbeat()
+                    
+                    # Configure p5rem's cache to use a separate directory from fsspec cache
+                    if self.use_cache and P5RemCache is not None and cache_dir:
+                        p5rem_cache_dir = str(Path(cache_dir) / "p5rem")
+                        Path(p5rem_cache_dir).mkdir(parents=True, exist_ok=True)
+                        custom_cache = P5RemCache(directory=p5rem_cache_dir)
+                        session._cache = custom_cache
+                        logger.info("Configured p5rem cache in dedicated directory: %s", p5rem_cache_dir)
+                    
+                    base_fs = P5RemFilesystem(session)
+                except Exception as exc:
+                    detail = _p5rem_startup_error_details(locals().get("session"), exc)
+                    raise RuntimeError(f"Failed to bootstrap p5rem session to {host}: {detail}") from exc
 
             case _:
                 raise NotImplementedError(f"Unsupported URL scheme {scheme!r} in URL {url!r}; expected one of {', '.join(valid_schemes)}")
 
-        if self.use_cache:
+        # Apply CachingFileSystem wrapping only for non-p5rem filesystems
+        # P5RemFilesystem has its own caching via diskcache in separate directory
+        is_p5rem = isinstance(base_fs, P5RemFilesystem)
+        
+        if self.use_cache and not is_p5rem:
+            # Use dedicated fsspec subdirectory for clarity
+            fsspec_cache_dir = str(Path(cache_dir) / "fsspec")
+            Path(fsspec_cache_dir).mkdir(parents=True, exist_ok=True)
             wrapped_fs = CachingFileSystem(
                 fs=base_fs,
-                cache_storage=cache_dir,
+                cache_storage=fsspec_cache_dir,
                 blocksize=block_size,
                 check_files=False,
             )
-            logger.info("Caching enabled using cache dir: %s with blocksize=%s", cache_dir, block_size)
+            logger.info("Caching enabled for fsspec filesystems in: %s (blocksize=%s)", fsspec_cache_dir, block_size)
         else:
             wrapped_fs = base_fs
-            logger.info("Caching disabled; using base filesystem directly")
+            if not is_p5rem:
+                logger.info("Caching disabled; using base filesystem directly")
+            elif self.use_cache:
+                logger.info("p5rem caching enabled in dedicated cache directory")
+            else:
+                logger.info("Caching disabled in p5rem session")
 
         self.fs = ShimmyFS(
             wrapped_fs,

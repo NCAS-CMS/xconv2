@@ -223,3 +223,47 @@ def test_create_filesystem_s3_accepts_schemeless_endpoint_with_bucket_path() -> 
 
     fs = create_filesystem(spec, cache=None)
     assert fs is not None
+
+
+def test_build_remote_filesystem_spec_ssh_includes_remote_python_and_login_shell() -> None:
+    spec = build_remote_filesystem_spec(
+        {
+            "protocol": "SSH",
+            "remote": {
+                "alias": "my-host",
+                "details": {
+                    "hostname": "example.org",
+                    "user": "alice",
+                    "remote_python": "conda run -n work26 python",
+                    "login_shell": "true",
+                },
+            },
+        }
+    )
+
+    assert spec.protocol == "sftp"
+    assert spec.storage_options["host"] == "example.org"
+    assert spec.storage_options["username"] == "alice"
+    assert spec.storage_options["remote_python"] == "conda run -n work26 python"
+    assert spec.storage_options["login_shell"] is True
+
+
+def test_build_remote_filesystem_spec_ssh_reads_remote_python_from_add_new_shape() -> None:
+    spec = build_remote_filesystem_spec(
+        {
+            "protocol": "SSH",
+            "remote": {
+                "alias": "my-host",
+                "hostname": "example.org",
+                "user": "alice",
+                "remote_python": "conda run -p /opt/miniforge3/envs/work26 --no-capture-output python",
+                "login_shell": False,
+            },
+        }
+    )
+
+    assert spec.protocol == "sftp"
+    assert spec.storage_options["host"] == "example.org"
+    assert spec.storage_options["username"] == "alice"
+    assert spec.storage_options["remote_python"] == "conda run -p /opt/miniforge3/envs/work26 --no-capture-output python"
+    assert spec.storage_options["login_shell"] is False

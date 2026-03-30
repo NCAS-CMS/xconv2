@@ -484,6 +484,15 @@ def build_remote_filesystem_spec(config: dict[str, Any]) -> RemoteFilesystemSpec
         proxyjump_password = _value_from_keys(details, "proxyjump_password") or _value_from_keys(remote, "proxyjump_password")
         proxyjump_user = _value_from_keys(details, "proxyjump_user") or _value_from_keys(remote, "proxyjump_user")
         identity_file = _value_from_keys(details, "identityfile", "identity_file") or _value_from_keys(remote, "identity_file")
+        remote_python = (
+            _value_from_keys(details, "remote_python", "python", "python_command")
+            or _value_from_keys(remote, "remote_python", "python", "python_command")
+        )
+        login_shell_value: Any = None
+        if "login_shell" in details:
+            login_shell_value = details.get("login_shell")
+        elif "login_shell" in remote:
+            login_shell_value = remote.get("login_shell")
         if not hostname:
             raise ValueError("SSH configuration is missing a hostname")
 
@@ -500,6 +509,13 @@ def build_remote_filesystem_spec(config: dict[str, Any]) -> RemoteFilesystemSpec
             storage_options["proxyjump_username"] = proxyjump_user
         if identity_file:
             storage_options["key_filename"] = str(Path(identity_file).expanduser())
+        if remote_python:
+            storage_options["remote_python"] = remote_python
+        if login_shell_value is not None:
+            if isinstance(login_shell_value, str):
+                storage_options["login_shell"] = login_shell_value.strip().lower() in {"1", "true", "yes", "on"}
+            else:
+                storage_options["login_shell"] = bool(login_shell_value)
 
         return RemoteFilesystemSpec(
             protocol="sftp",

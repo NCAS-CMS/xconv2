@@ -174,3 +174,70 @@ def test_open_dialog_uses_https_locations() -> None:
         "alpha": {"url": "https://alpha.example.org"},
         "beta": {"url": "https://beta.example.org"},
     }
+
+
+def test_remote_python_options_from_discovered_envs() -> None:
+    options = RemoteConfigurationDialog._remote_python_options_from_envs(
+        {
+            "base": "/opt/miniforge3",
+            "work26": "/opt/miniforge3/envs/work26",
+        }
+    )
+
+    assert options["python3"] == "python3"
+    assert options["base"] == "conda run -p /opt/miniforge3 --no-capture-output python"
+    assert options["work26"] == "conda run -p /opt/miniforge3/envs/work26 --no-capture-output python"
+
+
+def test_coerce_bool_handles_common_string_values() -> None:
+    assert RemoteConfigurationDialog._coerce_bool(True) is True
+    assert RemoteConfigurationDialog._coerce_bool(False) is False
+    assert RemoteConfigurationDialog._coerce_bool("true") is True
+    assert RemoteConfigurationDialog._coerce_bool("yes") is True
+    assert RemoteConfigurationDialog._coerce_bool("1") is True
+    assert RemoteConfigurationDialog._coerce_bool("false") is False
+    assert RemoteConfigurationDialog._coerce_bool("no") is False
+    assert RemoteConfigurationDialog._coerce_bool("0") is False
+    assert RemoteConfigurationDialog._coerce_bool("", default=True) is True
+
+
+def test_extract_ssh_runtime_preferences_normalizes_mapping() -> None:
+    prefs = RemoteConfigurationDialog._extract_ssh_runtime_preferences(
+        {
+            "ssh_runtime_preferences": {
+                "alpha": {
+                    "remote_python": "conda run -n work26 python",
+                    "remote_python_options": {"python3": "python3", "work26": "conda run -n work26 python"},
+                    "login_shell": "true",
+                },
+                "": {"remote_python": "ignored"},
+            }
+        }
+    )
+
+    assert "alpha" in prefs
+    assert prefs["alpha"]["remote_python"] == "conda run -n work26 python"
+    assert prefs["alpha"]["remote_python_options"]["work26"] == "conda run -n work26 python"
+    assert prefs["alpha"]["login_shell"] is True
+    assert "" not in prefs
+
+
+def test_apply_ssh_runtime_preferences_overrides_host_details() -> None:
+    merged = RemoteConfigurationDialog._apply_ssh_runtime_preferences(
+        {
+            "alpha": {
+                "hostname": "alpha.example.org",
+                "user": "alice",
+            }
+        },
+        {
+            "alpha": {
+                "remote_python": "conda run -n work26 python",
+                "login_shell": True,
+            }
+        },
+    )
+
+    assert merged["alpha"]["hostname"] == "alpha.example.org"
+    assert merged["alpha"]["remote_python"] == "conda run -n work26 python"
+    assert merged["alpha"]["login_shell"] is True

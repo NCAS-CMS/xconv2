@@ -798,6 +798,30 @@ class RemoteLoginLogDialog(QDialog):
         self.close_button.setFocus()
 
 
+def _show_copyable_error_dialog(parent: QWidget | None, title: str, message: str) -> None:
+    """Show an error dialog with selectable text and an explicit copy action."""
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(title)
+    dialog.resize(760, 280)
+
+    layout = QVBoxLayout(dialog)
+    layout.addWidget(QLabel("Details:"))
+
+    text = QPlainTextEdit()
+    text.setReadOnly(True)
+    text.setPlainText(str(message))
+    text.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+    layout.addWidget(text, 1)
+
+    buttons = QDialogButtonBox(QDialogButtonBox.Close)
+    copy_button = buttons.addButton("Copy", QDialogButtonBox.ActionRole)
+    copy_button.clicked.connect(lambda: QApplication.clipboard().setText(text.toPlainText()))
+    buttons.rejected.connect(dialog.reject)
+    layout.addWidget(buttons)
+
+    dialog.exec()
+
+
 class RemoteFileNavigatorDialog(QDialog):
     """Lazy-loaded tree browser backed by an fsspec filesystem."""
 
@@ -886,7 +910,7 @@ class RemoteFileNavigatorDialog(QDialog):
         try:
             entries = self._list_entries(self._spec.root_path)
         except Exception as exc:  # pragma: no cover - UI error path
-            QMessageBox.critical(self, "Remote navigation failed", str(exc))
+            _show_copyable_error_dialog(self, "Remote navigation failed", str(exc))
             return
 
         self.tree.clear()
@@ -1035,7 +1059,7 @@ class RemoteFileNavigatorDialog(QDialog):
         try:
             all_entries = self._list_entries_unfiltered(str(data.get("path", "")))
         except Exception as exc:  # pragma: no cover - UI error path
-            QMessageBox.warning(self, "Listing failed", str(exc))
+            _show_copyable_error_dialog(self, "Listing failed", str(exc))
             return
 
         if directory_contains_zarr_metadata(all_entries):
@@ -1119,7 +1143,7 @@ class RemoteFileNavigatorDialog(QDialog):
             try:
                 spec = build_remote_filesystem_spec(config)
             except Exception as exc:
-                QMessageBox.critical(parent, "Remote configuration invalid", str(exc))
+                _show_copyable_error_dialog(parent, "Remote configuration invalid", str(exc))
                 return {}, False
 
         log_dialog = RemoteLoginLogDialog(parent, spec.display_name)

@@ -150,7 +150,7 @@ def test_factory_wraps_with_caching_filesystem(monkeypatch: pytest.MonkeyPatch) 
 
     assert len(cache_calls) == 1
     assert cache_calls[0]["fs"] is base
-    assert cache_calls[0]["cache_storage"] == "/tmp/cache-dir"
+    assert cache_calls[0]["cache_storage"] == "/tmp/cache-dir/fsspec"
     assert cache_calls[0]["check_files"] is False
     assert factory.fs.fs is wrapped
 
@@ -207,15 +207,81 @@ def test_factory_s3_localhost_endpoint_with_explicit_endpoint_url(monkeypatch: p
     assert opts["client_kwargs"]["endpoint_url"] == "http://localhost:50686"
 
 
-def test_factory_ssh_without_proxy_uses_sftp(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[str, dict]] = []
-    base = _DummyFS()
+def test_factory_ssh_uses_p5rem_bootstrap(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    bootstrap_calls: list[dict] = []
 
-    def _fake_filesystem(protocol: str, **kwargs):
-        calls.append((protocol, dict(kwargs)))
-        return base
+    class _FakeSession:
+        def __init__(self) -> None:
+            self._cache = None
+            self.heartbeat_calls = 0
 
-    monkeypatch.setattr(remote_fs.fsspec, "filesystem", _fake_filesystem)
+        def heartbeat(self):
+            self.heartbeat_calls += 1
+            return {"type": "HEARTBEAT"}
+
+    fake_session = _FakeSession()
+
+    def _fake_bootstrap_session(**kwargs):
+        bootstrap_calls.append(dict(kwargs))
+        return fake_session
+
+    class _FakeP5RemCache:
+        def __init__(self, directory: str):
+            self.directory = directory
+
+    def _should_not_wrap(**kwargs):
+        raise AssertionError("CachingFileSystem should not wrap p5rem filesystems")
+
+    monkeypatch.setattr(remote_fs, "bootstrap_session", _fake_bootstrap_session)
+    monkeypatch.setattr(remote_fs, "P5RemCache", _FakeP5RemCache)
+    monkeypatch.setattr(remote_fs, "CachingFileSystem", _should_not_wrap)
+
+    cache_dir = tmp_path / "cache"
+    factory = remote_fs.RemoteFileSystemFactory(
+        url="ssh://alice@myhost:2222/home/alice/data.nc",
+        credentials={"password": "pw"},
+        cache_dir=str(cache_dir),
+    )
+
+    assert factory.root_path == "/home/alice/data.nc"
+    assert len(bootstrap_calls) == 1
+    call = bootstrap_calls[0]
+    assert call["host"] == "myhost"
+    assert call["username"] == "alice"
+    assert call["password"] == "pw"
+    assert call["port"] == 2222
+    assert call["use_cache"] is True
+
+    assert isinstance(factory.fs.fs, remote_fs.P5RemFilesystem)
+    assert isinstance(fake_session._cache, _FakeP5RemCache)
+    assert fake_session._cache.directory == str(cache_dir / "p5rem")
+    assert fake_session.heartbeat_calls == 1
+
+
+def test_factory_ssh_without_cache_does_not_set_p5rem_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    bootstrap_calls: list[dict] = []
+
+    class _FakeSession:
+        def __init__(self) -> None:
+            self._cache = None
+            self.heartbeat_calls = 0
+
+        def heartbeat(self):
+            self.heartbeat_calls += 1
+            return {"type": "HEARTBEAT"}
+
+    fake_session = _FakeSession()
+
+    def _fake_bootstrap_session(**kwargs):
+        bootstrap_calls.append(dict(kwargs))
+        return fake_session
+
+    def _should_not_wrap(**kwargs):
+        raise AssertionError("CachingFileSystem should not wrap p5rem filesystems")
+
+    monkeypatch.setattr(remote_fs, "bootstrap_session", _fake_bootstrap_session)
+    monkeypatch.setattr(remote_fs, "P5RemCache", None)
+    monkeypatch.setattr(remote_fs, "CachingFileSystem", _should_not_wrap)
 
     factory = remote_fs.RemoteFileSystemFactory(
         url="ssh://alice@myhost:2222/home/alice/data.nc",
@@ -224,37 +290,115 @@ def test_factory_ssh_without_proxy_uses_sftp(monkeypatch: pytest.MonkeyPatch) ->
     )
 
     assert factory.root_path == "/home/alice/data.nc"
-    assert len(calls) == 1
-    protocol, options = calls[0]
-    assert protocol == "sftp"
-    assert options["host"] == "myhost"
-    assert options["username"] == "alice"
-    assert options["password"] == "pw"
-    assert options["port"] == 2222
+    assert len(bootstrap_calls) == 1
+    call = bootstrap_calls[0]
+    assert call["host"] == "myhost"
+    assert call["username"] == "alice"
+    assert call["password"] == "pw"
+    assert call["port"] == 2222
+    assert call["use_cache"] is False
+
+    assert isinstance(factory.fs.fs, remote_fs.P5RemFilesystem)
+    assert fake_session._cache is None
+    assert fake_session.heartbeat_calls == 1
 
 
-def test_factory_ssh_proxyjump_routes_through_jump_helper(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[dict] = []
-    base = _DummyFS()
+def test_factory_ssh_passes_remote_python_and_login_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootstrap_calls: list[dict] = []
 
-    def _fake_create_sftp_via_jump(storage_options: dict):
-        calls.append(dict(storage_options))
-        return base
+    class _FakeSession:
+        def heartbeat(self):
+            return {"type": "HEARTBEAT"}
 
-    monkeypatch.setattr(remote_fs, "_create_sftp_via_jump", _fake_create_sftp_via_jump)
+    def _fake_bootstrap_session(**kwargs):
+        bootstrap_calls.append(dict(kwargs))
+        return _FakeSession()
 
-    factory = remote_fs.RemoteFileSystemFactory(
-        url="ssh://bob@target.example/data.nc",
-        credentials={"proxyjump": "jumphost", "password": "pw"},
+    monkeypatch.setattr(remote_fs, "bootstrap_session", _fake_bootstrap_session)
+
+    remote_fs.RemoteFileSystemFactory(
+        url="ssh://alice@myhost/home/alice/data.nc",
+        credentials={
+            "password": "pw",
+            "remote_python": "conda run -n work26 python",
+            "login_shell": "true",
+        },
         cache_dir=None,
     )
 
-    assert factory.root_path == "/data.nc"
-    assert len(calls) == 1
-    options = calls[0]
-    assert options["proxy_jump"] == "jumphost"
-    assert options["host"] == "target.example"
-    assert options["username"] == "bob"
+    assert len(bootstrap_calls) == 1
+    call = bootstrap_calls[0]
+    assert call["remote_python"] == "conda run -n work26 python"
+    assert call["login_shell"] is True
+
+
+def test_factory_ssh_reports_startup_failure_with_remote_exit_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeStderr:
+        def read(self):
+            return b"Traceback: ModuleNotFoundError: No module named 'cbor2'"
+
+    class _FakeProc:
+        def poll(self):
+            return 1
+
+        stderr = _FakeStderr()
+
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.process = _FakeProc()
+
+        def heartbeat(self):
+            raise EOFError("unexpected end of stream while reading 4 bytes")
+
+    def _fake_bootstrap_session(**kwargs):
+        return _FakeSession()
+
+    monkeypatch.setattr(remote_fs, "bootstrap_session", _fake_bootstrap_session)
+
+    with pytest.raises(RuntimeError, match="remote server exited with status 1"):
+        remote_fs.RemoteFileSystemFactory(
+            url="ssh://alice@myhost:2222/home/alice/data.nc",
+            credentials={"password": "pw"},
+            cache_dir=None,
+        )
+
+
+def test_p5rem_filesystem_ls_normalizes_string_entries_with_directory_types() -> None:
+    class _FakeSession:
+        def list(self, path: str):
+            assert path == "/data"
+            return ["folder", "file.nc"]
+
+        def stat(self, path: str):
+            if path == "/data/folder":
+                return {"is_dir": True, "size": 0}
+            if path == "/data/file.nc":
+                return {"is_dir": False, "size": 123}
+            raise FileNotFoundError(path)
+
+    fs = remote_fs.P5RemFilesystem(_FakeSession())
+    listing = fs.ls("/data", detail=True)
+
+    assert listing == [
+        {"name": "/data/folder", "size": 0, "type": "directory"},
+        {"name": "/data/file.nc", "size": 123, "type": "file"},
+    ]
+
+
+def test_p5rem_filesystem_ls_detail_false_returns_full_paths_for_string_entries() -> None:
+    class _FakeSession:
+        def list(self, path: str):
+            assert path == "/data"
+            return ["folder", "file.nc"]
+
+    fs = remote_fs.P5RemFilesystem(_FakeSession())
+    names = fs.ls("/data", detail=False)
+
+    assert names == ["/data/folder", "/data/file.nc"]
 
 
 def test_factory_rejects_invalid_scheme() -> None:

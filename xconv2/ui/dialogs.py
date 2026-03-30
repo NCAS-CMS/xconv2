@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shlex
 from typing import Any
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFileDialog,
     QComboBox,
     QDialog,
@@ -24,6 +26,11 @@ from PySide6.QtWidgets import (
 )
 
 from xconv2.aaa.aaa_config import get_locations
+
+try:
+    from p5rem import discover_remote_conda_envs
+except ImportError:
+    discover_remote_conda_envs = None
 
 
 class InputDialogCustom(QDialog):
@@ -227,8 +234,13 @@ class RemoteConfigurationDialog(QDialog):
         self.resize(760, 620)
 
         self._s3_locations = self._load_s3_locations()
-        self._ssh_hosts = self._load_ssh_hosts()
+        self._ssh_runtime_preferences = self._extract_ssh_runtime_preferences(state)
+        self._ssh_hosts = self._apply_ssh_runtime_preferences(
+            self._load_ssh_hosts(),
+            self._ssh_runtime_preferences,
+        )
         self._http_locations = self._load_http_locations(state)
+        self._ssh_add_new_remote_python_options: dict[str, str] = {"python3": "python3"}
 
         layout = QVBoxLayout(self)
 
@@ -402,6 +414,60 @@ class RemoteConfigurationDialog(QDialog):
     def _load_ssh_hosts(cls) -> dict[str, dict[str, str]]:
         """Load existing SSH host abbreviations from the user's ssh config."""
         return cls._parse_ssh_config(Path.home() / ".ssh/config")
+
+    @staticmethod
+    def _extract_ssh_runtime_preferences(state: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+        """Extract persisted per-alias SSH runtime preferences from dialog state."""
+        if not isinstance(state, dict):
+            return {}
+        raw = state.get("ssh_runtime_preferences")
+        if not isinstance(raw, dict):
+            return {}
+
+        cleaned: dict[str, dict[str, Any]] = {}
+        for alias, prefs in raw.items():
+            if not isinstance(alias, str) or not alias.strip() or not isinstance(prefs, dict):
+                continue
+            entry: dict[str, Any] = {}
+            remote_python = prefs.get("remote_python")
+            if isinstance(remote_python, str) and remote_python.strip():
+                entry["remote_python"] = remote_python.strip()
+            options = prefs.get("remote_python_options")
+            if isinstance(options, dict):
+                option_map = {
+                    str(key): str(value)
+                    for key, value in options.items()
+                    if str(key).strip() and str(value).strip()
+                }
+                if option_map:
+                    entry["remote_python_options"] = option_map
+            login_shell = prefs.get("login_shell")
+            if isinstance(login_shell, bool):
+                entry["login_shell"] = login_shell
+            elif isinstance(login_shell, str):
+                entry["login_shell"] = login_shell.strip().lower() in {"1", "true", "yes", "on"}
+            if entry:
+                cleaned[alias.strip()] = entry
+        return cleaned
+
+    @staticmethod
+    def _apply_ssh_runtime_preferences(
+        hosts: dict[str, dict[str, Any]],
+        runtime_prefs: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        """Merge persisted runtime SSH preferences into loaded SSH host entries."""
+        merged: dict[str, dict[str, Any]] = {
+            alias: dict(details)
+            for alias, details in hosts.items()
+            if isinstance(details, dict)
+        }
+        for alias, prefs in runtime_prefs.items():
+            if not isinstance(alias, str) or not alias.strip() or not isinstance(prefs, dict):
+                continue
+            details = dict(merged.get(alias, {}))
+            details.update(prefs)
+            merged[alias] = details
+        return dict(sorted(merged.items()))
 
     @staticmethod
     def _render_ssh_host_block(
@@ -740,8 +806,186 @@ class RemoteConfigurationDialog(QDialog):
         new_layout.addRow("ProxyJump (optional):", self.ssh_proxy_jump_edit)
         layout.addWidget(self.ssh_new_group)
 
+        # Runtime-only SSH execution options for p5rem bootstrap.
+        self.ssh_runtime_group = QGroupBox("Remote Python")
+        runtime_layout = QFormLayout(self.ssh_runtime_group)
+        remote_python_row = QHBoxLayout()
+        self.ssh_remote_python_combo = QComboBox()
+        self.ssh_remote_python_combo.setEditable(False)
+        self.ssh_remote_python_combo.addItem("python3", "python3")
+        self.ssh_remote_python_combo.setMinimumWidth(
+            self.ssh_remote_python_combo.fontMetrics().horizontalAdvance("M" * self._WIDE_FIELD_CHARS)
+        )
+        discover_button = QPushButton("Discover Envs...")
+        discover_button.clicked.connect(self._discover_ssh_remote_python)
+        remote_python_row.addWidget(self.ssh_remote_python_combo, 1)
+        remote_python_row.addWidget(discover_button)
+        remote_python_widget = QWidget()
+        remote_python_widget.setLayout(remote_python_row)
+
+        self.ssh_login_shell_check = QCheckBox("Use login shell (bash -lc)")
+        self.ssh_login_shell_check.setChecked(False)
+
+        runtime_layout.addRow("Remote Python:", remote_python_widget)
+        runtime_layout.addRow("", self.ssh_login_shell_check)
+        layout.addWidget(self.ssh_runtime_group)
+
         layout.addStretch(1)
         return tab
+
+    @staticmethod
+    def _coerce_bool(value: object, default: bool = False) -> bool:
+        """Convert loose config values to a strict bool."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes", "on"}:
+                return True
+            if lowered in {"0", "false", "no", "off"}:
+                return False
+        return default
+
+    @staticmethod
+    def _remote_python_options_from_envs(envs: dict[str, str]) -> dict[str, str]:
+        """Build {label: bootstrap_command} options from discovered conda env paths."""
+        options: dict[str, str] = {"python3": "python3"}
+        for env_name, env_path in sorted(envs.items()):
+            label = str(env_name).strip()
+            path = str(env_path).strip()
+            if not label or not path:
+                continue
+            options[label] = f"conda run -p {shlex.quote(path)} --no-capture-output python"
+        return options
+
+    def _current_ssh_remote_python_command(self) -> str:
+        """Return the selected command payload for the remote python combo."""
+        data = self.ssh_remote_python_combo.currentData()
+        if isinstance(data, str) and data.strip():
+            return data.strip()
+        text = self.ssh_remote_python_combo.currentText().strip()
+        return text or "python3"
+
+    def _set_ssh_remote_python_options(self, options: dict[str, str], *, preferred_command: str | None = None) -> None:
+        """Populate remote python combo from {label: command} mapping."""
+        current_command = self._current_ssh_remote_python_command()
+
+        cleaned: dict[str, str] = {}
+        for label, command in options.items():
+            if not isinstance(label, str) or not isinstance(command, str):
+                continue
+            label_text = label.strip()
+            command_text = command.strip()
+            if label_text and command_text:
+                cleaned[label_text] = command_text
+
+        if not cleaned:
+            cleaned = {"python3": "python3"}
+
+        selected_command = (preferred_command or "").strip() or current_command
+        if selected_command and selected_command not in cleaned.values():
+            cleaned[f"custom: {selected_command}"] = selected_command
+
+        self.ssh_remote_python_combo.clear()
+        for label, command in cleaned.items():
+            self.ssh_remote_python_combo.addItem(label, command)
+
+        target = selected_command if selected_command else "python3"
+        matched_index = -1
+        for index in range(self.ssh_remote_python_combo.count()):
+            value = self.ssh_remote_python_combo.itemData(index)
+            if isinstance(value, str) and value == target:
+                matched_index = index
+                break
+        self.ssh_remote_python_combo.setCurrentIndex(matched_index if matched_index >= 0 else 0)
+
+    def _current_ssh_discovery_params(self) -> tuple[str, str, str | None, str | None]:
+        """Return host-or-alias/user/key_filename/password for SSH env discovery."""
+        mode = self.ssh_mode_combo.currentText()
+        if mode == "Add new":
+            host = self.ssh_hostname_edit.text().strip()
+            user = self.ssh_user_edit.text().strip()
+            key = self.ssh_identity_file_edit.text().strip() or None
+            if key:
+                key = str(Path(key).expanduser())
+            return host, user, key, None
+
+        alias = self.ssh_existing_combo.currentText()
+        details = self._ssh_hosts.get(alias, {})
+        # Use alias to let SSH config resolution supply hostname/user/key defaults.
+        host = alias.strip() or str(details.get("hostname", "")).strip()
+        user = str(details.get("user", "")).strip()
+        key = str(details.get("identityfile", "")).strip() or None
+        if key:
+            key = str(Path(key).expanduser())
+        password = str(details.get("password", "")).strip() or None
+        return host, user, key, password
+
+    def _discover_ssh_remote_python(self) -> None:
+        """Populate remote python commands by discovering remote conda environments."""
+        if discover_remote_conda_envs is None:
+            QMessageBox.warning(
+                self,
+                "Discovery unavailable",
+                "p5rem with discover_remote_conda_envs is required for remote environment discovery.",
+            )
+            return
+
+        host, user, key_filename, password = self._current_ssh_discovery_params()
+        if not host or not user:
+            QMessageBox.warning(
+                self,
+                "Missing SSH details",
+                "Hostname and user are required to discover remote Python environments.",
+            )
+            return
+
+        try:
+            envs = discover_remote_conda_envs(
+                host=host,
+                username=user,
+                password=password,
+                key_filename=key_filename,
+                ssh_config_path=str(Path.home() / ".ssh" / "config"),
+                login_shell=True,
+                timeout=10.0,
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Discovery failed",
+                f"Could not discover remote environments on {host}: {exc}",
+            )
+            return
+
+        options_map = self._remote_python_options_from_envs(envs)
+        previous = self._current_ssh_remote_python_command()
+
+        preferred = None
+        if "work26" in envs:
+            preferred = f"conda run -p {shlex.quote(str(envs['work26']))} --no-capture-output python"
+
+        mode = self.ssh_mode_combo.currentText()
+        if mode == "Add new":
+            self._ssh_add_new_remote_python_options = dict(options_map)
+        else:
+            alias = self.ssh_existing_combo.currentText()
+            details = self._ssh_hosts.get(alias)
+            if isinstance(details, dict):
+                details["remote_python_options"] = dict(options_map)
+            prefs = dict(self._ssh_runtime_preferences.get(alias, {}))
+            prefs["remote_python_options"] = dict(options_map)
+            self._ssh_runtime_preferences[alias] = prefs
+
+        selected = preferred if preferred in options_map.values() else previous
+        self._set_ssh_remote_python_options(options_map, preferred_command=selected)
+
+        self.ssh_login_shell_check.setChecked(True)
+        QMessageBox.information(
+            self,
+            "Discovery complete",
+            f"Found {len(envs)} remote conda environment(s). Remote Python options have been updated.",
+        )
 
     def _update_ssh_mode(self) -> None:
         """Show the relevant SSH subframe for the selected configuration mode."""
@@ -754,6 +998,8 @@ class RemoteConfigurationDialog(QDialog):
             self.ssh_user_edit.clear()
             self.ssh_identity_file_edit.clear()
             self.ssh_proxy_jump_edit.clear()
+            self._set_ssh_remote_python_options(self._ssh_add_new_remote_python_options)
+            self.ssh_login_shell_check.setChecked(False)
 
     def _update_ssh_selected_details(self) -> None:
         """Refresh preview fields for an existing SSH host alias."""
@@ -763,6 +1009,17 @@ class RemoteConfigurationDialog(QDialog):
         self.ssh_existing_user.setText(str(details.get("user", "")))
         self.ssh_existing_identity.setText(str(details.get("identityfile", "")))
         self.ssh_existing_proxyjump.setText(str(details.get("proxyjump", "")))
+        options = details.get("remote_python_options")
+        if isinstance(options, dict):
+            option_map = {str(key): str(value) for key, value in options.items()}
+        elif isinstance(options, list):
+            # Backward compatibility for older state shape.
+            option_map = {str(item): str(item) for item in options if str(item).strip()}
+        else:
+            option_map = {"python3": "python3"}
+        preferred = str(details.get("remote_python", "python3"))
+        self._set_ssh_remote_python_options(option_map, preferred_command=preferred)
+        self.ssh_login_shell_check.setChecked(self._coerce_bool(details.get("login_shell"), default=False))
 
     def _select_saved_s3_alias(self, alias: str, details: dict[str, Any]) -> None:
         """Switch UI state to an existing S3 selection after saving a new alias."""
@@ -776,9 +1033,14 @@ class RemoteConfigurationDialog(QDialog):
         self._update_s3_selected_details()
         self._update_s3_mode()
 
-    def _select_saved_ssh_alias(self, alias: str, details: dict[str, str]) -> None:
+    def _select_saved_ssh_alias(self, alias: str, details: dict[str, Any]) -> None:
         """Switch UI state to an existing SSH selection after saving a new alias."""
         self._ssh_hosts[alias] = details
+        self._ssh_runtime_preferences[alias] = {
+            "remote_python": str(details.get("remote_python", "python3")),
+            "remote_python_options": dict(details.get("remote_python_options", {"python3": "python3"})),
+            "login_shell": bool(details.get("login_shell", False)),
+        }
         aliases = list(self._ssh_hosts.keys())
         self._set_combo_items(self.ssh_existing_combo, aliases, "No ssh hosts found")
         index = self.ssh_existing_combo.findText(alias)
@@ -899,13 +1161,25 @@ class RemoteConfigurationDialog(QDialog):
                     "user": self.ssh_user_edit.text().strip(),
                     "identity_file": self.ssh_identity_file_edit.text().strip(),
                     "proxyjump": self.ssh_proxy_jump_edit.text().strip(),
+                    "remote_python": self._current_ssh_remote_python_command(),
+                    "remote_python_options": dict(self._ssh_add_new_remote_python_options),
+                    "login_shell": bool(self.ssh_login_shell_check.isChecked()),
                 }
             else:
                 alias = self.ssh_existing_combo.currentText()
+                details = dict(self._ssh_hosts.get(alias, {}))
+                details["remote_python"] = self._current_ssh_remote_python_command()
+                options = details.get("remote_python_options")
+                if not isinstance(options, dict):
+                    if isinstance(options, list):
+                        details["remote_python_options"] = {str(item): str(item) for item in options if str(item).strip()}
+                    else:
+                        details["remote_python_options"] = {"python3": "python3"}
+                details["login_shell"] = bool(self.ssh_login_shell_check.isChecked())
                 config["remote"] = {
                     "mode": mode,
                     "alias": alias,
-                    "details": self._ssh_hosts.get(alias, {}),
+                    "details": details,
                 }
         elif protocol == "HTTPS":
             mode = self.http_mode_combo.currentText()
@@ -935,6 +1209,14 @@ class RemoteConfigurationDialog(QDialog):
 
     def state(self) -> dict[str, Any]:
         """Return dialog state for session persistence."""
+        selected_alias = self.ssh_existing_combo.currentText().strip()
+        if selected_alias:
+            self._ssh_runtime_preferences[selected_alias] = {
+                "remote_python": self._current_ssh_remote_python_command(),
+                "remote_python_options": dict(self._ssh_hosts.get(selected_alias, {}).get("remote_python_options", {"python3": "python3"})),
+                "login_shell": bool(self.ssh_login_shell_check.isChecked()),
+            }
+
         return {
             "protocol_index": self.protocol_tabs.currentIndex(),
             "s3_mode": self.s3_mode_combo.currentText(),
@@ -951,6 +1233,10 @@ class RemoteConfigurationDialog(QDialog):
             "ssh_user": self.ssh_user_edit.text().strip(),
             "ssh_identity_file": self.ssh_identity_file_edit.text().strip(),
             "ssh_proxy_jump": self.ssh_proxy_jump_edit.text().strip(),
+            "ssh_remote_python": self._current_ssh_remote_python_command(),
+            "ssh_remote_python_options": dict(self._ssh_add_new_remote_python_options),
+            "ssh_login_shell": bool(self.ssh_login_shell_check.isChecked()),
+            "ssh_runtime_preferences": dict(self._ssh_runtime_preferences),
             "https_mode": self.http_mode_combo.currentText(),
             "https_existing_alias": self.http_existing_combo.currentText().strip(),
             "https_alias": self.http_alias_edit.text().strip(),
@@ -1022,6 +1308,26 @@ class RemoteConfigurationDialog(QDialog):
             self.ssh_identity_file_edit.setText(str(state["ssh_identity_file"]))
         if isinstance(state.get("ssh_proxy_jump"), str):
             self.ssh_proxy_jump_edit.setText(str(state["ssh_proxy_jump"]))
+        options = state.get("ssh_remote_python_options")
+        if isinstance(options, dict):
+            self._ssh_add_new_remote_python_options = {
+                str(key): str(value)
+                for key, value in options.items()
+                if str(key).strip() and str(value).strip()
+            }
+            if not self._ssh_add_new_remote_python_options:
+                self._ssh_add_new_remote_python_options = {"python3": "python3"}
+        elif isinstance(options, list):
+            # Backward compatibility for older saved state shape.
+            converted = {str(item): str(item) for item in options if str(item).strip()}
+            self._ssh_add_new_remote_python_options = converted or {"python3": "python3"}
+        if isinstance(state.get("ssh_remote_python"), str):
+            self._set_ssh_remote_python_options(
+                self._ssh_add_new_remote_python_options,
+                preferred_command=str(state["ssh_remote_python"]),
+            )
+        if "ssh_login_shell" in state:
+            self.ssh_login_shell_check.setChecked(self._coerce_bool(state.get("ssh_login_shell"), default=False))
 
         https_mode = state.get("https_mode")
         if isinstance(https_mode, str):
@@ -1157,6 +1463,9 @@ class RemoteConfigurationDialog(QDialog):
                 "user": self.ssh_user_edit.text().strip(),
                 "identityfile": self.ssh_identity_file_edit.text().strip(),
                 "proxyjump": self.ssh_proxy_jump_edit.text().strip(),
+                "remote_python": self._current_ssh_remote_python_command(),
+                "remote_python_options": dict(self._ssh_add_new_remote_python_options),
+                "login_shell": bool(self.ssh_login_shell_check.isChecked()),
             }
             self._save_ssh_host(
                 alias,
@@ -1214,7 +1523,11 @@ class RemoteOpenDialog(QDialog):
         self.resize(560, 260)
 
         self._s3_locations = RemoteConfigurationDialog._load_s3_locations()
-        self._ssh_hosts = RemoteConfigurationDialog._load_ssh_hosts()
+        self._ssh_runtime_preferences = RemoteConfigurationDialog._extract_ssh_runtime_preferences(state)
+        self._ssh_hosts = RemoteConfigurationDialog._apply_ssh_runtime_preferences(
+            RemoteConfigurationDialog._load_ssh_hosts(),
+            self._ssh_runtime_preferences,
+        )
         self._http_locations = self._load_http_locations(state)
 
         layout = QVBoxLayout(self)
@@ -1342,6 +1655,7 @@ class RemoteOpenDialog(QDialog):
             "s3_alias": self.s3_open_combo.currentText(),
             "https_alias": self.http_open_combo.currentText(),
             "ssh_alias": self.ssh_open_combo.currentText(),
+            "ssh_runtime_preferences": dict(self._ssh_runtime_preferences),
             "https_locations": dict(self._http_locations),
         }
 
