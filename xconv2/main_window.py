@@ -74,7 +74,10 @@ class CFVMain(CFVCore):
         self.worker.errorOccurred.connect(self.handle_worker_process_error)
         self.worker.finished.connect(self.handle_worker_finished)
 
-        self.worker.start("cf-worker")
+        import sys
+        from pathlib import Path
+        _worker_bin = str(Path(sys.executable).parent / "cf-worker")
+        self.worker.start(_worker_bin)
         logger.info("Started worker process: %s", self.worker.program())
 
     def on_file_selected(self, file_path: str) -> None:

@@ -12,11 +12,6 @@ try:
 except ImportError:
     bootstrap_session = None
 
-try:
-    from p5rem.cache import P5RemCache
-except ImportError:
-    P5RemCache = None
-
 
 logger = logging.getLogger(__name__)
 
@@ -498,13 +493,16 @@ class RemoteFileSystemFactory:
 
                 self.root_path = parsed.path or "."
                 
-                # Bootstrap p5rem session with the hostname and credentials
-                # p5rem handles its own caching via diskcache when use_cache=True
+                # Bootstrap p5rem session with the hostname and credentials.
+                # p5rem metadata caching is incompatible with the rFile ->
+                # p5netcdf flow used by cf.read here because a file_open cache
+                # hit can return metadata without creating a live remote file
+                # handle on the server.
                 logger.info(
                     "Bootstrapping p5rem session to %s:%s (use_cache=%s, remote_python=%s, login_shell=%s)",
                     host,
                     port or 22,
-                    self.use_cache,
+                    False,
                     remote_python,
                     login_shell,
                 )
@@ -517,7 +515,7 @@ class RemoteFileSystemFactory:
                         key_filename=key_filename,
                         remote_python=remote_python,
                         login_shell=login_shell,
-                        use_cache=self.use_cache,
+                        use_cache=False,
                         timeout=10.0,
                     )
 
@@ -525,14 +523,6 @@ class RemoteFileSystemFactory:
                     # (e.g. missing deps/remote interpreter issues) surface as
                     # clear connection errors instead of deferred EOF during ls().
                     session.heartbeat()
-                    
-                    # Configure p5rem's cache to use a separate directory from fsspec cache
-                    if self.use_cache and P5RemCache is not None and cache_dir:
-                        p5rem_cache_dir = str(Path(cache_dir) / "p5rem")
-                        Path(p5rem_cache_dir).mkdir(parents=True, exist_ok=True)
-                        custom_cache = P5RemCache(directory=p5rem_cache_dir)
-                        session._cache = custom_cache
-                        logger.info("Configured p5rem cache in dedicated directory: %s", p5rem_cache_dir)
                     
                     base_fs = P5RemFilesystem(session)
                 except Exception as exc:
@@ -561,8 +551,6 @@ class RemoteFileSystemFactory:
             wrapped_fs = base_fs
             if not is_p5rem:
                 logger.info("Caching disabled; using base filesystem directly")
-            elif self.use_cache:
-                logger.info("p5rem caching enabled in dedicated cache directory")
             else:
                 logger.info("Caching disabled in p5rem session")
 

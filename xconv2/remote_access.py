@@ -170,7 +170,7 @@ class RemoteAccessSession:
             descriptor=descriptor,
             datasets=datasets,
         )
-
+        logging.info(f'Attempting to open remote dataset(s) with reader: {normalized}')
         self._close_open_handles()
         try:
             if isinstance(normalized, list):
@@ -180,7 +180,7 @@ class RemoteAccessSession:
                 handle = self.filesystem.open(normalized, "rb")
                 self._open_handles = [handle]
                 opened = handle
-
+            logging.info(f'Attempting to open remote dataset(s) with reader: {opened}')
             return reader(opened)
         except Exception:
             self._close_open_handles()

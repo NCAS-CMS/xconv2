@@ -350,6 +350,7 @@ def _read_remote_fields(
         descriptor=descriptor,
         datasets=datasets,
     )
+
     return session.read_fields(
         descriptor=descriptor,
         datasets=normalized_datasets,
@@ -693,6 +694,19 @@ def main():
 
     logger.info("Worker starting")
     logger.info("Log file: %s", log_file)
+    try:
+        import cfdm
+
+        logger.info(
+            "Worker runtime python=%s cf=%s (%s) cfdm=%s (%s)",
+            sys.executable,
+            getattr(cf, "__version__", "unknown"),
+            getattr(cf, "__file__", "unknown"),
+            getattr(cfdm, "__version__", "unknown"),
+            getattr(cfdm, "__file__", "unknown"),
+        )
+    except Exception:
+        logger.exception("Failed to log worker cf/cfdm runtime details")
     logger.info(
         "PLOT_DIAG worker_runtime version=%s module_dir=%s backend=%s",
         __version__,
