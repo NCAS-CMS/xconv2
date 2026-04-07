@@ -319,18 +319,6 @@ def _emit_log(log: Callable[[str], None] | None, message: str) -> None:
         log(message)
 
 
-def _memory_cache_type(strategy: object) -> str | None:
-    """Map UI memory cache strategy labels to fsspec cache types."""
-    value = str(strategy or "").strip().lower()
-    if value == "block":
-        return "bytes"
-    if value == "readahead":
-        return "readahead"
-    if value == "whole-file":
-        return "all"
-    return None
-
-
 def _prune_incompatible_blockcache_entries(
     cache_path: Path,
     *,
@@ -397,7 +385,6 @@ def _apply_cache_configuration(
         cache = {}
 
     disk_mode = str(cache.get("disk_mode", "Disabled")).strip().lower()
-    cache_strategy = str(cache.get("cache_strategy", "None")).strip().lower()
     blocksize_mb = int(cache.get("blocksize_mb", 2) or 0)
     blocksize_bytes = blocksize_mb * 1024 * 1024 if blocksize_mb > 0 else 2 * 1024 * 1024
     max_blocks = int(cache.get("max_blocks", 128) or 0)
@@ -472,24 +459,6 @@ def _apply_cache_configuration(
             blocksize=blocksize_bytes,
             maxblocks=max_blocks,
         )
-
-    if cache_strategy == "readahead":
-        _emit_log(log, f"Configuring readahead memory cache with {blocksize_bytes} byte blocks")
-
-        class _CachedFilesystemProxy:
-            def __init__(self, base_fs: Any) -> None:
-                self._base_fs = base_fs
-                self.protocol = getattr(base_fs, "protocol", None)
-
-            def open(self, path: str, mode: str = "rb", **kwargs: Any):
-                kwargs.setdefault("cache_type", "readahead")
-                kwargs.setdefault("block_size", blocksize_bytes)
-                return self._base_fs.open(path, mode=mode, **kwargs)
-
-            def __getattr__(self, name: str) -> Any:
-                return getattr(self._base_fs, name)
-
-        return _CachedFilesystemProxy(filesystem)
 
     _emit_log(log, "No caching configured")
     return filesystem

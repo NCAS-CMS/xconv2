@@ -50,12 +50,6 @@ Host beta gamma
     assert "*" not in hosts
 
 
-def test_calculate_max_blocks_uses_blocksize_and_buffer() -> None:
-    assert RemoteConfigurationDialog._calculate_max_blocks(2, 1024) == 512
-    assert RemoteConfigurationDialog._calculate_max_blocks(256, 1) == 1
-    assert RemoteConfigurationDialog._calculate_max_blocks(0, 1024) == 0
-
-
 def test_s3_config_path_from_choice_maps_targets() -> None:
     assert RemoteConfigurationDialog._s3_config_path_from_choice("MinIO") == Path.home() / ".mc/config.json"
     assert RemoteConfigurationDialog._s3_config_path_from_choice("xconv") == Path.home() / ".config/cfview/config.json"

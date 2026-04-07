@@ -29,9 +29,11 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
+    QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -47,6 +49,8 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QStyle,
     QSystemTrayIcon,
+    QTableWidget,
+    QTableWidgetItem,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -319,44 +323,110 @@ class ScopedLoggingConfigDialog(QDialog):
 
 
 class CacheManagerDialog(QDialog):
-    """Summarize remote cache configuration and allow disk cache flushes."""
+    """Show per-remote cache configuration and allow selective disk cache flushes."""
 
     def __init__(self, parent: "CFVCore") -> None:
         super().__init__(parent)
         self._host = parent
 
-        self.setWindowTitle("xconv2 Cache")
-        self.resize(760, 420)
+        self.setWindowTitle("xconv2 Cache Manager")
+        self.resize(860, 480)
 
         layout = QVBoxLayout(self)
-        self.summary_view = QPlainTextEdit()
-        self.summary_view.setReadOnly(True)
-        self.summary_view.setLineWrapMode(QPlainTextEdit.NoWrap)
-        layout.addWidget(self.summary_view, 1)
 
+        # --- Per-remote table ---
+        remotes_group = QGroupBox("Configured remotes")
+        remotes_layout = QVBoxLayout(remotes_group)
+        self._table = QTableWidget(0, 6)
+        self._table.setHorizontalHeaderLabels(
+            ["Remote", "Protocol", "Mode", "Location", "Usage", ""]
+        )
+        self._table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._table.setSelectionMode(QTableWidget.NoSelection)
+        self._table.horizontalHeader().setStretchLastSection(False)
+        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self._table.verticalHeader().setVisible(False)
+        remotes_layout.addWidget(self._table)
+        self._no_remotes_label = QLabel("No remotes configured.")
+        self._no_remotes_label.setVisible(False)
+        self._no_remotes_label.setAlignment(Qt.AlignCenter)
+        remotes_layout.addWidget(self._no_remotes_label)
+        layout.addWidget(remotes_group, 1)
+
+        # --- Buttons ---
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         self.refresh_button = buttons.addButton("Refresh", QDialogButtonBox.ActionRole)
-        self.prune_button = buttons.addButton("Prune Cache", QDialogButtonBox.ActionRole)
-        self.flush_button = buttons.addButton("Flush Cache", QDialogButtonBox.ActionRole)
+        self.prune_button = buttons.addButton("Prune All...", QDialogButtonBox.ActionRole)
+        self.flush_all_button = buttons.addButton("Flush All...", QDialogButtonBox.ActionRole)
         self.refresh_button.clicked.connect(self.refresh_summary)
         self.prune_button.clicked.connect(self._prune_cache)
-        self.flush_button.clicked.connect(self._flush_cache)
+        self.flush_all_button.clicked.connect(self._flush_cache)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
         self.refresh_summary()
 
     def refresh_summary(self) -> None:
-        """Refresh the cache summary text from current host state."""
-        self.summary_view.setPlainText(self._host._cache_summary_text())
+        """Refresh remote table from current host state."""
+        cache = self._host._active_cache_settings()
+
+        remotes = self._host._collect_configured_remotes()
+        self._table.setRowCount(0)
+        if not remotes:
+            self._table.setVisible(False)
+            self._no_remotes_label.setVisible(True)
+        else:
+            self._table.setVisible(True)
+            self._no_remotes_label.setVisible(False)
+            for info in remotes:
+                row = self._table.rowCount()
+                self._table.insertRow(row)
+                self._table.setItem(row, 0, QTableWidgetItem(info["alias"]))
+                self._table.setItem(row, 1, QTableWidgetItem(info["protocol"]))
+                self._table.setItem(row, 2, QTableWidgetItem(info["mode"]))
+                self._table.setItem(row, 3, QTableWidgetItem(str(info["location"])))
+                if info["can_flush"]:
+                    usage_str = (
+                        f"{self._host._format_storage_size(info['disk_bytes'])}"
+                        f" ({info['disk_files']} files)"
+                    )
+                else:
+                    usage_str = "N/A"
+                self._table.setItem(row, 4, QTableWidgetItem(usage_str))
+                flush_btn = QPushButton("Flush")
+                flush_btn.setEnabled(info["can_flush"])
+                flush_btn.clicked.connect(
+                    lambda checked=False, i=info: self._flush_remote(i)
+                )
+                self._table.setCellWidget(row, 5, flush_btn)
+            self._table.resizeColumnsToContents()
+            self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+
+    def _flush_remote(self, info: dict) -> None:
+        """Confirm and flush the disk cache for a single remote."""
+        location = info["location"]
+        alias = info["alias"]
+        response = QMessageBox.question(
+            self,
+            "Flush Cache",
+            f"Delete all cached files for remote '{alias}'?\n\n"
+            f"Location: {location}\n\n"
+            "All remotes sharing this cache location will also be affected.",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if response != QMessageBox.Yes:
+            return
+        if self._host._do_flush_disk_at(location):
+            self.refresh_summary()
 
     def _flush_cache(self) -> None:
-        """Flush configured disk cache and refresh summary view."""
+        """Flush the configured disk cache and refresh the summary."""
         if self._host._flush_configured_disk_cache():
             self.refresh_summary()
 
     def _prune_cache(self) -> None:
-        """Prune configured disk cache and refresh summary view."""
+        """Prune the configured disk cache and refresh the summary."""
         if self._host._prune_configured_disk_cache():
             self.refresh_summary()
 
@@ -679,10 +749,6 @@ class CFVCore(QMainWindow):
         raw = self._settings.get("last_remote_configuration", {})
         if isinstance(raw, dict):
             return {
-                "blocksize_mb": int(raw.get("cache_blocksize_mb", 2)),
-                "ram_buffer_mb": int(raw.get("cache_ram_buffer_mb", 1024)),
-                "cache_strategy": str(raw.get("cache_strategy", "Block")),
-                "max_blocks": max(1, int(raw.get("cache_ram_buffer_mb", 1024)) // max(1, int(raw.get("cache_blocksize_mb", 2)))),
                 "disk_mode": str(raw.get("disk_mode", "Disabled")),
                 "disk_location": str(raw.get("disk_location", str(Path.home() / ".cache/xconv2"))),
                 "disk_limit_gb": int(raw.get("disk_limit_gb", 10)),
@@ -694,13 +760,80 @@ class CFVCore(QMainWindow):
         """Return total bytes and file count under the configured disk cache directory."""
         return disk_cache_usage(location)
 
+    def _collect_configured_remotes(self) -> list[dict]:
+        """Return display info about each configured remote and its disk cache."""
+        raw_config = self._settings.get("last_remote_configuration", {})
+        cache_raw = raw_config if isinstance(raw_config, dict) else {}
+        default_disk_mode = str(cache_raw.get("disk_mode", "Disabled"))
+        default_disk_location = Path(
+            str(cache_raw.get("disk_location", str(Path.home() / ".cache/xconv2")))
+        ).expanduser()
+
+        remotes: list[dict] = []
+
+        # SSH remotes from ~/.ssh/config
+        ssh_hosts = RemoteConfigurationDialog._load_ssh_hosts()
+        for alias in ssh_hosts:
+            # SSH disk caching is currently disabled in remote_fs.py regardless of
+            # the configured mode, so mark these as not flushable for now.
+            remotes.append({
+                "alias": alias,
+                "protocol": "SSH",
+                "mode": "Disabled (SSH)",
+                "location": default_disk_location,
+                "disk_bytes": 0,
+                "disk_files": 0,
+                "can_flush": False,
+            })
+
+        # HTTPS / HTTP remotes from settings
+        https_locations = self._settings.get("remote_https_locations")
+        if not isinstance(https_locations, dict):
+            https_locations = self._settings.get("remote_http_locations")
+        if isinstance(https_locations, dict):
+            for alias in https_locations:
+                disk_bytes, disk_files = disk_cache_usage(default_disk_location)
+                can_flush = default_disk_mode != "Disabled"
+                remotes.append({
+                    "alias": alias,
+                    "protocol": "HTTPS",
+                    "mode": default_disk_mode,
+                    "location": default_disk_location,
+                    "disk_bytes": disk_bytes,
+                    "disk_files": disk_files,
+                    "can_flush": can_flush,
+                })
+
+        return remotes
+
+    def _do_flush_disk_at(self, location: Path) -> bool:
+        """Delete all files under *location* without asking for confirmation."""
+        if not location.exists():
+            self._show_status_message(f"Cache directory does not exist: {location}")
+            return True
+
+        release_remote = getattr(self, "_release_remote_session_if_active", None)
+        if callable(release_remote):
+            release_remote()
+
+        try:
+            import shutil
+            for child in location.iterdir():
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+        except OSError:
+            logger.exception("Failed to flush cache directory: %s", location)
+            self._show_status_message(f"Failed to flush cache: {location}", is_error=True)
+            return False
+
+        self._show_status_message(f"Flushed cache: {location}")
+        return True
+
     def _cache_summary_text(self) -> str:
         """Build a human-readable summary of current cache configuration and usage."""
         cache = self._active_cache_settings()
-        strategy = str(cache.get("cache_strategy", "None"))
-        blocksize_mb = int(cache.get("blocksize_mb", 0) or 0)
-        ram_buffer_mb = int(cache.get("ram_buffer_mb", 0) or 0)
-        max_blocks = int(cache.get("max_blocks", 0) or 0)
         disk_mode = str(cache.get("disk_mode", "Disabled"))
         disk_location = Path(str(cache.get("disk_location", str(Path.home() / ".cache/xconv2")))).expanduser()
         disk_limit_gb = int(cache.get("disk_limit_gb", 0) or 0)
@@ -712,12 +845,6 @@ class CFVCore(QMainWindow):
             "Remote Cache Summary",
             "",
             f"Active remote session: {'yes' if has_active_remote else 'no'}",
-            "",
-            "Memory cache",
-            f"  Strategy: {strategy}",
-            f"  Block size: {blocksize_mb} MB",
-            f"  RAM buffer: {ram_buffer_mb} MB",
-            f"  Max blocks: {max_blocks}",
             "",
             "Disk cache",
             f"  Mode: {disk_mode}",
@@ -732,9 +859,6 @@ class CFVCore(QMainWindow):
         """Flush configured disk cache contents after user confirmation."""
         cache = self._active_cache_settings()
         disk_location = Path(str(cache.get("disk_location", str(Path.home() / ".cache/xconv2")))).expanduser()
-        if not disk_location.exists():
-            self._show_status_message(f"Cache directory does not exist: {disk_location}")
-            return True
 
         response = QMessageBox.question(
             self,
@@ -746,24 +870,7 @@ class CFVCore(QMainWindow):
         if response != QMessageBox.Yes:
             return False
 
-        release_remote = getattr(self, "_release_remote_session_if_active", None)
-        if callable(release_remote):
-            release_remote()
-
-        try:
-            for child in disk_location.iterdir():
-                if child.is_dir() and not child.is_symlink():
-                    import shutil
-                    shutil.rmtree(child)
-                else:
-                    child.unlink()
-        except OSError:
-            logger.exception("Failed to flush cache directory: %s", disk_location)
-            self._show_status_message(f"Failed to flush cache: {disk_location}", is_error=True)
-            return False
-
-        self._show_status_message(f"Flushed cache: {disk_location}")
-        return True
+        return self._do_flush_disk_at(disk_location)
 
     def _prune_configured_disk_cache(self) -> bool:
         """Prune configured disk cache by expiry and size limit."""

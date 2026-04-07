@@ -206,38 +206,6 @@ def test_directory_contains_zarr_metadata_detects_v2_and_v3_markers() -> None:
     assert directory_contains_zarr_metadata(other_entries) is False
 
 
-def test_apply_cache_configuration_adds_memory_open_defaults() -> None:
-    class _FakeFs:
-        protocol = "sftp"
-
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, str, dict[str, object]]] = []
-
-        def open(self, path: str, mode: str = "rb", **kwargs):
-            self.calls.append((path, mode, kwargs))
-            return object()
-
-    fake = _FakeFs()
-    wrapped = _apply_cache_configuration(
-        fake,
-        cache={
-            "blocksize_mb": 2,
-            "cache_strategy": "Readahead",
-            "disk_mode": "Disabled",
-        },
-    )
-
-    wrapped.open("/data/file.nc", "rb")
-
-    assert fake.calls == [
-        (
-            "/data/file.nc",
-            "rb",
-            {"cache_type": "readahead", "block_size": 2 * 1024 * 1024},
-        )
-    ]
-
-
 def test_apply_cache_configuration_wraps_block_disk_cache(monkeypatch) -> None:
     fake_fs = SimpleNamespace(protocol="sftp")
     calls: list[tuple[str, dict[str, object]]] = []
@@ -251,7 +219,6 @@ def test_apply_cache_configuration_wraps_block_disk_cache(monkeypatch) -> None:
         fake_fs,
         cache={
             "blocksize_mb": 4,
-            "cache_strategy": "None",
             "max_blocks": 128,
             "disk_mode": "Blocks",
             "disk_location": "/tmp/xconv-cache",
@@ -273,42 +240,6 @@ def test_apply_cache_configuration_wraps_block_disk_cache(monkeypatch) -> None:
             },
         )
     ]
-
-
-def test_apply_cache_configuration_skips_memory_wrapper_when_disk_cache_active(monkeypatch) -> None:
-    class _BaseFs:
-        protocol = "sftp"
-
-    class _BlockCacheFs:
-        protocol = "blockcache"
-
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, str, dict[str, object]]] = []
-
-        def open(self, path: str, mode: str = "rb", **kwargs):
-            self.calls.append((path, mode, kwargs))
-            return object()
-
-    blockcache_fs = _BlockCacheFs()
-    fake_fsspec = types.SimpleNamespace(
-        filesystem=lambda protocol, **kwargs: blockcache_fs
-    )
-    monkeypatch.setitem(sys.modules, "fsspec", fake_fsspec)
-
-    wrapped = _apply_cache_configuration(
-        _BaseFs(),
-        cache={
-            "blocksize_mb": 2,
-            "cache_strategy": "Block",
-            "disk_mode": "Blocks",
-            "disk_location": "/tmp/xconv-cache",
-            "disk_expiry": "1 day",
-        },
-    )
-
-    wrapped.open("/data/file.nc", "rb")
-    assert getattr(wrapped, "protocol", None) == "blockcache"
-    assert blockcache_fs.calls == [("/data/file.nc", "rb", {})]
 
 
 def test_apply_cache_configuration_prunes_incompatible_blockcache_entries(monkeypatch, tmp_path: Path) -> None:
@@ -345,7 +276,6 @@ def test_apply_cache_configuration_prunes_incompatible_blockcache_entries(monkey
         cache={
             "blocksize_mb": 2,
             "max_blocks": 64,
-            "cache_strategy": "None",
             "disk_mode": "Blocks",
             "disk_location": str(cache_dir),
             "disk_expiry": "7 days",

@@ -221,7 +221,6 @@ class RemoteConfigurationDialog(QDialog):
     _S3_MODES = ["Select from existing", "Add new"]
     _HTTPS_MODES = ["Select from existing", "Add new"]
     _SSH_MODES = ["Select from existing", "Add new"]
-    _CACHE_STRATEGIES = ["None", "Block", "Readahead", "Whole-File"]
     _DISK_CACHE_MODES = ["Disabled", "Blocks", "Files"]
     _EXPIRY_OPTIONS = ["Never", "1 day", "7 days", "30 days"]
     _RESULT_SAVED_ONLY = 2
@@ -277,7 +276,6 @@ class RemoteConfigurationDialog(QDialog):
         self._update_s3_config_details()
         self._update_ssh_mode()
         self._update_ssh_selected_details()
-        self._update_memory_cache_summary()
         self._restore_state(state)
 
     @staticmethod
@@ -558,13 +556,6 @@ class RemoteConfigurationDialog(QDialog):
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_text(updated_text, encoding="utf-8")
         return target_path
-
-    @staticmethod
-    def _calculate_max_blocks(blocksize_mb: int, ram_buffer_mb: int) -> int:
-        """Derive the maximum number of cached memory blocks from limits."""
-        if blocksize_mb <= 0 or ram_buffer_mb <= 0:
-            return 0
-        return max(1, ram_buffer_mb // blocksize_mb)
 
     def _set_combo_items(self, combo: QComboBox, items: list[str], empty_label: str) -> None:
         """Populate a combo box with items or a disabled empty-state entry."""
@@ -1058,28 +1049,9 @@ class RemoteConfigurationDialog(QDialog):
             self.ssh_identity_file_edit.setText(selected)
 
     def _build_cache_group(self) -> QWidget:
-        """Build shared cache configuration controls."""
+        """Build disk cache configuration controls."""
         group = QGroupBox("Cache Configuration")
         layout = QHBoxLayout(group)
-
-        memory_group = QGroupBox("Memory Cache")
-        memory_layout = QFormLayout(memory_group)
-        self.cache_blocksize_spin = QSpinBox()
-        self.cache_blocksize_spin.setRange(1, 1024)
-        self.cache_blocksize_spin.setValue(2)
-        self.cache_blocksize_spin.valueChanged.connect(self._update_memory_cache_summary)
-        self.cache_ram_buffer_spin = QSpinBox()
-        self.cache_ram_buffer_spin.setRange(1, 262144)
-        self.cache_ram_buffer_spin.setValue(1024)
-        self.cache_ram_buffer_spin.valueChanged.connect(self._update_memory_cache_summary)
-        self.cache_strategy_combo = QComboBox()
-        self.cache_strategy_combo.addItems(self._CACHE_STRATEGIES)
-        self.cache_strategy_combo.setCurrentText("Block")
-        self.cache_max_blocks_label = QLabel("")
-        memory_layout.addRow("Blocksize (MB):", self.cache_blocksize_spin)
-        memory_layout.addRow("RAM Buffer (MB):", self.cache_ram_buffer_spin)
-        memory_layout.addRow("Cache Strategy:", self.cache_strategy_combo)
-        memory_layout.addRow("Max blocks:", self.cache_max_blocks_label)
 
         disk_group = QGroupBox("Disk Cache")
         disk_layout = QFormLayout(disk_group)
@@ -1100,17 +1072,8 @@ class RemoteConfigurationDialog(QDialog):
         disk_layout.addRow("Limit (GB):", self.disk_limit_spin)
         disk_layout.addRow("Expiry:", self.disk_expiry_combo)
 
-        layout.addWidget(memory_group, 1)
         layout.addWidget(disk_group, 1)
         return group
-
-    def _update_memory_cache_summary(self) -> None:
-        """Update the derived max-blocks label from current cache limits."""
-        max_blocks = self._calculate_max_blocks(
-            int(self.cache_blocksize_spin.value()),
-            int(self.cache_ram_buffer_spin.value()),
-        )
-        self.cache_max_blocks_label.setText(str(max_blocks))
 
     def configuration(self) -> dict[str, Any]:
         """Return the currently selected remote and cache configuration."""
@@ -1118,13 +1081,6 @@ class RemoteConfigurationDialog(QDialog):
         config: dict[str, Any] = {
             "protocol": protocol,
             "cache": {
-                "blocksize_mb": int(self.cache_blocksize_spin.value()),
-                "ram_buffer_mb": int(self.cache_ram_buffer_spin.value()),
-                "cache_strategy": self.cache_strategy_combo.currentText(),
-                "max_blocks": self._calculate_max_blocks(
-                    int(self.cache_blocksize_spin.value()),
-                    int(self.cache_ram_buffer_spin.value()),
-                ),
                 "disk_mode": self.disk_mode_combo.currentText(),
                 "disk_location": self.disk_location_edit.text().strip(),
                 "disk_limit_gb": int(self.disk_limit_spin.value()),
@@ -1242,9 +1198,6 @@ class RemoteConfigurationDialog(QDialog):
             "https_alias": self.http_alias_edit.text().strip(),
             "https_url": self.http_url_edit.text().strip(),
             "https_locations": dict(self._http_locations),
-            "cache_blocksize_mb": int(self.cache_blocksize_spin.value()),
-            "cache_ram_buffer_mb": int(self.cache_ram_buffer_spin.value()),
-            "cache_strategy": self.cache_strategy_combo.currentText(),
             "disk_mode": self.disk_mode_combo.currentText(),
             "disk_location": self.disk_location_edit.text().strip(),
             "disk_limit_gb": int(self.disk_limit_spin.value()),
@@ -1353,19 +1306,6 @@ class RemoteConfigurationDialog(QDialog):
         if isinstance(https_url, str):
             self.http_url_edit.setText(https_url)
 
-        blocksize = state.get("cache_blocksize_mb")
-        if isinstance(blocksize, int):
-            self.cache_blocksize_spin.setValue(blocksize)
-        ram_buffer = state.get("cache_ram_buffer_mb")
-        if isinstance(ram_buffer, int):
-            self.cache_ram_buffer_spin.setValue(ram_buffer)
-
-        cache_strategy = state.get("cache_strategy")
-        if isinstance(cache_strategy, str):
-            index = self.cache_strategy_combo.findText(cache_strategy)
-            if index >= 0:
-                self.cache_strategy_combo.setCurrentIndex(index)
-
         disk_mode = state.get("disk_mode")
         if isinstance(disk_mode, str):
             index = self.disk_mode_combo.findText(disk_mode)
@@ -1391,7 +1331,6 @@ class RemoteConfigurationDialog(QDialog):
         self._update_ssh_selected_details()
         self._update_http_mode()
         self._update_http_selected_details()
-        self._update_memory_cache_summary()
 
     def _validate_new_s3(self) -> bool:
         """Validate required fields for a new S3 configuration."""

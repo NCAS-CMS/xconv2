@@ -708,13 +708,7 @@ class CFVMain(CFVCore):
         if not isinstance(raw, dict):
             return merged
 
-        blocksize_mb = int(raw.get("cache_blocksize_mb", 2))
-        ram_buffer_mb = int(raw.get("cache_ram_buffer_mb", 1024))
         merged["cache"] = {
-            "blocksize_mb": blocksize_mb,
-            "ram_buffer_mb": ram_buffer_mb,
-            "cache_strategy": str(raw.get("cache_strategy", "Block")),
-            "max_blocks": max(1, ram_buffer_mb // max(1, blocksize_mb)),
             "disk_mode": str(raw.get("disk_mode", "Disabled")),
             "disk_location": str(raw.get("disk_location", str(Path.home() / ".cache/xconv2"))),
             "disk_limit_gb": int(raw.get("disk_limit_gb", 10)),

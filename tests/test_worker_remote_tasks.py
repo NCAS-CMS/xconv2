@@ -39,7 +39,7 @@ def test_prepare_remote_session_reuses_cached_entry(monkeypatch) -> None:
         "uri_scheme": "ssh",
         "uri_authority": "alpha.example.org",
         "proxy_jump": None,
-        "cache": {"cache_strategy": "Readahead"},
+        "cache": {},
     }
 
     first = worker._prepare_remote_session(
@@ -55,7 +55,7 @@ def test_prepare_remote_session_reuses_cached_entry(monkeypatch) -> None:
 
     assert first is second
     assert second.session_id == "session-2"
-    assert created == [("sftp", {"cache_strategy": "Readahead"})]
+    assert created == [("sftp", {})]
 
 
 def test_read_remote_fields_uses_filesystem_keyword(monkeypatch) -> None:

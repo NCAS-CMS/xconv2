@@ -251,6 +251,9 @@ class _DummyCacheManagerHost:
     def _release_remote_session_if_active(self) -> None:
         self.released += 1
 
+    def _do_flush_disk_at(self, location: Path) -> bool:
+        return CFVCore._do_flush_disk_at(self, location)
+
     def _active_cache_settings(self) -> dict[str, object]:
         return CFVCore._active_cache_settings(self)
 
@@ -385,9 +388,6 @@ def test_cache_summary_text_reports_config_and_usage() -> None:
         host = _DummyCacheManagerHost(
             _settings={
                 "last_remote_configuration": {
-                    "cache_blocksize_mb": 2,
-                    "cache_ram_buffer_mb": 1024,
-                    "cache_strategy": "Block",
                     "disk_mode": "Blocks",
                     "disk_location": str(cache_dir),
                     "disk_limit_gb": 10,
@@ -400,7 +400,6 @@ def test_cache_summary_text_reports_config_and_usage() -> None:
         summary = CFVCore._cache_summary_text(host)
 
         assert "Active remote session: yes" in summary
-        assert "Strategy: Block" in summary
         assert f"Location: {cache_dir}" in summary
         assert "Usage: 6 B across 2 files" in summary
         assert "Expiry: 7 days" in summary

@@ -388,9 +388,6 @@ def test_choose_remote_injects_cache_defaults_when_open_dialog_returns_no_cache(
         def __init__(self) -> None:
             self._settings = {
                 "last_remote_configuration": {
-                    "cache_blocksize_mb": 4,
-                    "cache_ram_buffer_mb": 2048,
-                    "cache_strategy": "Readahead",
                     "disk_mode": "Blocks",
                     "disk_location": "/tmp/xconv-cache",
                     "disk_limit_gb": 5,
@@ -428,10 +425,6 @@ def test_choose_remote_injects_cache_defaults_when_open_dialog_returns_no_cache(
     cache = window.opened_config.get("cache")
     assert isinstance(cache, dict)
     assert cache == {
-        "blocksize_mb": 4,
-        "ram_buffer_mb": 2048,
-        "cache_strategy": "Readahead",
-        "max_blocks": 512,
         "disk_mode": "Blocks",
         "disk_location": "/tmp/xconv-cache",
         "disk_limit_gb": 5,
