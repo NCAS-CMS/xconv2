@@ -84,8 +84,8 @@ class MenuController:
         open_glob_action.triggered.connect(self.host._choose_glob)
         file_menu.addAction(open_glob_action)
 
-        open_remote_action = QAction("Open Remote...", self.host)
-        open_remote_action.triggered.connect(self.host._choose_remote)
+        open_remote_action = QAction("Browse Remote...", self.host)
+        open_remote_action.triggered.connect(self.host._browse_remote)
         file_menu.addAction(open_remote_action)
 
         open_uris_action = QAction("Open URIs...", self.host)

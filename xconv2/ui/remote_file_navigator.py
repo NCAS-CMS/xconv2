@@ -836,10 +836,14 @@ class RemoteFileNavigatorDialog(QDialog):
         spec: RemoteFilesystemSpec | None = None,
         filesystem: Any | None = None,
         list_callback: Callable[[str], list[RemoteEntry]] | None = None,
+        new_remote_button: bool = False,
+        initial_tree_state: tuple[list[str], str] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Remote File Navigator")
         self.resize(820, 560)
+
+        self.new_remote_requested: bool = False
 
         self._config = config
         self._selected_uri = ""
@@ -900,10 +904,20 @@ class RemoteFileNavigatorDialog(QDialog):
         self.open_button = buttons.addButton("Open", QDialogButtonBox.AcceptRole)
         self.open_button.setEnabled(False)
         self.open_button.clicked.connect(self.accept)
+        if new_remote_button:
+            new_remote_btn = buttons.addButton("New Remote...", QDialogButtonBox.ResetRole)
+            new_remote_btn.clicked.connect(self._on_new_remote_clicked)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
         self._populate_root()
+        if initial_tree_state is not None:
+            self._restore_tree_state(*initial_tree_state)
+
+    def _on_new_remote_clicked(self) -> None:
+        """Signal that the user wants to open a different remote, then close."""
+        self.new_remote_requested = True
+        self.reject()
 
     def _populate_root(self) -> None:
         """Load the top-level listing for the configured remote filesystem."""

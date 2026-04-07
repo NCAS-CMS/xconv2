@@ -59,6 +59,8 @@ class CFVMain(CFVCore):
         self._remote_session_id: str | None = None
         self._remote_descriptor_hash: str | None = None
         self._remote_descriptor: dict[str, object] | None = None
+        self._last_remote_config: dict[str, object] | None = None
+        self._last_remote_navigator_state: tuple[list[str], str] | None = None
         self._pending_worker_task_starts: deque[float] = deque()
         self._pending_prepare_loop: QEventLoop | None = None
         self._pending_prepare_loop_ok: bool = False
@@ -421,6 +423,8 @@ class CFVMain(CFVCore):
         self._remote_session_id = session_id
         self._remote_descriptor_hash = descriptor_hash
         self._remote_descriptor = descriptor
+        self._last_remote_config = config
+        self._last_remote_navigator_state = None  # fresh session; discard any prior tree state
 
         # Show login progress dialog and spin a QEventLoop until the worker signals ready/failed.
         log_dialog = RemoteLoginLogDialog(self, spec.display_name)
@@ -455,8 +459,15 @@ class CFVMain(CFVCore):
 
         # Open the navigator backed entirely by worker-side directory listing via IPC.
         list_callback = self._make_worker_list_callback()
-        dialog = RemoteFileNavigatorDialog(self, config, spec=spec, list_callback=list_callback)
-        if dialog.exec() != QDialog.Accepted:
+        dialog = RemoteFileNavigatorDialog(
+            self, config, spec=spec, list_callback=list_callback, new_remote_button=True
+        )
+        result = dialog.exec()
+        self._last_remote_navigator_state = dialog._collect_tree_state()
+        if dialog.new_remote_requested:
+            self._choose_remote()
+            return
+        if result != QDialog.Accepted:
             return
 
         selected_uri = dialog.selected_uri()
@@ -1225,6 +1236,53 @@ class CFVMain(CFVCore):
             return
         config = CFVMain._with_cache_defaults(self, config)
         self._open_remote_from_config(config)
+
+    def _browse_remote(self) -> None:
+        """Re-browse the active remote session, or prompt for a new one if none is active.
+
+        If a remote session is already live (e.g. after opening a remote file), this skips
+        the expensive REMOTE_PREPARE step and opens the navigator directly, restoring the
+        previous tree state.  A "New Remote..." button in the navigator lets the user
+        switch to a different remote at any time.
+        """
+        if self._remote_session_id and self._last_remote_config:
+            try:
+                spec = build_remote_filesystem_spec(self._last_remote_config)
+            except Exception as exc:
+                QMessageBox.critical(self, "Remote configuration invalid", str(exc))
+                return
+            list_callback = self._make_worker_list_callback()
+            dialog = RemoteFileNavigatorDialog(
+                self,
+                self._last_remote_config,
+                spec=spec,
+                list_callback=list_callback,
+                new_remote_button=True,
+                initial_tree_state=self._last_remote_navigator_state,
+            )
+            result = dialog.exec()
+            self._last_remote_navigator_state = dialog._collect_tree_state()
+            if dialog.new_remote_requested:
+                self._choose_remote()
+                return
+            if result != QDialog.Accepted:
+                return
+            selected_uri = dialog.selected_uri()
+            selected_path = dialog.selected_path()
+            if not selected_uri or not selected_path:
+                self._show_status_message("Remote file selection was incomplete.", is_error=True)
+                return
+            remote = self._last_remote_config.get("remote") if isinstance(self._last_remote_config, dict) else None
+            host_alias = str(remote.get("alias", "")).strip() if isinstance(remote, dict) else ""
+            self._set_window_title_for_file(selected_uri)
+            self._show_status_message(f"Selected remote file: {selected_uri}")
+            if host_alias:
+                self._record_recent_uri(selected_uri, host_alias)
+            else:
+                self._record_recent_file(selected_uri)
+            self._load_remote_selected_file(selected_uri, selected_path)
+        else:
+            self._choose_remote()
 
     def _choose_uris(self) -> None:
         """Show URI dialog and open supported URIs directly through the worker."""
