@@ -806,6 +806,7 @@ class RemoteFileNavigatorDialog(QDialog):
         filesystem: Any | None = None,
         list_callback: Callable[[str], list[RemoteEntry]] | None = None,
         new_remote_button: bool = False,
+        session_active: bool | None = None,
         initial_tree_state: tuple[list[str], str] | None = None,
     ) -> None:
         super().__init__(parent)
@@ -813,11 +814,13 @@ class RemoteFileNavigatorDialog(QDialog):
         self.resize(820, 560)
 
         self.new_remote_requested: bool = False
+        self.shutdown_session_requested: bool = False
 
         self._config = config
         self._selected_uri = ""
         self._selected_path = ""
         self._detected_zarr_paths: set[str] = set()
+        self._pending_initial_tree_state = initial_tree_state
         self._spec = spec or build_remote_filesystem_spec(config)
         if list_callback is not None:
             self._filesystem: Any | None = None
@@ -831,8 +834,29 @@ class RemoteFileNavigatorDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
+        if session_active is None:
+            session_active = list_callback is not None
+
+        header_row = QWidget()
+        header_layout = QHBoxLayout(header_row)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+
         header = QLabel(f"Browsing {self._spec.display_name}")
-        layout.addWidget(header)
+        header_layout.addWidget(header)
+        header_layout.addStretch(1)
+
+        if session_active:
+            self.session_status_label = QLabel("Session: Connected")
+            self.session_status_label.setStyleSheet(
+                "QLabel { color: #0b6e4f; font-weight: 600; }"
+            )
+        else:
+            self.session_status_label = QLabel("Session: Disconnected")
+            self.session_status_label.setStyleSheet(
+                "QLabel { color: #8a1c1c; font-weight: 600; }"
+            )
+        header_layout.addWidget(self.session_status_label)
+        layout.addWidget(header_row)
 
         filter_row = QWidget()
         filter_layout = QHBoxLayout(filter_row)
@@ -865,7 +889,7 @@ class RemoteFileNavigatorDialog(QDialog):
         footer_layout = QHBoxLayout(footer)
         footer_layout.setContentsMargins(0, 0, 0, 0)
         footer_layout.addWidget(QLabel("Selection:"))
-        self.selection_label = QLabel("No file selected")
+        self.selection_label = QLabel("Loading remote listing...")
         footer_layout.addWidget(self.selection_label, 1)
         layout.addWidget(footer)
 
@@ -873,19 +897,36 @@ class RemoteFileNavigatorDialog(QDialog):
         self.open_button = buttons.addButton("Open", QDialogButtonBox.AcceptRole)
         self.open_button.setEnabled(False)
         self.open_button.clicked.connect(self.accept)
+        if self._spec.protocol == "sftp":
+            shutdown_btn = buttons.addButton("Shutdown Session", QDialogButtonBox.DestructiveRole)
+            shutdown_btn.clicked.connect(self._on_shutdown_session_clicked)
         if new_remote_button:
             new_remote_btn = buttons.addButton("New Remote...", QDialogButtonBox.ResetRole)
             new_remote_btn.clicked.connect(self._on_new_remote_clicked)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+        QTimer.singleShot(0, self._initialize_root_listing)
+
+    def _initialize_root_listing(self) -> None:
+        """Load the initial tree after the dialog has had a chance to appear."""
         self._populate_root()
-        if initial_tree_state is not None:
-            self._restore_tree_state(*initial_tree_state)
+        if self._pending_initial_tree_state is not None:
+            self._restore_tree_state(*self._pending_initial_tree_state)
+        elif self.tree.topLevelItemCount() == 0:
+            self.selection_label.setText("No files found")
+        else:
+            self.selection_label.setText("No file selected")
+        self._pending_initial_tree_state = None
 
     def _on_new_remote_clicked(self) -> None:
         """Signal that the user wants to open a different remote, then close."""
         self.new_remote_requested = True
+        self.reject()
+
+    def _on_shutdown_session_clicked(self) -> None:
+        """Signal that the user explicitly wants to close the active remote session."""
+        self.shutdown_session_requested = True
         self.reject()
 
     def _populate_root(self) -> None:

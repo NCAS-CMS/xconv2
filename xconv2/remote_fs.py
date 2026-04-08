@@ -1,7 +1,9 @@
 import logging
+from contextlib import contextmanager
 from pathlib import PurePosixPath
 from pathlib import Path
 from time import perf_counter
+from typing import Callable
 from urllib.parse import urlparse
 
 import fsspec
@@ -14,6 +16,45 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _forward_logger_output(
+    logger_names: list[str],
+    callback: Callable[[str], None] | None,
+) -> None:
+    """Forward logs from the named loggers to a callback for live UI updates."""
+    if callback is None:
+        yield
+        return
+
+    handlers: list[tuple[logging.Logger, logging.Handler, int]] = []
+
+    class _CallbackHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            try:
+                message = self.format(record)
+                if message:
+                    callback(message)
+            except Exception:
+                return
+
+    for name in logger_names:
+        target_logger = logging.getLogger(name)
+        handler = _CallbackHandler()
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(logging.Formatter("[%(name)s] %(message)s"))
+        previous_level = target_logger.level
+        target_logger.addHandler(handler)
+        target_logger.setLevel(logging.DEBUG)
+        handlers.append((target_logger, handler, previous_level))
+
+    try:
+        yield
+    finally:
+        for target_logger, handler, previous_level in handlers:
+            target_logger.removeHandler(handler)
+            target_logger.setLevel(previous_level)
 
 
 class ShimmyFS(fsspec.AbstractFileSystem):
@@ -369,6 +410,7 @@ class RemoteFileSystemFactory:
         credentials: dict | None = None,
         filesystem_mode: str = "CachingFileSystem",
         loglevel: int = logging.WARNING ,
+        log_callback: Callable[[str], None] | None = None,
     ) -> None:
         """
         Instantiate a RemoteFileSystemFactory for a given URL, 
@@ -399,6 +441,7 @@ class RemoteFileSystemFactory:
         
         """
         logger.setLevel(loglevel)
+        self._log_callback = log_callback
 
         self.url = url
         self.block_size = block_size
@@ -494,30 +537,38 @@ class RemoteFileSystemFactory:
                 self.root_path = parsed.path or "."
                 
                 # Bootstrap p5rem session with the hostname and credentials.
-                # p5rem metadata caching is incompatible with the rFile ->
-                # p5netcdf flow used by cf.read here because a file_open cache
-                # hit can return metadata without creating a live remote file
-                # handle on the server.
                 logger.info(
                     "Bootstrapping p5rem session to %s:%s (use_cache=%s, remote_python=%s, login_shell=%s)",
                     host,
                     port or 22,
-                    False,
+                    self.use_cache,
                     remote_python,
                     login_shell,
                 )
-                try:
-                    session = bootstrap_session(
-                        host=host,
-                        username=username,
-                        password=password,
-                        port=port,
-                        key_filename=key_filename,
-                        remote_python=remote_python,
-                        login_shell=login_shell,
-                        use_cache=False,
-                        timeout=10.0,
+                if self._log_callback is not None:
+                    self._log_callback(
+                        f"Starting SSH handshake to {host}:{port or 22} as {username or '<default-user>'}"
                     )
+                    self._log_callback("Checking/starting remote worker process...")
+                try:
+                    bootstrap_started = perf_counter()
+                    with _forward_logger_output(["paramiko", "p5rem"], self._log_callback):
+                        session = bootstrap_session(
+                            host=host,
+                            username=username,
+                            password=password,
+                            port=port,
+                            key_filename=key_filename,
+                            remote_python=remote_python,
+                            login_shell=login_shell,
+                            use_cache=self.use_cache,
+                            timeout=10.0,
+                        )
+                    bootstrap_elapsed = max(0.0, perf_counter() - bootstrap_started)
+                    if self._log_callback is not None:
+                        self._log_callback(
+                            f"Remote worker bootstrap complete in {bootstrap_elapsed:.2f}s"
+                        )
 
                     # Validate the remote server immediately so startup failures
                     # (e.g. missing deps/remote interpreter issues) surface as

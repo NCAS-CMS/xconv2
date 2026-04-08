@@ -103,6 +103,27 @@ def test_load_selected_file_task_executes_with_mock_cf_example_fields() -> None:
     assert isinstance(first["properties"], dict)
 
 
+def test_load_selected_file_does_not_release_remote_session() -> None:
+    class _DummyWindowNoRelease(_DummyWindow):
+        def __init__(self) -> None:
+            super().__init__()
+            self.released = 0
+            self._remote_session_id = "session-1"
+            self._remote_descriptor_hash = "hash-1"
+            self._remote_descriptor = {"protocol": "sftp"}
+
+        def _release_remote_session_if_active(self) -> None:
+            self.released += 1
+
+    window = _DummyWindowNoRelease()
+    file_path = "/tmp/local-data.nc"
+
+    CFVMain._load_selected_file(window, file_path)
+
+    assert window.released == 0
+    assert len(window.sent_tasks) == 1
+
+
 def test_coordinate_list_emits_coordinates_for_example_field() -> None:
     """Coordinate template should emit a non-empty coordinate payload for a sample field."""
     cf = pytest.importorskip("cf")
@@ -527,6 +548,77 @@ def test_open_remote_from_config_keeps_existing_session_and_clears_loaded_ui(
     assert window.cleared == 1
 
 
+def test_browse_remote_shutdown_session_releases_active_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DummyBrowseWindow:
+        def __init__(self) -> None:
+            self._remote_session_id = "session-1"
+            self._remote_descriptor_hash = "hash-1"
+            self._remote_descriptor = {"protocol": "sftp"}
+            self._last_remote_config = {"protocol": "SSH", "remote": {"alias": "alpha", "details": {"hostname": "alpha.example"}}}
+            self._last_remote_navigator_state = None
+            self.released = 0
+            self.messages: list[tuple[str, bool]] = []
+            self.chosen = 0
+
+        def _make_worker_list_callback(self):
+            return lambda _path: []
+
+        def _release_remote_session_if_active(self) -> None:
+            self.released += 1
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.messages.append((message, is_error))
+
+        def _choose_remote(self) -> None:
+            self.chosen += 1
+
+        def _set_window_title_for_file(self, _file_path: str) -> None:
+            return None
+
+        def _record_recent_uri(self, _uri: str, _alias: str) -> None:
+            return None
+
+        def _record_recent_file(self, _uri: str) -> None:
+            return None
+
+        def _load_remote_selected_file(self, _uri: str, _path: str) -> None:
+            return None
+
+    class _FakeNavigator:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.new_remote_requested = False
+            self.shutdown_session_requested = True
+
+        def exec(self) -> int:
+            return 0
+
+        def _collect_tree_state(self):
+            return ([], "")
+
+        def selected_uri(self) -> str:
+            return ""
+
+        def selected_path(self) -> str:
+            return ""
+
+    window = _DummyBrowseWindow()
+
+    monkeypatch.setattr(
+        main_window,
+        "build_remote_filesystem_spec",
+        lambda _config: types.SimpleNamespace(display_name="SSH", protocol="sftp", root_path="."),
+    )
+    monkeypatch.setattr(main_window, "RemoteFileNavigatorDialog", _FakeNavigator)
+
+    CFVMain._browse_remote(window)
+
+    assert window.released == 1
+    assert window.chosen == 0
+    assert ("Remote session shut down.", False) in window.messages
+
+
 def test_resolve_remote_uri_s3_prefers_recent_alias(monkeypatch: pytest.MonkeyPatch) -> None:
     class _DummyResolveWindow:
         def __init__(self) -> None:
@@ -650,3 +742,149 @@ def test_resolve_remote_uri_s3_accepts_host_based_uri(monkeypatch: pytest.Monkey
     assert remote_path == "bnl/CMIP6-test.nc"
     assert host_alias == "hpos"
     assert config is not None
+
+
+def test_resolve_remote_uri_ssh_strips_leading_slash_from_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _DummyResolveWindow:
+        def __init__(self) -> None:
+            self._settings = {
+                "last_remote_configuration": {},
+                "last_remote_open": {},
+            }
+
+    monkeypatch.setattr(
+        main_window.RemoteConfigurationDialog,
+        "_load_ssh_hosts",
+        staticmethod(
+            lambda: {
+                "alpha": {
+                    "hostname": "alpha.example.org",
+                    "user": "alice",
+                }
+            }
+        ),
+    )
+
+    window = _DummyResolveWindow()
+
+    config, remote_path, host_alias, unknown_host = CFVMain._resolve_remote_uri(
+        window,
+        "ssh://alpha.example.org/home/alice/data/file.nc",
+    )
+
+    assert unknown_host is False
+    assert config is not None
+    assert host_alias == "alpha"
+    assert remote_path == "home/alice/data/file.nc"
+
+
+def test_resolve_remote_uri_ssh_applies_runtime_preferences(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _DummyResolveWindow:
+        def __init__(self) -> None:
+            self._settings = {
+                "last_remote_configuration": {
+                    "ssh_runtime_preferences": {
+                        "alpha": {
+                            "remote_python": "conda run -p /opt/env --no-capture-output python",
+                            "remote_python_options": {
+                                "env": "conda run -p /opt/env --no-capture-output python"
+                            },
+                            "login_shell": True,
+                        }
+                    }
+                },
+                "last_remote_open": {},
+            }
+
+    monkeypatch.setattr(
+        main_window.RemoteConfigurationDialog,
+        "_load_ssh_hosts",
+        staticmethod(
+            lambda: {
+                "alpha": {
+                    "hostname": "alpha.example.org",
+                    "user": "alice",
+                    "identityfile": "~/.ssh/id_alpha",
+                }
+            }
+        ),
+    )
+
+    window = _DummyResolveWindow()
+
+    config, remote_path, host_alias, unknown_host = CFVMain._resolve_remote_uri(
+        window,
+        "ssh://alpha.example.org/data/test.nc",
+    )
+
+    assert unknown_host is False
+    assert remote_path == "data/test.nc"
+    assert host_alias == "alpha"
+    assert config is not None
+    remote = config["remote"]
+    assert isinstance(remote, dict)
+    details = remote.get("details")
+    assert isinstance(details, dict)
+    assert details.get("remote_python") == "conda run -p /opt/env --no-capture-output python"
+    assert details.get("login_shell") is True
+
+
+def test_open_remote_uri_direct_reuses_active_matching_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _DummyUriWindow:
+        def __init__(self) -> None:
+            self._settings = {"last_remote_configuration": {}}
+            self._remote_session_id = "session-existing"
+            self._remote_descriptor_hash = "hash-ssh"
+            self._remote_descriptor = {"protocol": "sftp"}
+            self._last_remote_config = None
+            self._last_remote_navigator_state = None
+            self.sent_control_tasks: list[tuple[str, dict[str, object]]] = []
+            self.loaded: list[tuple[str, str]] = []
+
+        def _prepare_ssh_config_for_auth(self, config: dict[str, object]) -> dict[str, object]:
+            return config
+
+        def _clear_loaded_data_views(self) -> None:
+            return None
+
+        def _send_worker_control_task(self, kind: str, payload: dict[str, object]) -> None:
+            self.sent_control_tasks.append((kind, payload))
+
+        def _show_status_message(self, _message: str, is_error: bool = False) -> None:
+            _ = is_error
+
+        def _set_window_title_for_file(self, _uri: str) -> None:
+            return None
+
+        def _record_recent_uri(self, _uri: str, _alias: str) -> None:
+            return None
+
+        def _load_remote_selected_file(self, uri: str, remote_path: str) -> None:
+            self.loaded.append((uri, remote_path))
+
+    window = _DummyUriWindow()
+
+    monkeypatch.setattr(
+        main_window,
+        "build_remote_filesystem_spec",
+        lambda _config: types.SimpleNamespace(display_name="SSH"),
+    )
+    monkeypatch.setattr(
+        main_window,
+        "spec_to_descriptor",
+        lambda _spec, cache=None: {"protocol": "sftp", "cache": cache},
+    )
+    monkeypatch.setattr(main_window, "remote_descriptor_hash", lambda _descriptor: "hash-ssh")
+
+    CFVMain._open_remote_uri_direct(
+        window,
+        uri="ssh://alpha.example.org/data/file.nc",
+        remote_path="/data/file.nc",
+        config={"protocol": "SSH", "remote": {"mode": "Select from existing", "alias": "alpha", "details": {"hostname": "alpha.example.org", "user": "alice"}}},
+        host_alias="alpha",
+    )
+
+    assert window.sent_control_tasks == []
+    assert window.loaded == [("ssh://alpha.example.org/data/file.nc", "/data/file.nc")]
+    assert isinstance(window._last_remote_config, dict)
+    assert window._last_remote_config.get("protocol") == "SSH"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -225,15 +226,10 @@ def test_factory_ssh_uses_p5rem_bootstrap(monkeypatch: pytest.MonkeyPatch, tmp_p
         bootstrap_calls.append(dict(kwargs))
         return fake_session
 
-    class _FakeP5RemCache:
-        def __init__(self, directory: str):
-            self.directory = directory
-
     def _should_not_wrap(**kwargs):
         raise AssertionError("CachingFileSystem should not wrap p5rem filesystems")
 
     monkeypatch.setattr(remote_fs, "bootstrap_session", _fake_bootstrap_session)
-    monkeypatch.setattr(remote_fs, "P5RemCache", _FakeP5RemCache)
     monkeypatch.setattr(remote_fs, "CachingFileSystem", _should_not_wrap)
 
     cache_dir = tmp_path / "cache"
@@ -253,8 +249,7 @@ def test_factory_ssh_uses_p5rem_bootstrap(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert call["use_cache"] is True
 
     assert isinstance(factory.fs.fs, remote_fs.P5RemFilesystem)
-    assert isinstance(fake_session._cache, _FakeP5RemCache)
-    assert fake_session._cache.directory == str(cache_dir / "p5rem")
+    assert fake_session._cache is None
     assert fake_session.heartbeat_calls == 1
 
 
@@ -280,7 +275,6 @@ def test_factory_ssh_without_cache_does_not_set_p5rem_cache(monkeypatch: pytest.
         raise AssertionError("CachingFileSystem should not wrap p5rem filesystems")
 
     monkeypatch.setattr(remote_fs, "bootstrap_session", _fake_bootstrap_session)
-    monkeypatch.setattr(remote_fs, "P5RemCache", None)
     monkeypatch.setattr(remote_fs, "CachingFileSystem", _should_not_wrap)
 
     factory = remote_fs.RemoteFileSystemFactory(
@@ -365,6 +359,34 @@ def test_factory_ssh_reports_startup_failure_with_remote_exit_details(
             credentials={"password": "pw"},
             cache_dir=None,
         )
+
+
+def test_factory_ssh_forwards_paramiko_logs_to_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeSession:
+        def heartbeat(self):
+            return {"type": "HEARTBEAT"}
+
+    def _fake_bootstrap_session(**kwargs):
+        _ = kwargs
+        logging.getLogger("paramiko.transport").info("KEXINIT received")
+        logging.getLogger("p5rem.bootstrap").info("SSH connection established")
+        return _FakeSession()
+
+    monkeypatch.setattr(remote_fs, "bootstrap_session", _fake_bootstrap_session)
+
+    streamed: list[str] = []
+    remote_fs.RemoteFileSystemFactory(
+        url="ssh://alice@myhost:2222/home/alice/data.nc",
+        credentials={"password": "pw"},
+        cache_dir=None,
+        log_callback=streamed.append,
+    )
+
+    assert any("Starting SSH handshake" in line for line in streamed)
+    assert any("[paramiko.transport]" in line and "KEXINIT received" in line for line in streamed)
+    assert any("[p5rem.bootstrap]" in line and "SSH connection established" in line for line in streamed)
 
 
 def test_p5rem_filesystem_ls_normalizes_string_entries_with_directory_types() -> None:

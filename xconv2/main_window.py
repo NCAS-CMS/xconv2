@@ -328,9 +328,6 @@ class CFVMain(CFVCore):
 
     def _load_selected_file(self, file_path: str) -> None:
         """Load selected file in worker and publish field metadata."""
-        release_remote = getattr(self, "_release_remote_session_if_active", None)
-        if callable(release_remote):
-            release_remote()
         self._show_status_message(f"Loading file: {file_path}")
         logger.info("Loading file in worker: %s", file_path)
 
@@ -418,52 +415,69 @@ class CFVMain(CFVCore):
         self._clear_loaded_data_views()
 
         descriptor = spec_to_descriptor(spec, cache=config.get("cache") if isinstance(config, dict) else None)
-        session_id = uuid.uuid4().hex
         descriptor_hash = remote_descriptor_hash(descriptor)
-        self._remote_session_id = session_id
-        self._remote_descriptor_hash = descriptor_hash
-        self._remote_descriptor = descriptor
         self._last_remote_config = config
         self._last_remote_navigator_state = None  # fresh session; discard any prior tree state
 
-        # Show login progress dialog and spin a QEventLoop until the worker signals ready/failed.
-        log_dialog = RemoteLoginLogDialog(self, spec.display_name)
-        self._pending_prepare_log_dialog = log_dialog
-        self._pending_prepare_loop = QEventLoop()
-        self._pending_prepare_loop_ok = False
-        log_dialog.show()
-        QApplication.processEvents()
+        # Reuse an already active matching session instead of preparing again.
+        reuse_active_session = bool(self._remote_session_id) and self._remote_descriptor_hash == descriptor_hash
+        if reuse_active_session:
+            self._remote_descriptor = descriptor
+            self._show_status_message("Reusing active remote session.")
+        else:
+            session_id = uuid.uuid4().hex
+            self._remote_session_id = session_id
+            self._remote_descriptor_hash = descriptor_hash
+            self._remote_descriptor = descriptor
 
-        self._send_worker_control_task(
-            "REMOTE_PREPARE",
-            {
-                "session_id": session_id,
-                "descriptor_hash": descriptor_hash,
-                "descriptor": descriptor,
-            },
-        )
-        self._pending_prepare_failure_message = ""
-        self._pending_prepare_loop.exec()
-        self._pending_prepare_log_dialog = None
+        if not reuse_active_session:
+            # Show login progress dialog and spin a QEventLoop until the worker signals ready/failed.
+            log_dialog = RemoteLoginLogDialog(self, spec.display_name)
+            self._pending_prepare_log_dialog = log_dialog
+            self._pending_prepare_loop = QEventLoop()
+            self._pending_prepare_loop_ok = False
+            log_dialog.show()
+            QApplication.processEvents()
 
-        if not self._pending_prepare_loop_ok:
-            # mark_failed was already called in handle_worker_output; show the dialog modally.
-            log_dialog.exec()
-            failure_message = self._pending_prepare_failure_message
-            if self._maybe_retry_ssh_authentication(config, failure_message):
-                self._open_remote_from_config(config)
+            self._send_worker_control_task(
+                "REMOTE_PREPARE",
+                {
+                    "session_id": self._remote_session_id,
+                    "descriptor_hash": descriptor_hash,
+                    "descriptor": descriptor,
+                },
+            )
+            self._pending_prepare_failure_message = ""
+            self._pending_prepare_loop.exec()
+            self._pending_prepare_log_dialog = None
+
+            if not self._pending_prepare_loop_ok:
+                # mark_failed was already called in handle_worker_output; show the dialog modally.
+                log_dialog.exec()
+                failure_message = self._pending_prepare_failure_message
+                if self._maybe_retry_ssh_authentication(config, failure_message):
+                    self._open_remote_from_config(config)
+                    return
                 return
-            return
 
-        log_dialog.close()
+            log_dialog.close()
 
         # Open the navigator backed entirely by worker-side directory listing via IPC.
         list_callback = self._make_worker_list_callback()
         dialog = RemoteFileNavigatorDialog(
-            self, config, spec=spec, list_callback=list_callback, new_remote_button=True
+            self,
+            config,
+            spec=spec,
+            list_callback=list_callback,
+            new_remote_button=True,
+            session_active=bool(self._remote_session_id),
         )
         result = dialog.exec()
         self._last_remote_navigator_state = dialog._collect_tree_state()
+        if dialog.shutdown_session_requested:
+            self._release_remote_session_if_active()
+            self._show_status_message("Remote session shut down.")
+            return
         if dialog.new_remote_requested:
             self._choose_remote()
             return
@@ -529,8 +543,22 @@ class CFVMain(CFVCore):
 
         self._clear_loaded_data_views()
         descriptor = spec_to_descriptor(spec, cache=config.get("cache") if isinstance(config, dict) else None)
-        session_id = uuid.uuid4().hex
         descriptor_hash = remote_descriptor_hash(descriptor)
+        self._last_remote_config = config
+        self._last_remote_navigator_state = None
+
+        # If the currently active session already matches this descriptor, skip prepare.
+        reuse_active_session = bool(self._remote_session_id) and self._remote_descriptor_hash == descriptor_hash
+        if reuse_active_session:
+            self._remote_descriptor = descriptor
+            self._show_status_message("Reusing active remote session.")
+            self._set_window_title_for_file(uri)
+            self._show_status_message(f"Selected remote file: {uri}")
+            self._record_recent_uri(uri, host_alias or spec.display_name)
+            self._load_remote_selected_file(uri, remote_path)
+            return
+
+        session_id = uuid.uuid4().hex
         self._remote_session_id = session_id
         self._remote_descriptor_hash = descriptor_hash
         self._remote_descriptor = descriptor
@@ -633,8 +661,22 @@ class CFVMain(CFVCore):
         if scheme == "ssh":
             host = (parsed.hostname or parsed.netloc or "").strip()
             user = (parsed.username or "").strip()
-            remote_path = unquote(parsed.path or "/")
+            remote_path = unquote(parsed.path or "").lstrip("/")
+            if not remote_path:
+                remote_path = "."
             hosts = RemoteConfigurationDialog._load_ssh_hosts()
+
+            runtime_preferences: dict[str, object] = {}
+            configured_state = self._settings.get("last_remote_configuration")
+            if isinstance(configured_state, dict):
+                configured_prefs = configured_state.get("ssh_runtime_preferences")
+                if isinstance(configured_prefs, dict):
+                    runtime_preferences.update(configured_prefs)
+            open_state = self._settings.get("last_remote_open")
+            if isinstance(open_state, dict):
+                open_prefs = open_state.get("ssh_runtime_preferences")
+                if isinstance(open_prefs, dict):
+                    runtime_preferences.update(open_prefs)
 
             matched_alias = ""
             matched_details: dict[str, object] | None = None
@@ -649,6 +691,37 @@ class CFVMain(CFVCore):
 
             if user and not matched_details.get("user"):
                 matched_details["user"] = user
+
+            alias_prefs = runtime_preferences.get(matched_alias)
+            if isinstance(alias_prefs, dict):
+                remote_python = alias_prefs.get("remote_python")
+                if isinstance(remote_python, str) and remote_python.strip():
+                    matched_details["remote_python"] = remote_python.strip()
+
+                remote_python_options = alias_prefs.get("remote_python_options")
+                if isinstance(remote_python_options, dict):
+                    cleaned_options = {
+                        str(label): str(command)
+                        for label, command in remote_python_options.items()
+                        if str(label).strip() and str(command).strip()
+                    }
+                    if cleaned_options:
+                        matched_details["remote_python_options"] = cleaned_options
+                elif isinstance(remote_python_options, list):
+                    cleaned_options = {
+                        str(item): str(item)
+                        for item in remote_python_options
+                        if str(item).strip()
+                    }
+                    if cleaned_options:
+                        matched_details["remote_python_options"] = cleaned_options
+
+                if "login_shell" in alias_prefs:
+                    login_shell_value = alias_prefs.get("login_shell")
+                    if isinstance(login_shell_value, str):
+                        matched_details["login_shell"] = login_shell_value.strip().lower() in {"1", "true", "yes", "on"}
+                    else:
+                        matched_details["login_shell"] = bool(login_shell_value)
 
             config = {
                 "protocol": "SSH",
@@ -1252,10 +1325,15 @@ class CFVMain(CFVCore):
                 spec=spec,
                 list_callback=list_callback,
                 new_remote_button=True,
+                session_active=bool(self._remote_session_id),
                 initial_tree_state=self._last_remote_navigator_state,
             )
             result = dialog.exec()
             self._last_remote_navigator_state = dialog._collect_tree_state()
+            if dialog.shutdown_session_requested:
+                self._release_remote_session_if_active()
+                self._show_status_message("Remote session shut down.")
+                return
             if dialog.new_remote_requested:
                 self._choose_remote()
                 return

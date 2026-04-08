@@ -282,6 +282,7 @@ def _prepare_remote_session(
         descriptor.get("protocol"),
         descriptor.get("cache"),
     )
+    started = time.monotonic()
     _send_remote_status(
         "preparing",
         session_id=session_id,
@@ -307,11 +308,12 @@ def _prepare_remote_session(
     )
     remote_session_pool[descriptor_hash] = entry
     _cleanup_remote_session_pool()
+    elapsed = max(0.0, time.monotonic() - started)
     _send_remote_status(
         "ready",
         session_id=session_id,
         descriptor_hash=descriptor_hash,
-        message="Remote worker session ready.",
+        message=f"Remote worker session ready in {elapsed:.2f}s.",
     )
     return entry
 
@@ -428,6 +430,13 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
         if not isinstance(descriptor, dict) or not session_id or not descriptor_hash:
             raise ValueError("REMOTE_LIST requires session_id, descriptor_hash, and descriptor")
         path = str(payload.get("path", ""))
+        list_started = time.monotonic()
+        _send_remote_status(
+            "preparing",
+            session_id=session_id,
+            descriptor_hash=descriptor_hash,
+            message=f"Listing remote path: {path or '/'}",
+        )
         # Reuse an already-warm session without sending redundant REMOTE_STATUS messages.
         entry = remote_session_pool.get(descriptor_hash)
         if entry is None:
@@ -440,12 +449,26 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
             entry.last_used = time.monotonic()
         try:
             entries = entry.session.list_entries(path)
+            elapsed = max(0.0, time.monotonic() - list_started)
+            _send_remote_status(
+                "preparing",
+                session_id=session_id,
+                descriptor_hash=descriptor_hash,
+                message=f"Listed {len(entries)} entries from {path or '/'} in {elapsed:.2f}s",
+            )
             send_to_gui("REMOTE_LIST_RESULT", {
                 "path": path,
                 "entries": entries,
                 "error": None,
             })
         except Exception as exc:
+            elapsed = max(0.0, time.monotonic() - list_started)
+            _send_remote_status(
+                "failed",
+                session_id=session_id,
+                descriptor_hash=descriptor_hash,
+                message=f"Listing failed for {path or '/'} after {elapsed:.2f}s: {exc}",
+            )
             send_to_gui("REMOTE_LIST_RESULT", {
                 "path": path,
                 "entries": [],

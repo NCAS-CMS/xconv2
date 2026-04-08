@@ -249,7 +249,19 @@ def descriptor_to_spec(descriptor: dict[str, Any]) -> RemoteFilesystemSpec:
 
 def remote_descriptor_hash(descriptor: dict[str, Any]) -> str:
     """Create a stable hash for descriptor-keyed worker session reuse."""
-    normalized = json.dumps(descriptor, sort_keys=True, separators=(",", ":"))
+    hash_descriptor = dict(descriptor)
+
+    protocol = str(hash_descriptor.get("protocol", "")).lower()
+    storage_options = hash_descriptor.get("storage_options")
+    if protocol == "sftp" and isinstance(storage_options, dict):
+        # Auth secrets are transient runtime material and should not force a new
+        # session hash when reconnecting to the same SSH target.
+        sanitized_storage = dict(storage_options)
+        sanitized_storage.pop("password", None)
+        sanitized_storage.pop("proxyjump_password", None)
+        hash_descriptor["storage_options"] = sanitized_storage
+
+    normalized = json.dumps(hash_descriptor, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
@@ -564,6 +576,7 @@ def create_filesystem(
             url=spec.root_path,
             cache_dir=cache_dir,
             credentials=dict(spec.storage_options),
+            log_callback=log,
         ).fs
 
     if spec.protocol == "sftp":
@@ -587,6 +600,7 @@ def create_filesystem(
             url=f"ssh://{authority}{remote_path}",
             cache_dir=cache_dir,
             credentials=credentials,
+            log_callback=log,
         ).fs
 
     if spec.protocol == "s3":
@@ -618,6 +632,7 @@ def create_filesystem(
             url=synthetic_url,
             cache_dir=cache_dir,
             credentials=dict(spec.storage_options),
+            log_callback=log,
         ).fs
 
     raise ValueError(f"Unsupported filesystem protocol for create_filesystem: {spec.protocol!r}")
