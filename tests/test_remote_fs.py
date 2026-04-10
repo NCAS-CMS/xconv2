@@ -389,6 +389,43 @@ def test_factory_ssh_forwards_paramiko_logs_to_callback(
     assert any("[p5rem.bootstrap]" in line and "SSH connection established" in line for line in streamed)
 
 
+def test_p5rem_filesystem_ls_uses_structured_entries_without_stat() -> None:
+    class _FakeSession:
+        def list(self, path: str):
+            assert path == "/remote"
+            return [
+                {
+                    "name": "/remote/data.nc",
+                    "type": "file",
+                    "size": 1234,
+                    "mtime": 1710000000.0,
+                    "is_link": False,
+                },
+                {
+                    "name": "/remote/subdir",
+                    "type": "directory",
+                    "size": 0,
+                    "mtime": 1710000001.0,
+                    "is_link": True,
+                },
+            ]
+
+        def stat(self, path: str):
+            raise AssertionError(f"stat() should not be called for structured entries: {path}")
+
+    fs = remote_fs.P5RemFilesystem(_FakeSession())
+    entries = fs.ls("/remote", detail=True)
+
+    assert isinstance(entries, list)
+    assert entries[0]["name"] == "/remote/data.nc"
+    assert entries[0]["type"] == "file"
+    assert entries[0]["size"] == 1234
+    assert entries[0]["is_link"] is False
+    assert entries[1]["name"] == "/remote/subdir"
+    assert entries[1]["type"] == "directory"
+    assert entries[1]["is_link"] is True
+
+
 def test_p5rem_filesystem_ls_normalizes_string_entries_with_directory_types() -> None:
     class _FakeSession:
         def list(self, path: str):

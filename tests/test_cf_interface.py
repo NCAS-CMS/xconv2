@@ -14,10 +14,7 @@ from xconv2.xconv_cf_interface import (
 )
 
 import numpy as np
-
-
-cf = pytest.importorskip("cf")
-
+import cf
 
 class _MockCellMeasures:
     def __call__(self) -> str:
@@ -25,6 +22,7 @@ class _MockCellMeasures:
 
 
 class _MockField:
+    #FIXME: replace with a cf example field. 
     shape = (2, 3)
 
     def __str__(self) -> str:
@@ -71,28 +69,22 @@ class _MockCoord:
         return self._name or default
 
 
-class _MockCoordField:
-    def __init__(self) -> None:
-        self._coords = {
-            "time": _MockCoord("time", [1, 2, 3]),
-            "height": _MockCoord("height", [10]),
-            "lat": _MockCoord("latitude", [-90, 0, 90]),
-        }
-
-    def dimension_coordinates(self, **kwargs) -> list[str]:
-        return self._coords
-
-    def coordinate(self, key: str) -> _MockCoord:
-        return self._coords[key]
-
-
 def test_coordinate_info_filters_singletons_and_serializes_values() -> None:
-    payload = coordinate_info(_MockCoordField())
+
+    field = cf.example_field(7) 
+    payload = coordinate_info(field)
 
     assert payload == [
-        ("time", ["1", "2", "3"], ""),
-        ("latitude", ["-90", "0", "90"], ""),
+        ('time', ['120.5', '121.5', '122.5'], 'days since 1979-1-1 gregorian'),
+        ('grid_latitude', ['0.44', '0.0', '-0.44', '-0.88'], 'degrees'),
+        ('grid_longitude', ['-1.18', '-0.74', '-0.3', '0.14', '0.58'], 'degrees')
     ]
+
+
+def test_nemo_field() -> None:
+    field = cf.read('data/nemo_field_eg1.nc')[0]
+    payload = coordinate_info(field)
+    print(payload)
 
 
 class _FakePlotField:

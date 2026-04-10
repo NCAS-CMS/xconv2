@@ -70,7 +70,7 @@ def field_info(fields: object) -> list[dict[str, object]]:
     return rows
 
 
-def coordinate_info(field: object) -> list[tuple[str, list[str]]]:
+def coordinate_info_obsolete(field: object) -> list[tuple[str, list[str]]]:
     """
     Extract plottable 1D dimension-coordinate values.
 
@@ -107,6 +107,56 @@ def coordinate_info(field: object) -> list[tuple[str, list[str]]]:
 
     return coords
 
+
+def coordinate_info(field: object) -> list[tuple[str, list[str], str]]:
+    """
+    Extract plottable 1D dimension-coordinate values with units.
+
+    Reads dimension coordinates from a field and returns only coordinates with
+    more than one value so the GUI can build useful range sliders. Also includes
+    coordinate units in the output.
+
+    Args:
+        field: CF field-like object exposing dimension coordinate accessors.    
+        Returns:
+        list[tuple[str, list[str]]]: Coordinate identity with serialized values.
+    """
+    candidates = []
+    rejected = []
+
+    axes_of_interest = {k:v for k,v in field.domain_axes().items() if v.size > 1}
+
+    for axis_key in axes_of_interest: 
+
+        c = field.coordinates(filter_by_axis=(axis_key,), axis_mode='exact')
+        if len(c) > 1:
+            options = [(cc, c.construct_type == 'dimension_coordinate') for cc in c]
+            options = sorted(options, key=lambda x: x[1], reverse=True)
+            candidates.append(options[0][0])
+            rejected.append([cc for cc, is_dim in options if not is_dim])
+        else:
+            # just get the first one as it's the only one
+            candidates.append(next(iter(c.values())))
+            
+    #any more?
+    all_of_them =  field.coordinates(filter_by_naxes=(1,))
+    for c in all_of_them:
+        if c not in candidates and c not in rejected:
+                candidates.append(c)
+
+    coords: list[tuple[str, list[str]]] = []
+    for c in candidates:
+        try:
+            arr = getattr(c, "array", None)
+        except Exception as exc: 
+             logger.warning(f"Skipping coordinate in metadata extraction due to backend read error ({c}, {exc})")
+        if arr is not None:
+            if len(arr) <= 1:
+                continue                
+            vals = [str(x) for x in arr] 
+            coords.append((c[0].identity(default="unknown"), vals, str(getattr(c[0], "Units",""))))
+    
+    return coords
 
 def contour_data_range(pfld: object) -> tuple[float, float]:
     """Return contour min/max while tolerating backend indexing quirks.

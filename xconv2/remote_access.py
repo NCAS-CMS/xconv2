@@ -104,7 +104,6 @@ class RemoteFilesystemSpec:
 # Classes
 # ---------------------------------------------------------------------------
 
-
 class RemoteAccessSession:
     """Shared remote access facade for listing and reading via one filesystem."""
 
