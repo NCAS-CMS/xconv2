@@ -130,7 +130,10 @@ def test_save_ssh_host_writes_config_file(tmp_path: Path) -> None:
 def test_load_https_locations_prefers_https_key() -> None:
     state = {
         "https_locations": {
-            "prod": {"url": "https://example.org/data"},
+            "prod": {
+                "url": "https://example.org/data",
+                "reductionist_url": "https://reductionist.example.org/prod",
+            },
         },
         "http_locations": {
             "legacy": {"url": "http://legacy.example.org"},
@@ -139,7 +142,12 @@ def test_load_https_locations_prefers_https_key() -> None:
 
     locations = RemoteConfigurationDialog._load_http_locations(state)
 
-    assert locations == {"prod": {"url": "https://example.org/data"}}
+    assert locations == {
+        "prod": {
+            "url": "https://example.org/data",
+            "reductionist_url": "https://reductionist.example.org/prod",
+        }
+    }
 
 
 def test_load_https_locations_falls_back_to_legacy_http_key() -> None:
@@ -157,7 +165,10 @@ def test_load_https_locations_falls_back_to_legacy_http_key() -> None:
 def test_open_dialog_uses_https_locations() -> None:
     state = {
         "https_locations": {
-            "alpha": {"url": "https://alpha.example.org"},
+            "alpha": {
+                "url": "https://alpha.example.org",
+                "reductionist_url": "https://reductionist.example.org/alpha",
+            },
             "beta": {"base_url": "https://beta.example.org"},
         },
     }
@@ -165,9 +176,50 @@ def test_open_dialog_uses_https_locations() -> None:
     locations = RemoteOpenDialog._load_http_locations(state)
 
     assert locations == {
-        "alpha": {"url": "https://alpha.example.org"},
+        "alpha": {
+            "url": "https://alpha.example.org",
+            "reductionist_url": "https://reductionist.example.org/alpha",
+        },
         "beta": {"url": "https://beta.example.org"},
     }
+
+
+def test_load_s3_locations_merges_reductionist_from_state(monkeypatch) -> None:
+    def _fake_get_locations():
+        return (
+            {
+                "cedadev": {"url": "https://example.invalid", "api": "S3v4"},
+                "noextra": {"url": "https://noextra.invalid", "api": "S3v4"},
+            },
+            {"example.invalid": "cedadev", "noextra.invalid": "noextra"},
+        )
+
+    monkeypatch.setattr("xconv2.ui.dialogs.get_locations", _fake_get_locations)
+
+    locations = RemoteConfigurationDialog._load_s3_locations(
+        {
+            "s3_reductionist_locations": {
+                "cedadev": "https://reductionist.example.org/ceda",
+                "unknown": "https://reductionist.example.org/unknown",
+            }
+        }
+    )
+
+    assert locations["cedadev"]["reductionist_url"] == "https://reductionist.example.org/ceda"
+    assert "reductionist_url" not in locations["noextra"]
+
+
+def test_normalize_s3_reductionist_locations_filters_empty_values() -> None:
+    cleaned = RemoteConfigurationDialog._normalize_s3_reductionist_locations(
+        {
+            "alpha": "https://reductionist.example.org/alpha",
+            "  ": "https://reductionist.example.org/blank-alias",
+            "beta": "   ",
+            "gamma": None,
+        }
+    )
+
+    assert cleaned == {"alpha": "https://reductionist.example.org/alpha"}
 
 
 def test_remote_python_options_from_discovered_envs() -> None:

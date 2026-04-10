@@ -1721,6 +1721,9 @@ class CFVCore(QMainWindow):
             https_locations = self._settings.get("remote_http_locations")
         if isinstance(https_locations, dict) and https_locations:
             state["https_locations"] = dict(https_locations)
+        s3_reductionist_locations = self._settings.get("remote_s3_reductionist_locations")
+        if isinstance(s3_reductionist_locations, dict) and s3_reductionist_locations:
+            state["s3_reductionist_locations"] = dict(s3_reductionist_locations)
         config, ok, next_state = RemoteConfigurationDialog.get_configuration(self, state=state)
         self._settings["last_remote_configuration"] = next_state
         if isinstance(next_state, dict):
@@ -1729,6 +1732,13 @@ class CFVCore(QMainWindow):
                 persisted_https = next_state.get("http_locations")
             if isinstance(persisted_https, dict):
                 self._settings["remote_https_locations"] = dict(persisted_https)
+            persisted_s3_reductionist = next_state.get("s3_reductionist_locations")
+            if isinstance(persisted_s3_reductionist, dict):
+                self._settings["remote_s3_reductionist_locations"] = {
+                    str(alias).strip(): str(url).strip()
+                    for alias, url in persisted_s3_reductionist.items()
+                    if str(alias).strip() and str(url).strip()
+                }
         self._save_settings()
         if not ok or config is None:
             return
@@ -1759,9 +1769,23 @@ class CFVCore(QMainWindow):
             if isinstance(http_locations, dict):
                 merged_http.update(http_locations)
 
-            if merged_http:
+            merged_s3_reductionist: dict[str, str] = {}
+            configured_s3_reductionist = self._settings.get("remote_s3_reductionist_locations")
+            if isinstance(configured_s3_reductionist, dict):
+                merged_s3_reductionist.update(
+                    {
+                        str(alias).strip(): str(url).strip()
+                        for alias, url in configured_s3_reductionist.items()
+                        if str(alias).strip() and str(url).strip()
+                    }
+                )
+
+            if merged_http or merged_s3_reductionist:
                 state = dict(state)
-                state["https_locations"] = dict(merged_http)
+                if merged_http:
+                    state["https_locations"] = dict(merged_http)
+                if merged_s3_reductionist:
+                    state["s3_reductionist_locations"] = dict(merged_s3_reductionist)
 
         config, ok, next_state = RemoteOpenDialog.get_configuration(self, state=state)
         self._settings["last_remote_open"] = next_state

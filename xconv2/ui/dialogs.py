@@ -232,7 +232,7 @@ class RemoteConfigurationDialog(QDialog):
         self.setWindowTitle("Remote Configuration")
         self.resize(760, 620)
 
-        self._s3_locations = self._load_s3_locations()
+        self._s3_locations = self._load_s3_locations(state)
         self._ssh_runtime_preferences = self._extract_ssh_runtime_preferences(state)
         self._ssh_hosts = self._apply_ssh_runtime_preferences(
             self._load_ssh_hosts(),
@@ -279,13 +279,48 @@ class RemoteConfigurationDialog(QDialog):
         self._restore_state(state)
 
     @staticmethod
-    def _load_s3_locations() -> dict[str, dict[str, Any]]:
-        """Load S3 location definitions from AAA config when available."""
+    def _load_s3_locations(state: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
+        """Load S3 location definitions and merge persisted UI-only attributes."""
         options = get_locations()
         if options is None:
-            return {}
-        locations, _ = options
+            locations: dict[str, dict[str, Any]] = {}
+        else:
+            loaded_locations, _ = options
+            locations = {
+                str(alias): dict(details)
+                for alias, details in loaded_locations.items()
+                if isinstance(alias, str) and isinstance(details, dict)
+            }
+
+        if isinstance(state, dict):
+            reductionist_map = RemoteConfigurationDialog._normalize_s3_reductionist_locations(
+                state.get("s3_reductionist_locations")
+            )
+            for alias, reductionist_url in reductionist_map.items():
+                if alias in locations:
+                    details = dict(locations.get(alias, {}))
+                    details["reductionist_url"] = reductionist_url
+                    locations[alias] = details
+
         return dict(sorted(locations.items()))
+
+    @staticmethod
+    def _normalize_s3_reductionist_locations(raw: object) -> dict[str, str]:
+        """Normalize persisted alias->reductionist_url mapping for S3 hosts."""
+        if not isinstance(raw, dict):
+            return {}
+
+        cleaned: dict[str, str] = {}
+        for alias, value in raw.items():
+            if not isinstance(alias, str):
+                continue
+            alias_text = alias.strip()
+            if not alias_text:
+                continue
+            url_text = str(value).strip() if value is not None else ""
+            if url_text:
+                cleaned[alias_text] = url_text
+        return dict(sorted(cleaned.items()))
 
     @staticmethod
     def _load_http_locations(state: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
@@ -309,7 +344,22 @@ class RemoteConfigurationDialog(QDialog):
                 continue
             url = details.get("url") or details.get("base_url")
             if isinstance(url, str) and url.strip():
-                cleaned[alias] = {"url": url.strip()}
+                normalized = {"url": url.strip()}
+                reductionist_url = details.get("reductionist_url")
+                if isinstance(reductionist_url, str) and reductionist_url.strip():
+                    normalized["reductionist_url"] = reductionist_url.strip()
+                cleaned[alias] = normalized
+        return dict(sorted(cleaned.items()))
+
+    def _current_s3_reductionist_locations(self) -> dict[str, str]:
+        """Collect non-empty S3 reductionist URLs keyed by alias."""
+        cleaned: dict[str, str] = {}
+        for alias, details in self._s3_locations.items():
+            if not isinstance(alias, str) or not alias.strip() or not isinstance(details, dict):
+                continue
+            reductionist_url = details.get("reductionist_url")
+            if isinstance(reductionist_url, str) and reductionist_url.strip():
+                cleaned[alias.strip()] = reductionist_url.strip()
         return dict(sorted(cleaned.items()))
 
     @staticmethod
@@ -598,9 +648,13 @@ class RemoteConfigurationDialog(QDialog):
         self._set_line_edit_character_width(self.s3_existing_url)
         self.s3_existing_api = QLineEdit("")
         self.s3_existing_api.setReadOnly(True)
+        self.s3_existing_reductionist_url = QLineEdit("")
+        self.s3_existing_reductionist_url.setReadOnly(True)
+        self._set_line_edit_character_width(self.s3_existing_reductionist_url)
         existing_layout.addRow("Host alias:", self.s3_existing_combo)
         existing_layout.addRow("URL:", self.s3_existing_url)
         existing_layout.addRow("API:", self.s3_existing_api)
+        existing_layout.addRow("(Optional) Reductionist URL:", self.s3_existing_reductionist_url)
         layout.addWidget(self.s3_existing_group)
 
         self.s3_config_group = QGroupBox("Use config file")
@@ -613,9 +667,13 @@ class RemoteConfigurationDialog(QDialog):
         self._set_line_edit_character_width(self.s3_config_url)
         self.s3_config_api = QLineEdit("")
         self.s3_config_api.setReadOnly(True)
+        self.s3_config_reductionist_url = QLineEdit("")
+        self.s3_config_reductionist_url.setReadOnly(True)
+        self._set_line_edit_character_width(self.s3_config_reductionist_url)
         config_layout.addRow("Config entry:", self.s3_config_combo)
         config_layout.addRow("URL:", self.s3_config_url)
         config_layout.addRow("API:", self.s3_config_api)
+        config_layout.addRow("(Optional) Reductionist URL:", self.s3_config_reductionist_url)
         layout.addWidget(self.s3_config_group)
 
         self.s3_new_group = QGroupBox("Add new")
@@ -626,6 +684,8 @@ class RemoteConfigurationDialog(QDialog):
         self.s3_access_key_edit = QLineEdit("")
         self.s3_secret_key_edit = QLineEdit("")
         self.s3_secret_key_edit.setEchoMode(QLineEdit.Password)
+        self.s3_reductionist_url_edit = QLineEdit("")
+        self._set_line_edit_character_width(self.s3_reductionist_url_edit)
         self.s3_api_combo = QComboBox()
         self.s3_api_combo.addItems(["S3v4"])
         self.s3_api_combo.setEnabled(False)
@@ -636,6 +696,7 @@ class RemoteConfigurationDialog(QDialog):
         new_layout.addRow("URL:", self.s3_url_edit)
         new_layout.addRow("Access Key:", self.s3_access_key_edit)
         new_layout.addRow("Secret Key:", self.s3_secret_key_edit)
+        new_layout.addRow("Reductionist URL:", self.s3_reductionist_url_edit)
         new_layout.addRow("API:", self.s3_api_combo)
         new_layout.addRow("Config target:", self.s3_config_target_combo)
         layout.addWidget(self.s3_new_group)
@@ -649,6 +710,7 @@ class RemoteConfigurationDialog(QDialog):
         details = self._s3_locations.get(alias, {})
         self.s3_existing_url.setText(str(details.get("url", "")))
         self.s3_existing_api.setText(str(details.get("api", "")))
+        self.s3_existing_reductionist_url.setText(str(details.get("reductionist_url", "")))
 
     def _update_s3_config_details(self) -> None:
         """Refresh preview fields for a config-file-backed S3 configuration."""
@@ -656,6 +718,7 @@ class RemoteConfigurationDialog(QDialog):
         details = self._s3_locations.get(alias, {})
         self.s3_config_url.setText(str(details.get("url", "")))
         self.s3_config_api.setText(str(details.get("api", "")))
+        self.s3_config_reductionist_url.setText(str(details.get("reductionist_url", "")))
 
     def _update_s3_mode(self) -> None:
         """Show the relevant S3 subframe for the selected configuration mode."""
@@ -668,6 +731,7 @@ class RemoteConfigurationDialog(QDialog):
             self.s3_url_edit.clear()
             self.s3_access_key_edit.clear()
             self.s3_secret_key_edit.clear()
+            self.s3_reductionist_url_edit.clear()
 
     def _build_http_tab(self) -> QWidget:
         """Build HTTPS configuration controls."""
@@ -692,8 +756,12 @@ class RemoteConfigurationDialog(QDialog):
         self.http_existing_url = QLineEdit("")
         self.http_existing_url.setReadOnly(True)
         self._set_line_edit_character_width(self.http_existing_url)
+        self.http_existing_reductionist_url = QLineEdit("")
+        self.http_existing_reductionist_url.setReadOnly(True)
+        self._set_line_edit_character_width(self.http_existing_reductionist_url)
         existing_layout.addRow("Host alias:", self.http_existing_combo)
         existing_layout.addRow("URL:", self.http_existing_url)
+        existing_layout.addRow("Reductionist URL:", self.http_existing_reductionist_url)
         layout.addWidget(self.http_existing_group)
 
         self.http_new_group = QGroupBox("Add new")
@@ -701,8 +769,11 @@ class RemoteConfigurationDialog(QDialog):
         self.http_alias_edit = QLineEdit("")
         self.http_url_edit = QLineEdit("")
         self._set_line_edit_character_width(self.http_url_edit)
+        self.http_reductionist_url_edit = QLineEdit("")
+        self._set_line_edit_character_width(self.http_reductionist_url_edit)
         new_layout.addRow("Host alias:", self.http_alias_edit)
         new_layout.addRow("Remote HTTPS URL:", self.http_url_edit)
+        new_layout.addRow("Reductionist URL:", self.http_reductionist_url_edit)
         layout.addWidget(self.http_new_group)
 
         layout.addStretch(1)
@@ -716,14 +787,16 @@ class RemoteConfigurationDialog(QDialog):
         if mode == "Add new":
             self.http_alias_edit.clear()
             self.http_url_edit.clear()
+            self.http_reductionist_url_edit.clear()
 
     def _update_http_selected_details(self) -> None:
         """Refresh preview fields for an existing HTTPS alias."""
         alias = self.http_existing_combo.currentText().strip()
         details = self._http_locations.get(alias, {})
         url = details.get("url") if isinstance(details, dict) else ""
-        if isinstance(url, str):
-            self.http_existing_url.setText(url)
+        reductionist_url = details.get("reductionist_url") if isinstance(details, dict) else ""
+        self.http_existing_url.setText(url if isinstance(url, str) else "")
+        self.http_existing_reductionist_url.setText(reductionist_url if isinstance(reductionist_url, str) else "")
 
     def _select_saved_http_alias(self, alias: str, details: dict[str, str]) -> None:
         """Switch UI state to an existing HTTPS selection after saving a new alias."""
@@ -1097,6 +1170,7 @@ class RemoteConfigurationDialog(QDialog):
                     "url": self.s3_url_edit.text().strip(),
                     "access_key": self.s3_access_key_edit.text().strip(),
                     "secret_key": self.s3_secret_key_edit.text(),
+                    "reductionist_url": self.s3_reductionist_url_edit.text().strip(),
                     "api": self.s3_api_combo.currentText(),
                     "config_target": self.s3_config_target_combo.currentText(),
                 }
@@ -1144,6 +1218,7 @@ class RemoteConfigurationDialog(QDialog):
                     "mode": mode,
                     "alias": self.http_alias_edit.text().strip(),
                     "url": self.http_url_edit.text().strip(),
+                    "reductionist_url": self.http_reductionist_url_edit.text().strip(),
                 }
             else:
                 alias = self.http_existing_combo.currentText().strip()
@@ -1181,6 +1256,8 @@ class RemoteConfigurationDialog(QDialog):
             "s3_url": self.s3_url_edit.text().strip(),
             "s3_access_key": self.s3_access_key_edit.text().strip(),
             "s3_secret_key": self.s3_secret_key_edit.text(),
+            "s3_reductionist_url": self.s3_reductionist_url_edit.text().strip(),
+            "s3_reductionist_locations": self._current_s3_reductionist_locations(),
             "s3_config_target": self.s3_config_target_combo.currentText(),
             "ssh_mode": self.ssh_mode_combo.currentText(),
             "ssh_existing_alias": self.ssh_existing_combo.currentText(),
@@ -1197,6 +1274,7 @@ class RemoteConfigurationDialog(QDialog):
             "https_existing_alias": self.http_existing_combo.currentText().strip(),
             "https_alias": self.http_alias_edit.text().strip(),
             "https_url": self.http_url_edit.text().strip(),
+            "https_reductionist_url": self.http_reductionist_url_edit.text().strip(),
             "https_locations": dict(self._http_locations),
             "disk_mode": self.disk_mode_combo.currentText(),
             "disk_location": self.disk_location_edit.text().strip(),
@@ -1233,6 +1311,8 @@ class RemoteConfigurationDialog(QDialog):
             self.s3_access_key_edit.setText(str(state["s3_access_key"]))
         if isinstance(state.get("s3_secret_key"), str):
             self.s3_secret_key_edit.setText(str(state["s3_secret_key"]))
+        if isinstance(state.get("s3_reductionist_url"), str):
+            self.s3_reductionist_url_edit.setText(str(state["s3_reductionist_url"]))
         s3_config_target = state.get("s3_config_target")
         if isinstance(s3_config_target, str):
             index = self.s3_config_target_combo.findText(s3_config_target)
@@ -1305,6 +1385,10 @@ class RemoteConfigurationDialog(QDialog):
             https_url = state.get("http_url")
         if isinstance(https_url, str):
             self.http_url_edit.setText(https_url)
+
+        https_reductionist_url = state.get("https_reductionist_url")
+        if isinstance(https_reductionist_url, str):
+            self.http_reductionist_url_edit.setText(https_reductionist_url)
 
         disk_mode = state.get("disk_mode")
         if isinstance(disk_mode, str):
@@ -1383,6 +1467,9 @@ class RemoteConfigurationDialog(QDialog):
                 "api": self.s3_api_combo.currentText(),
                 "path": "auto",
             }
+            reductionist_url = self.s3_reductionist_url_edit.text().strip()
+            if reductionist_url:
+                details["reductionist_url"] = reductionist_url
             self._save_s3_location(
                 alias,
                 str(details["url"]),
@@ -1421,7 +1508,11 @@ class RemoteConfigurationDialog(QDialog):
             if self.http_mode_combo.currentText() == "Add new":
                 alias = self.http_alias_edit.text().strip()
                 url = self.http_url_edit.text().strip()
-                self._select_saved_http_alias(alias, {"url": url})
+                details: dict[str, str] = {"url": url}
+                reductionist_url = self.http_reductionist_url_edit.text().strip()
+                if reductionist_url:
+                    details["reductionist_url"] = reductionist_url
+                self._select_saved_http_alias(alias, details)
 
         return True
 
@@ -1461,7 +1552,7 @@ class RemoteOpenDialog(QDialog):
         self.setWindowTitle("Open Remote")
         self.resize(560, 260)
 
-        self._s3_locations = RemoteConfigurationDialog._load_s3_locations()
+        self._s3_locations = RemoteConfigurationDialog._load_s3_locations(state)
         self._ssh_runtime_preferences = RemoteConfigurationDialog._extract_ssh_runtime_preferences(state)
         self._ssh_hosts = RemoteConfigurationDialog._apply_ssh_runtime_preferences(
             RemoteConfigurationDialog._load_ssh_hosts(),
@@ -1595,6 +1686,13 @@ class RemoteOpenDialog(QDialog):
             "https_alias": self.http_open_combo.currentText(),
             "ssh_alias": self.ssh_open_combo.currentText(),
             "ssh_runtime_preferences": dict(self._ssh_runtime_preferences),
+            "s3_reductionist_locations": RemoteConfigurationDialog._normalize_s3_reductionist_locations(
+                {
+                    alias: details.get("reductionist_url")
+                    for alias, details in self._s3_locations.items()
+                    if isinstance(details, dict)
+                }
+            ),
             "https_locations": dict(self._http_locations),
         }
 

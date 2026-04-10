@@ -798,6 +798,9 @@ class CFVMain(CFVCore):
         https_locations = self._settings.get("remote_https_locations")
         if isinstance(https_locations, dict):
             state["https_locations"] = dict(https_locations)
+        s3_reductionist_locations = self._settings.get("remote_s3_reductionist_locations")
+        if isinstance(s3_reductionist_locations, dict):
+            state["s3_reductionist_locations"] = dict(s3_reductionist_locations)
 
         if scheme in {"http", "https"}:
             state.update(
@@ -825,6 +828,13 @@ class CFVMain(CFVCore):
             persisted_https = next_state.get("https_locations")
             if isinstance(persisted_https, dict):
                 self._settings["remote_https_locations"] = dict(persisted_https)
+            persisted_s3_reductionist = next_state.get("s3_reductionist_locations")
+            if isinstance(persisted_s3_reductionist, dict):
+                self._settings["remote_s3_reductionist_locations"] = {
+                    str(alias).strip(): str(url).strip()
+                    for alias, url in persisted_s3_reductionist.items()
+                    if str(alias).strip() and str(url).strip()
+                }
         self._save_settings()
 
     @staticmethod
@@ -1244,6 +1254,9 @@ class CFVMain(CFVCore):
             https_locations = self._settings.get("remote_http_locations")
         if isinstance(https_locations, dict) and https_locations:
             state["https_locations"] = dict(https_locations)
+        s3_reductionist_locations = self._settings.get("remote_s3_reductionist_locations")
+        if isinstance(s3_reductionist_locations, dict) and s3_reductionist_locations:
+            state["s3_reductionist_locations"] = dict(s3_reductionist_locations)
         config, ok, next_state = RemoteConfigurationDialog.get_configuration(self, state=state)
         self._settings["last_remote_configuration"] = next_state
         if isinstance(next_state, dict):
@@ -1252,6 +1265,13 @@ class CFVMain(CFVCore):
                 persisted_https = next_state.get("http_locations")
             if isinstance(persisted_https, dict):
                 self._settings["remote_https_locations"] = dict(persisted_https)
+            persisted_s3_reductionist = next_state.get("s3_reductionist_locations")
+            if isinstance(persisted_s3_reductionist, dict):
+                self._settings["remote_s3_reductionist_locations"] = {
+                    str(alias).strip(): str(url).strip()
+                    for alias, url in persisted_s3_reductionist.items()
+                    if str(alias).strip() and str(url).strip()
+                }
         self._save_settings()
         if not ok or config is None:
             return
@@ -1264,6 +1284,7 @@ class CFVMain(CFVCore):
         if isinstance(state, dict):
             merged_http: dict[str, object] = {}
             merged_ssh_runtime_preferences: dict[str, object] = {}
+            merged_s3_reductionist: dict[str, str] = {}
 
             configured_state = self._settings.get("last_remote_configuration")
             if isinstance(configured_state, dict):
@@ -1282,16 +1303,28 @@ class CFVMain(CFVCore):
             if isinstance(http_locations, dict):
                 merged_http.update(http_locations)
 
+            persisted_s3_reductionist = self._settings.get("remote_s3_reductionist_locations")
+            if isinstance(persisted_s3_reductionist, dict):
+                merged_s3_reductionist.update(
+                    {
+                        str(alias).strip(): str(url).strip()
+                        for alias, url in persisted_s3_reductionist.items()
+                        if str(alias).strip() and str(url).strip()
+                    }
+                )
+
             open_state_ssh_prefs = state.get("ssh_runtime_preferences") if isinstance(state, dict) else None
             if isinstance(open_state_ssh_prefs, dict):
                 merged_ssh_runtime_preferences.update(open_state_ssh_prefs)
 
-            if merged_http or merged_ssh_runtime_preferences:
+            if merged_http or merged_ssh_runtime_preferences or merged_s3_reductionist:
                 state = dict(state)
                 if merged_http:
                     state["https_locations"] = dict(merged_http)
                 if merged_ssh_runtime_preferences:
                     state["ssh_runtime_preferences"] = dict(merged_ssh_runtime_preferences)
+                if merged_s3_reductionist:
+                    state["s3_reductionist_locations"] = dict(merged_s3_reductionist)
 
         config, ok, next_state = RemoteOpenDialog.get_configuration(self, state=state)
         self._settings["last_remote_open"] = next_state
