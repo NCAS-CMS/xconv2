@@ -696,7 +696,7 @@ class RemoteConfigurationDialog(QDialog):
         new_layout.addRow("URL:", self.s3_url_edit)
         new_layout.addRow("Access Key:", self.s3_access_key_edit)
         new_layout.addRow("Secret Key:", self.s3_secret_key_edit)
-        new_layout.addRow("Reductionist URL:", self.s3_reductionist_url_edit)
+        new_layout.addRow("(Optional) Reductionist URL:", self.s3_reductionist_url_edit)
         new_layout.addRow("API:", self.s3_api_combo)
         new_layout.addRow("Config target:", self.s3_config_target_combo)
         layout.addWidget(self.s3_new_group)
@@ -761,7 +761,7 @@ class RemoteConfigurationDialog(QDialog):
         self._set_line_edit_character_width(self.http_existing_reductionist_url)
         existing_layout.addRow("Host alias:", self.http_existing_combo)
         existing_layout.addRow("URL:", self.http_existing_url)
-        existing_layout.addRow("Reductionist URL:", self.http_existing_reductionist_url)
+        existing_layout.addRow("(Optional) Reductionist URL:", self.http_existing_reductionist_url)
         layout.addWidget(self.http_existing_group)
 
         self.http_new_group = QGroupBox("Add new")
@@ -773,7 +773,7 @@ class RemoteConfigurationDialog(QDialog):
         self._set_line_edit_character_width(self.http_reductionist_url_edit)
         new_layout.addRow("Host alias:", self.http_alias_edit)
         new_layout.addRow("Remote HTTPS URL:", self.http_url_edit)
-        new_layout.addRow("Reductionist URL:", self.http_reductionist_url_edit)
+        new_layout.addRow("(Optional) Reductionist URL:", self.http_reductionist_url_edit)
         layout.addWidget(self.http_new_group)
 
         layout.addStretch(1)
@@ -871,7 +871,7 @@ class RemoteConfigurationDialog(QDialog):
         layout.addWidget(self.ssh_new_group)
 
         # Runtime-only SSH execution options for p5rem bootstrap.
-        self.ssh_runtime_group = QGroupBox("Remote Python")
+        self.ssh_runtime_group = QGroupBox("Remote Python (must include 'pyfive' and 'cbor2'; no special reductionist needed)")
         runtime_layout = QFormLayout(self.ssh_runtime_group)
         remote_python_row = QHBoxLayout()
         self.ssh_remote_python_combo = QComboBox()

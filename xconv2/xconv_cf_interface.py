@@ -118,44 +118,74 @@ def coordinate_info(field: object) -> list[tuple[str, list[str], str]]:
 
     Args:
         field: CF field-like object exposing dimension coordinate accessors.    
-        Returns:
-        list[tuple[str, list[str]]]: Coordinate identity with serialized values.
+    Returns:
+        list[tuple[str, list[str], str]]: Coordinate identity with serialized values and units.
     """
-    candidates = []
-    rejected = []
 
-    axes_of_interest = {k:v for k,v in field.domain_axes().items() if v.size > 1}
-
-    for axis_key in axes_of_interest: 
-
-        c = field.coordinates(filter_by_axis=(axis_key,), axis_mode='exact')
-        if len(c) > 1:
-            options = [(cc, c.construct_type == 'dimension_coordinate') for cc in c]
-            options = sorted(options, key=lambda x: x[1], reverse=True)
-            candidates.append(options[0][0])
-            rejected.append([cc for cc, is_dim in options if not is_dim])
-        else:
-            # just get the first one as it's the only one
-            candidates.append(next(iter(c.values())))
-            
-    #any more?
-    all_of_them =  field.coordinates(filter_by_naxes=(1,))
-    for c in all_of_them:
-        if c not in candidates and c not in rejected:
-                candidates.append(c)
-
-    coords: list[tuple[str, list[str]]] = []
-    for c in candidates:
+    def _safe_array(construct: object) -> object | None:
         try:
-            arr = getattr(c, "array", None)
-        except Exception as exc: 
-             logger.warning(f"Skipping coordinate in metadata extraction due to backend read error ({c}, {exc})")
-        if arr is not None:
-            if len(arr) <= 1:
-                continue                
-            vals = [str(x) for x in arr] 
-            coords.append((c[0].identity(default="unknown"), vals, str(getattr(c[0], "Units",""))))
-    
+            return getattr(construct, "array", None)
+        except Exception as exc:
+            logger.warning(
+                "Skipping coordinate in metadata extraction due to backend read error (%s, %s)",
+                construct,
+                exc,
+            )
+            return None
+
+    coords: list[tuple[str, list[str], str]] = []
+    seen_names: set[str] = set()
+
+    one_d_coords = field.coordinates(filter_by_naxes=(1,))
+    for construct in one_d_coords.values():
+        arr = _safe_array(construct)
+        if arr is None or len(arr) <= 1:
+            continue
+
+        name =  str(construct.identity(default="unknown"))
+        if name in seen_names:
+            continue
+
+        vals = [str(x) for x in arr]
+        coords.append((name, vals, str(getattr(construct, "Units", ""))))
+        seen_names.add(name)
+
+    if coords:
+        return coords
+
+    # Fallback for fields that expose only 2D coordinates (for example NEMO
+    # latitude/longitude auxiliary coordinates). Derive global bounds from each
+    # auxiliary coordinate and synthesize slider values from the resulting bbox
+    # limits.
+    two_d_coords = field.coordinates(filter_by_naxes=(2,))
+    for construct in two_d_coords.values():
+        arr = _safe_array(construct)
+        if arr is None:
+            continue
+
+        marr = np.ma.array(arr)
+        if marr.ndim != 2 or marr.size <= 1:
+            continue
+
+        lo = float(np.nanmin(marr.filled(np.nan)))
+        hi = float(np.nanmax(marr.filled(np.nan)))
+        if np.isnan(lo) or np.isnan(hi):
+            continue
+
+        # Use the larger horizontal size so synthesized sliders retain useful
+        # resolution without requiring direction-specific heuristics.
+        count = int(max(marr.shape))
+        if count <= 1:
+            continue
+
+        name =  str(construct.identity(default="unknown"))
+        if name in seen_names:
+            continue
+
+        vals = [str(x) for x in np.linspace(lo, hi, num=count)]
+        coords.append((name, vals,str(getattr(construct, "Units", ""))))
+        seen_names.add(name)
+
     return coords
 
 def contour_data_range(pfld: object) -> tuple[float, float]:

@@ -81,10 +81,30 @@ def test_coordinate_info_filters_singletons_and_serializes_values() -> None:
     ]
 
 
-def test_nemo_field() -> None:
+def test_coordinate_info_nemo_uses_2d_fallback_ranges() -> None:
     field = cf.read('data/nemo_field_eg1.nc')[0]
     payload = coordinate_info(field)
-    print(payload)
+
+    by_name = {name: (values, units) for name, values, units in payload}
+
+    assert 'latitude' in by_name
+    assert 'longitude' in by_name
+
+    lat_values, lat_units = by_name['latitude']
+    lon_values, lon_units = by_name['longitude']
+
+    assert lat_units == 'degrees_north'
+    assert lon_units == 'degrees_east'
+
+    # Bbox-driven synthesis uses a shared high-resolution count for 2D coords.
+    assert len(lat_values) == 1440
+    assert len(lon_values) == 1440
+
+    # Ranges are synthesized from directional min/max.
+    assert float(lat_values[0]) == pytest.approx(-89.5)
+    assert float(lat_values[-1]) == pytest.approx(89.94786834716797)
+    assert float(lon_values[0]) == pytest.approx(-180.0)
+    assert float(lon_values[-1]) == pytest.approx(180.0)
 
 
 class _FakePlotField:

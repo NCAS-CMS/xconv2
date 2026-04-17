@@ -30,7 +30,8 @@ from xconv2.remote_fs import RemoteFileSystemFactory
 
 logger = logging.getLogger(__name__)
 
-_KNOWN_EXTENSIONS = frozenset((".nc", ".pp"))
+_KNOWN_EXTENSIONS = frozenset((".nc", ".pp", ".ff", ".da"))
+_PP_FORMAT_EXTENSIONS = frozenset((".pp", ".ff", ".da"))
 _ZARR_METADATA_FILENAMES = frozenset((".zarray", ".zgroup", ".zmetadata", "zarr.json"))
 
 __all__ = [
@@ -98,6 +99,22 @@ class RemoteFilesystemSpec:
     uri_scheme: str
     uri_authority: str
     proxy_jump: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _maybe_wrap_ppfive(filesystem: Any, path: str, protocol: str) -> Any:
+    """Return a ppfive.File (via FsspecReader) or a plain open handle for the path."""
+    if protocol in {"http", "s3"} and PurePosixPath(path).suffix.lower() in _PP_FORMAT_EXTENSIONS:
+        try:
+            import ppfive  # type: ignore[import]
+            from ppfive.io.fsspec_reader import FsspecReader  # type: ignore[import]
+            return ppfive.File(FsspecReader(filesystem, path))
+        except ImportError:
+            logger.warning("ppfive is not installed; reading %s without ppfive wrapper", path)
+    return filesystem.open(path, "rb")
 
 
 # ---------------------------------------------------------------------------
@@ -170,15 +187,18 @@ class RemoteAccessSession:
             datasets=datasets,
         )
         logging.info(f'Attempting to open remote dataset(s) with reader: {normalized}')
+        protocol = str(descriptor.get("protocol", "")).lower()
         self._close_open_handles()
         try:
             if isinstance(normalized, list):
-                self._open_handles = [self.filesystem.open(path, "rb") for path in normalized]
+                self._open_handles = [
+                    _maybe_wrap_ppfive(self.filesystem, path, protocol)
+                    for path in normalized
+                ]
                 opened: Any = list(self._open_handles)
             else:
-                handle = self.filesystem.open(normalized, "rb")
-                self._open_handles = [handle]
-                opened = handle
+                opened = _maybe_wrap_ppfive(self.filesystem, normalized, protocol)
+                self._open_handles = [opened]
             logging.info(f'Attempting to open remote dataset(s) with reader: {opened}')
             return reader(opened)
         except Exception:
