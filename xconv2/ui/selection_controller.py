@@ -306,6 +306,17 @@ class SelectionController:
                     'Documentation for collapse methods can be found '
                     '<a href="https://ncas-cms.github.io/cf-python/analysis.html#collapse-methods">online</a>.'
                 ),
+                info_button_title="Collapse Methods",
+                info_button_content="""<b>About Collapse Methods</b><br>
+                <br>
+                Lorem ipsum dolor sit amet, consectetur adipiscing elit. 
+                Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. 
+                Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.
+                <br><br>
+                Collapse methods reduce a dimension to a single value. 
+                For documentation, visit 
+                <a href="https://ncas-cms.github.io/cf-python/analysis.html#collapse-methods">the cf-python documentation</a>.
+                """,
             )
             if ok and method:
                 self.host.selected_collapse_methods[name] = method
@@ -449,6 +460,7 @@ class SelectionController:
         """Update plot summary text and plot button availability."""
         if not self.host.controls:
             self.host.plot_summary_label.setText("Open a field to inspect plot options.")
+            self.host.plot_info_button.hide()
             self.host.last_varying_dims = None
             self.host.available_plot_kinds = []
             self.host.selected_plot_kind = None
@@ -501,6 +513,7 @@ class SelectionController:
 
         if varying_dims == 0:
             self.host.plot_summary_label.setText(f"{dims_text} \nTotal collapse, plot not possible")
+            self.host.plot_info_button.show()
             self.host.plot_button.setEnabled(False)
             self.host.options_button.setEnabled(False)
             self._set_save_controls_enabled(False)
@@ -508,6 +521,7 @@ class SelectionController:
             self.host.plot_summary_label.setText(
                 f"{dims_text} \nPlot Type: {selected_kind.title() if selected_kind else 'N/A'}"
             )
+            self.host.plot_info_button.show()
             self.host.plot_button.setEnabled(True)
             self.host.options_button.setEnabled(selected_kind in {"contour", "lineplot"})
             self._set_save_controls_enabled(True)
@@ -515,6 +529,7 @@ class SelectionController:
             self.host.plot_summary_label.setText(
                 f"{dims_text} \nPlot Type: {selected_kind.title() if selected_kind else 'N/A'}"
             )
+            self.host.plot_info_button.show()
             self.host.plot_button.setEnabled(True)
             self.host.options_button.setEnabled(selected_kind in {"contour", "lineplot"})
             self._set_save_controls_enabled(True)
@@ -522,6 +537,7 @@ class SelectionController:
             self.host.plot_summary_label.setText(
                 f"{dims_text} \nNeed to reduce to 1D or 2D before plotting"
             )
+            self.host.plot_info_button.show()
             self.host.plot_button.setEnabled(False)
             self.host.options_button.setEnabled(False)
             self._set_save_controls_enabled(False)

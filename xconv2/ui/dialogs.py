@@ -6,6 +6,7 @@ import shlex
 from typing import Any
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -33,6 +34,83 @@ except ImportError:
     discover_remote_conda_envs = None
 
 
+class InfoMessageDialog(QDialog):
+    """Dialog for displaying information with a title and rich-text content."""
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        title: str,
+        content: str,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(400, 300)
+
+        layout = QVBoxLayout(self)
+
+        content_label = QLabel(content)
+        content_label.setTextFormat(Qt.RichText)
+        content_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        content_label.setOpenExternalLinks(True)
+        content_label.setWordWrap(True)
+        layout.addWidget(content_label)
+
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        layout.addWidget(close_button)
+
+    @classmethod
+    def show_info(
+        cls,
+        parent: QWidget | None,
+        title: str,
+        content: str,
+    ) -> None:
+        """Show the info dialog."""
+        dialog = cls(parent, title, content)
+        dialog.exec()
+
+
+def create_info_button(
+    parent: QWidget | None,
+    title: str,
+    content: str,
+    icon_size: int = 16,
+) -> QPushButton:
+    """Create a small icon button that opens an info dialog when clicked.
+    
+    Args:
+        parent: Parent widget
+        title: Dialog title
+        content: Dialog content (can include HTML/RichText)
+        icon_size: Size of the icon in pixels
+        
+    Returns:
+        A QPushButton configured as an info button
+    """
+    button = QPushButton()
+    button.setMaximumWidth(icon_size + 8)
+    button.setMaximumHeight(icon_size + 8)
+    button.setToolTip("Click for more information")
+    
+    # Load the tooltip icon
+    icon_path = Path(__file__).parent.parent / "assets" / "tooltip.svg"
+    if icon_path.exists():
+        pixmap = QPixmap(str(icon_path))
+        if not pixmap.isNull():
+            pixmap = pixmap.scaledToWidth(icon_size, Qt.SmoothTransformation)
+            button.setIcon(QIcon(pixmap))
+            button.setIconSize(pixmap.size())
+    
+    # Connect to show the info dialog
+    button.clicked.connect(
+        lambda: InfoMessageDialog.show_info(parent, title, content)
+    )
+    
+    return button
+
+
 class InputDialogCustom(QDialog):
     """Reusable item chooser with optional rich-text documentation below input."""
 
@@ -47,14 +125,34 @@ class InputDialogCustom(QDialog):
         flags: Qt.WindowType,
         input_method_hints: Qt.InputMethodHint,
         doc_text: str,
+        info_button_title: str = "",
+        info_button_content: str = "",
     ) -> None:
         super().__init__(parent, flags)
         self.setWindowTitle(title)
 
         layout = QVBoxLayout(self)
 
+        # Add label with optional info button
+        label_row = QHBoxLayout()
+        label_row.setContentsMargins(0, 0, 0, 0)
+        label_row.setSpacing(4)
         prompt = QLabel(label)
-        layout.addWidget(prompt)
+        label_row.addWidget(prompt)
+        
+        if info_button_title and info_button_content:
+            info_button = create_info_button(
+                parent,
+                info_button_title,
+                info_button_content,
+                icon_size=14
+            )
+            label_row.addStretch(1)
+            label_row.addWidget(info_button)
+        
+        label_widget = QWidget()
+        label_widget.setLayout(label_row)
+        layout.addWidget(label_widget)
 
         self.item_combo = QComboBox()
         self.item_combo.addItems(items)
@@ -89,8 +187,10 @@ class InputDialogCustom(QDialog):
         flags: Qt.WindowType = Qt.WindowType.Widget,
         inputMethodHints: Qt.InputMethodHint = Qt.InputMethodHint.ImhNone,
         doc_text: str = "",
+        info_button_title: str = "",
+        info_button_content: str = "",
     ) -> tuple[str, bool]:
-        """Mirror QInputDialog.getItem with extra ``doc_text`` rich-text content."""
+        """Mirror QInputDialog.getItem with extra ``doc_text`` rich-text content and optional info button."""
         dialog = cls(
             parent,
             title,
@@ -101,6 +201,8 @@ class InputDialogCustom(QDialog):
             flags,
             inputMethodHints,
             doc_text,
+            info_button_title,
+            info_button_content,
         )
         if dialog.exec() != QDialog.Accepted:
             return "", False
@@ -243,8 +345,24 @@ class RemoteConfigurationDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        intro = QLabel("Select remote configuration type")
-        layout.addWidget(intro)
+        intro_row = QHBoxLayout()
+        remote_info_button = create_info_button(
+            self,
+            "Remote Configuration",
+            """<b>About Remote Configuration</b><br>
+            <br>
+            Lorem ipsum dolor sit amet, consectetur adipiscing elit.
+            Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
+            <br><br>
+            Configure S3, HTTPS, or SSH remote connections here.
+            Each protocol tab allows you to select an existing configuration or add a new one.
+            """,
+            icon_size=18
+        )
+        intro_row.addWidget(remote_info_button)
+        intro_row.addWidget(QLabel("Select remote configuration type"))
+        intro_row.addStretch(1)
+        layout.addLayout(intro_row)
 
         self.protocol_tabs = QTabWidget()
         self.protocol_tabs.addTab(self._build_s3_tab(), "S3")

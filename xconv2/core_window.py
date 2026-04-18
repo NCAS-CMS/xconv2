@@ -63,7 +63,7 @@ from .ui.lineplot_options_controller import LineplotOptionsController
 from .ui.menu_controller import MenuController
 from .ui.plot_view_controller import PlotViewController
 from .ui.selection_controller import SelectionController
-from .ui.dialogs import OpenGlobDialog, OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog
+from .ui.dialogs import OpenGlobDialog, OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog, create_info_button
 from .ui.remote_file_navigator import RemoteFileNavigatorDialog
 from .ui.settings_store import SettingsStore
 from .cache_utils import disk_cache_usage, parse_disk_expiry_seconds, prune_disk_cache
@@ -354,6 +354,23 @@ class CacheManagerDialog(QDialog):
         layout.addWidget(remotes_group, 1)
 
         # --- Buttons ---
+        cache_button_row = QHBoxLayout()
+        cache_info_button = create_info_button(
+            self,
+            "Cache Management",
+            """<b>About Cache Management</b><br>
+            <br>
+            Lorem ipsum dolor sit amet, consectetur adipiscing elit.
+            Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
+            <br><br>
+            The cache stores remote data locally to speed up repeated access.
+            Use Refresh to update usage statistics, Prune to remove expired entries,
+            and Flush to clear all cached data for a remote.
+            """,
+            icon_size=18
+        )
+        cache_button_row.addWidget(cache_info_button)
+        cache_button_row.addStretch(1)
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         self.refresh_button = buttons.addButton("Refresh", QDialogButtonBox.ActionRole)
         self.prune_button = buttons.addButton("Prune All...", QDialogButtonBox.ActionRole)
@@ -362,7 +379,8 @@ class CacheManagerDialog(QDialog):
         self.prune_button.clicked.connect(self._prune_cache)
         self.flush_all_button.clicked.connect(self._flush_cache)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        cache_button_row.addWidget(buttons)
+        layout.addLayout(cache_button_row)
 
         self.refresh_summary()
 
@@ -1382,6 +1400,22 @@ class CFVCore(QMainWindow):
         layout = QVBoxLayout(frame)
 
         controls_row = QHBoxLayout()
+        
+        # Info button for selection help
+        selection_info_button = create_info_button(
+            self,
+            "Selection Help",
+            """<b>About the Selection Controls</b><br>
+            <br>
+            Lorem ipsum dolor sit amet, consectetur adipiscing elit. 
+            Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
+            <br><br>
+            Use the range sliders to select subsets of your data along each dimension. 
+            Check the <i>collapse</i> checkbox to reduce a dimension to a single value using a collapse method.
+            """,
+            icon_size=18
+        )
+        
         properties_button = QPushButton("Properties")
         properties_button.clicked.connect(self._show_selection_properties)
         reset_button = QPushButton("Reset all sliders")
@@ -1390,6 +1424,7 @@ class CFVCore(QMainWindow):
         self.selection_info_toggle_button = QToolButton()
         self.selection_info_toggle_button.setAutoRaise(True)
         self.selection_info_toggle_button.clicked.connect(self._toggle_selection_info_panel)
+        controls_row.addWidget(selection_info_button)
         controls_row.addWidget(properties_button)
         controls_row.addWidget(reset_button)
         controls_row.addStretch(1)
