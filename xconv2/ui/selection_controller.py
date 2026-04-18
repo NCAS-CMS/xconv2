@@ -16,8 +16,9 @@ from PySide6.QtWidgets import (
 from superqt import QRangeSlider
 
 from xconv2.cf_templates import collapse_methods
-from cftime import num2date 
+from cftime import num2date
 from .dialogs import InputDialogCustom
+from xconv2.tooltips import COLLAPSE_METHODS
 
 if TYPE_CHECKING:
     from xconv2.core_window import CFVCore
@@ -306,17 +307,8 @@ class SelectionController:
                     'Documentation for collapse methods can be found '
                     '<a href="https://ncas-cms.github.io/cf-python/analysis.html#collapse-methods">online</a>.'
                 ),
-                info_button_title="Collapse Methods",
-                info_button_content="""<b>About Collapse Methods</b><br>
-                <br>
-                Lorem ipsum dolor sit amet, consectetur adipiscing elit. 
-                Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. 
-                Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.
-                <br><br>
-                Collapse methods reduce a dimension to a single value. 
-                For documentation, visit 
-                <a href="https://ncas-cms.github.io/cf-python/analysis.html#collapse-methods">the cf-python documentation</a>.
-                """,
+                info_button_title=COLLAPSE_METHODS[0],
+                info_button_content=COLLAPSE_METHODS[1],
             )
             if ok and method:
                 self.host.selected_collapse_methods[name] = method

@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from xconv2.aaa.aaa_config import get_locations
+from xconv2.tooltips import COLLAPSE_METHODS, REMOTE_CONFIGURATION
 
 try:
     from p5rem import discover_remote_conda_envs
@@ -348,15 +349,7 @@ class RemoteConfigurationDialog(QDialog):
         intro_row = QHBoxLayout()
         remote_info_button = create_info_button(
             self,
-            "Remote Configuration",
-            """<b>About Remote Configuration</b><br>
-            <br>
-            Lorem ipsum dolor sit amet, consectetur adipiscing elit.
-            Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
-            <br><br>
-            Configure S3, HTTPS, or SSH remote connections here.
-            Each protocol tab allows you to select an existing configuration or add a new one.
-            """,
+            *REMOTE_CONFIGURATION,
             icon_size=18
         )
         intro_row.addWidget(remote_info_button)

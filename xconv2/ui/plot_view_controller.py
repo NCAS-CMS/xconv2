@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from .dialogs import create_info_button
+from xconv2.tooltips import PLOTTING_AND_EXPORTING
 
 if TYPE_CHECKING:
     from xconv2.core_window import CFVCore
@@ -165,15 +166,7 @@ class PlotViewController:
         # Info button for plotting/exporting help — hidden until Selection Dimension text is shown
         self.host.plot_info_button = create_info_button(
             self.host,
-            "Plotting and Exporting",
-            """<b>About Plotting and Exporting</b><br>
-            <br>
-            Lorem ipsum dolor sit amet, consectetur adipiscing elit. 
-            Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
-            <br><br>
-            Your data can be plotted once it has been reduced to 1D or 2D. 
-            Use the collapse methods in the Selection panel to reduce higher-dimensional data.
-            """,
+            *PLOTTING_AND_EXPORTING,
             icon_size=18
         )
         self.host.plot_info_button.hide()

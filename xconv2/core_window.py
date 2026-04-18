@@ -64,6 +64,7 @@ from .ui.menu_controller import MenuController
 from .ui.plot_view_controller import PlotViewController
 from .ui.selection_controller import SelectionController
 from .ui.dialogs import OpenGlobDialog, OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog, create_info_button
+from .tooltips import CACHE_MANAGEMENT, SELECTION_HELP
 from .ui.remote_file_navigator import RemoteFileNavigatorDialog
 from .ui.settings_store import SettingsStore
 from .cache_utils import disk_cache_usage, parse_disk_expiry_seconds, prune_disk_cache
@@ -357,16 +358,7 @@ class CacheManagerDialog(QDialog):
         cache_button_row = QHBoxLayout()
         cache_info_button = create_info_button(
             self,
-            "Cache Management",
-            """<b>About Cache Management</b><br>
-            <br>
-            Lorem ipsum dolor sit amet, consectetur adipiscing elit.
-            Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
-            <br><br>
-            The cache stores remote data locally to speed up repeated access.
-            Use Refresh to update usage statistics, Prune to remove expired entries,
-            and Flush to clear all cached data for a remote.
-            """,
+            *CACHE_MANAGEMENT,
             icon_size=18
         )
         cache_button_row.addWidget(cache_info_button)
@@ -1404,15 +1396,7 @@ class CFVCore(QMainWindow):
         # Info button for selection help
         selection_info_button = create_info_button(
             self,
-            "Selection Help",
-            """<b>About the Selection Controls</b><br>
-            <br>
-            Lorem ipsum dolor sit amet, consectetur adipiscing elit. 
-            Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
-            <br><br>
-            Use the range sliders to select subsets of your data along each dimension. 
-            Check the <i>collapse</i> checkbox to reduce a dimension to a single value using a collapse method.
-            """,
+            *SELECTION_HELP,
             icon_size=18
         )
         
