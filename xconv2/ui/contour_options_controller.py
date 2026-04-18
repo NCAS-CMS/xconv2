@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
@@ -318,6 +319,24 @@ class ContourOptionsController:
         proj_layout = QVBoxLayout(proj_group)
         proj_layout.setContentsMargins(9, 4, 9, 4)
         proj_layout.setSpacing(4)
+
+        # Under-construction notice
+        uc_notice_row = QHBoxLayout()
+        uc_notice_row.setSpacing(6)
+        uc_icon_label = QLabel()
+        _uc_icon_path = Path(__file__).resolve().parent.parent / "assets" / "under-construction.svg"
+        _uc_pixmap = QPixmap(str(_uc_icon_path))
+        if not _uc_pixmap.isNull():
+            uc_icon_label.setPixmap(_uc_pixmap.scaledToHeight(16, Qt.SmoothTransformation))
+        uc_notice_label = QLabel(
+            "Some map projections and associated selections may not work properly "
+            "in this version of xconv2, we will fix these in a future version."
+        )
+        uc_notice_label.setWordWrap(True)
+        uc_notice_label.setStyleSheet("color: #888888; font-style: italic;")
+        uc_notice_row.addWidget(uc_icon_label, 0, Qt.AlignTop)
+        uc_notice_row.addWidget(uc_notice_label, 1)
+        proj_layout.addLayout(uc_notice_row)
 
         proj_row = QHBoxLayout()
         proj_combo_label = QLabel("Projection")
