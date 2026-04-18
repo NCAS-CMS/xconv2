@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING
+from collections.abc import Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QBrush, QColor, QFocusEvent, QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -21,6 +23,83 @@ if TYPE_CHECKING:
     from xconv2.core_window import CFVCore
 
 logger = logging.getLogger(__name__)
+
+
+class KeyboardRangeSlider(QRangeSlider):
+    """QRangeSlider variant with arrow-key control for the active handle."""
+
+    def __init__(
+        self,
+        orientation: Qt.Orientation,
+        parent: QWidget | None = None,
+        navigate_callback: Callable[[int], None] | None = None,
+    ) -> None:
+        super().__init__(orientation, parent)
+        self._active_handle = 0
+        self._navigate_callback = navigate_callback
+        self._default_bar_color = QBrush(self.barColor)
+        self._focus_bar_color = QBrush(QColor("magenta"))
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def focusInEvent(self, event: QFocusEvent) -> None:
+        super().focusInEvent(event)
+        self._setBarColor(self._focus_bar_color)
+
+    def focusOutEvent(self, event: QFocusEvent) -> None:
+        super().focusOutEvent(event)
+        self._setBarColor(self._default_bar_color)
+
+    def _event_axis_pos(self, event: QMouseEvent) -> int:
+        pos = event.position()
+        return int(round(pos.x())) if self.orientation() == Qt.Horizontal else int(round(pos.y()))
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        super().mousePressEvent(event)
+        self.setFocus(Qt.MouseFocusReason)
+
+        lo, hi = self.value()
+        pos_value = self._pixelPosToRangeValue(self._event_axis_pos(event))
+        self._active_handle = 0 if abs(pos_value - lo) <= abs(pos_value - hi) else 1
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        key = event.key()
+
+        # Move focus between sliders when using up/down keys.
+        if key == Qt.Key_Up and self._navigate_callback is not None:
+            self._navigate_callback(-1)
+            event.accept()
+            return
+        if key == Qt.Key_Down and self._navigate_callback is not None:
+            self._navigate_callback(1)
+            event.accept()
+            return
+
+        if self.orientation() == Qt.Horizontal:
+            negative_keys = {Qt.Key_Left}
+            positive_keys = {Qt.Key_Right}
+        else:
+            negative_keys = {Qt.Key_Down}
+            positive_keys = {Qt.Key_Up}
+
+        if key not in negative_keys and key not in positive_keys:
+            super().keyPressEvent(event)
+            return
+
+        step = max(int(self.singleStep()), 1)
+        delta = -step if key in negative_keys else step
+
+        lo, hi = [int(x) for x in self.value()]
+        minimum = int(self.minimum())
+        maximum = int(self.maximum())
+
+        if self._active_handle == 0:
+            new_lo = max(minimum, min(hi, lo + delta))
+            self.setValue((new_lo, hi))
+        else:
+            new_hi = min(maximum, max(lo, hi + delta))
+            self.setValue((lo, new_hi))
+
+        event.accept()
 
 
 class SelectionController:
@@ -124,7 +203,10 @@ class SelectionController:
             bounds_start_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             bounds_end_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
-            slider = QRangeSlider(Qt.Horizontal)
+            slider = KeyboardRangeSlider(
+                Qt.Horizontal,
+                navigate_callback=lambda step, n=name: self._focus_adjacent_slider(n, step),
+            )
             slider.setRange(0, len(values) - 1)
             slider.setValue((0, len(values) - 1))
             slider.valueChanged.connect(
@@ -152,12 +234,30 @@ class SelectionController:
                 "values": values,
                 "units": units,
             }
-
             self.update_range_labels(name)
 
         self.host._set_slider_scroll_visible_rows(len(self.host.controls))
         self.refresh_plot_summary()
         logger.info("Built %d dynamic sliders", len(self.host.controls))
+
+    def _focus_adjacent_slider(self, current_name: str, offset: int) -> None:
+        """Move keyboard focus to the previous/next slider in display order."""
+        names = list(self.host.controls.keys())
+        if not names:
+            return
+
+        try:
+            idx = names.index(current_name)
+        except ValueError:
+            return
+
+        next_idx = max(0, min(len(names) - 1, idx + offset))
+        if next_idx == idx:
+            return
+
+        next_slider = self.host.controls[names[next_idx]].get("range_slider")
+        if next_slider is not None:
+            next_slider.setFocus(Qt.TabFocusReason)
 
     def on_range_slider_moved(self, name: str) -> None:
         """Handle dual-handle range slider movement."""
