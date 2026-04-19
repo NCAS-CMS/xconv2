@@ -18,7 +18,7 @@ import logging
 from typing import Sequence
 from urllib.parse import urlparse
 
-from PySide6.QtCore import QTimer, Qt, QUrl
+from PySide6.QtCore import QProcess, QTimer, Qt, QUrl
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -1732,7 +1732,7 @@ class CFVCore(QMainWindow):
         self._show_status_message("Open URI is handled by worker-backed windows.", is_error=True)
 
     def _configure_remote(self) -> None:
-        """Show remote configuration dialog and optionally open with the chosen config."""
+        """Show remote configuration dialog non-modally and optionally open with the chosen config."""
         raw_state = self._settings.get("last_remote_configuration", {})
         state = dict(raw_state) if isinstance(raw_state, dict) else {}
         https_locations = self._settings.get("remote_https_locations")
@@ -1743,29 +1743,32 @@ class CFVCore(QMainWindow):
         s3_reductionist_locations = self._settings.get("remote_s3_reductionist_locations")
         if isinstance(s3_reductionist_locations, dict) and s3_reductionist_locations:
             state["s3_reductionist_locations"] = dict(s3_reductionist_locations)
-        config, ok, next_state = RemoteConfigurationDialog.get_configuration(self, state=state)
-        self._settings["last_remote_configuration"] = next_state
-        if isinstance(next_state, dict):
-            persisted_https = next_state.get("https_locations")
-            if not isinstance(persisted_https, dict):
-                persisted_https = next_state.get("http_locations")
-            if isinstance(persisted_https, dict):
-                self._settings["remote_https_locations"] = dict(persisted_https)
-            persisted_s3_reductionist = next_state.get("s3_reductionist_locations")
-            if isinstance(persisted_s3_reductionist, dict):
-                self._settings["remote_s3_reductionist_locations"] = {
-                    str(alias).strip(): str(url).strip()
-                    for alias, url in persisted_s3_reductionist.items()
-                    if str(alias).strip() and str(url).strip()
-                }
-        self._save_settings()
-        if not ok or config is None:
-            return
-        selected_uri, selected_ok = RemoteFileNavigatorDialog.get_remote_selection(self, config)
-        if not selected_ok:
-            return
-        self._set_window_title_for_file(selected_uri)
-        self._show_status_message(f"Selected remote file: {selected_uri}")
+
+        def _on_finished(config: dict | None, ok: bool, next_state: dict) -> None:
+            self._settings["last_remote_configuration"] = next_state
+            if isinstance(next_state, dict):
+                persisted_https = next_state.get("https_locations")
+                if not isinstance(persisted_https, dict):
+                    persisted_https = next_state.get("http_locations")
+                if isinstance(persisted_https, dict):
+                    self._settings["remote_https_locations"] = dict(persisted_https)
+                persisted_s3_reductionist = next_state.get("s3_reductionist_locations")
+                if isinstance(persisted_s3_reductionist, dict):
+                    self._settings["remote_s3_reductionist_locations"] = {
+                        str(alias).strip(): str(url).strip()
+                        for alias, url in persisted_s3_reductionist.items()
+                        if str(alias).strip() and str(url).strip()
+                    }
+            self._save_settings()
+            if not ok or config is None:
+                return
+            selected_uri, selected_ok = RemoteFileNavigatorDialog.get_remote_selection(self, config)
+            if not selected_ok:
+                return
+            self._set_window_title_for_file(selected_uri)
+            self._show_status_message(f"Selected remote file: {selected_uri}")
+
+        RemoteConfigurationDialog.show_non_modal(self, state=state, on_finished=_on_finished)
 
     def _choose_remote(self) -> None:
         """Show open-remote dialog and open using the selected saved short name."""
@@ -1912,8 +1915,9 @@ class CFVCore(QMainWindow):
             self.close()
             return
 
-        app.closeAllWindows()
-        app.quit()
+        # app.exit() exits all event loops including nested ones from dialog.exec().
+        # Worker cleanup is handled via app.aboutToQuit connected in CFVMain.__init__.
+        app.exit(0)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Ensure tray resources are released when the GUI exits."""

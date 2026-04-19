@@ -69,12 +69,17 @@ class CFVMain(CFVCore):
         self._pending_list_loop: QEventLoop | None = None
         self._pending_list_result: dict | None = None
         self._ssh_session_passwords: dict[str, str] = {}
+        self._shutting_down: bool = False
 
         self.worker = QProcess()
         self.worker.readyReadStandardOutput.connect(self.handle_worker_output)
         self.worker.readyReadStandardError.connect(self.handle_worker_error)
         self.worker.errorOccurred.connect(self.handle_worker_process_error)
         self.worker.finished.connect(self.handle_worker_finished)
+
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._shutdown_worker)
 
         import sys
         from pathlib import Path
@@ -304,6 +309,8 @@ class CFVMain(CFVCore):
 
     def handle_worker_process_error(self, process_error: QProcess.ProcessError) -> None:
         """Capture QProcess-level failures, such as start or crash issues."""
+        if self._shutting_down:
+            return
         logger.error("Worker process error: %s", process_error)
         self._show_status_message(f"Worker process error: {process_error}", is_error=True)
         if self._plot_request_in_flight:
@@ -822,20 +829,22 @@ class CFVMain(CFVCore):
                 }
             )
 
-        config, _ok, next_state = RemoteConfigurationDialog.get_configuration(self, state=state)
-        self._settings["last_remote_configuration"] = next_state
-        if isinstance(next_state, dict):
-            persisted_https = next_state.get("https_locations")
-            if isinstance(persisted_https, dict):
-                self._settings["remote_https_locations"] = dict(persisted_https)
-            persisted_s3_reductionist = next_state.get("s3_reductionist_locations")
-            if isinstance(persisted_s3_reductionist, dict):
-                self._settings["remote_s3_reductionist_locations"] = {
-                    str(alias).strip(): str(url).strip()
-                    for alias, url in persisted_s3_reductionist.items()
-                    if str(alias).strip() and str(url).strip()
-                }
-        self._save_settings()
+        def _on_finished_uri(config: dict | None, _ok: bool, next_state: dict) -> None:
+            self._settings["last_remote_configuration"] = next_state
+            if isinstance(next_state, dict):
+                persisted_https = next_state.get("https_locations")
+                if isinstance(persisted_https, dict):
+                    self._settings["remote_https_locations"] = dict(persisted_https)
+                persisted_s3_reductionist = next_state.get("s3_reductionist_locations")
+                if isinstance(persisted_s3_reductionist, dict):
+                    self._settings["remote_s3_reductionist_locations"] = {
+                        str(alias).strip(): str(url).strip()
+                        for alias, url in persisted_s3_reductionist.items()
+                        if str(alias).strip() and str(url).strip()
+                    }
+            self._save_settings()
+
+        RemoteConfigurationDialog.show_non_modal(self, state=state, on_finished=_on_finished_uri)
 
     @staticmethod
     def _probe_ssh_auth_methods(
@@ -1246,7 +1255,7 @@ class CFVMain(CFVCore):
         )
 
     def _configure_remote(self) -> None:
-        """Open the full remote configuration dialog; Open proceeds to worker-backed navigation."""
+        """Open the full remote configuration dialog non-modally; Open proceeds to worker-backed navigation."""
         raw_state = self._settings.get("last_remote_configuration", {})
         state = dict(raw_state) if isinstance(raw_state, dict) else {}
         https_locations = self._settings.get("remote_https_locations")
@@ -1257,25 +1266,28 @@ class CFVMain(CFVCore):
         s3_reductionist_locations = self._settings.get("remote_s3_reductionist_locations")
         if isinstance(s3_reductionist_locations, dict) and s3_reductionist_locations:
             state["s3_reductionist_locations"] = dict(s3_reductionist_locations)
-        config, ok, next_state = RemoteConfigurationDialog.get_configuration(self, state=state)
-        self._settings["last_remote_configuration"] = next_state
-        if isinstance(next_state, dict):
-            persisted_https = next_state.get("https_locations")
-            if not isinstance(persisted_https, dict):
-                persisted_https = next_state.get("http_locations")
-            if isinstance(persisted_https, dict):
-                self._settings["remote_https_locations"] = dict(persisted_https)
-            persisted_s3_reductionist = next_state.get("s3_reductionist_locations")
-            if isinstance(persisted_s3_reductionist, dict):
-                self._settings["remote_s3_reductionist_locations"] = {
-                    str(alias).strip(): str(url).strip()
-                    for alias, url in persisted_s3_reductionist.items()
-                    if str(alias).strip() and str(url).strip()
-                }
-        self._save_settings()
-        if not ok or config is None:
-            return
-        self._open_remote_from_config(config)
+
+        def _on_finished(config: dict | None, ok: bool, next_state: dict) -> None:
+            self._settings["last_remote_configuration"] = next_state
+            if isinstance(next_state, dict):
+                persisted_https = next_state.get("https_locations")
+                if not isinstance(persisted_https, dict):
+                    persisted_https = next_state.get("http_locations")
+                if isinstance(persisted_https, dict):
+                    self._settings["remote_https_locations"] = dict(persisted_https)
+                persisted_s3_reductionist = next_state.get("s3_reductionist_locations")
+                if isinstance(persisted_s3_reductionist, dict):
+                    self._settings["remote_s3_reductionist_locations"] = {
+                        str(alias).strip(): str(url).strip()
+                        for alias, url in persisted_s3_reductionist.items()
+                        if str(alias).strip() and str(url).strip()
+                    }
+            self._save_settings()
+            if not ok or config is None:
+                return
+            self._open_remote_from_config(config)
+
+        RemoteConfigurationDialog.show_non_modal(self, state=state, on_finished=_on_finished)
 
     def _choose_remote(self) -> None:
         """Open using existing short names via a streamlined protocol picker dialog."""
@@ -1803,14 +1815,21 @@ class CFVMain(CFVCore):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Ensure worker process is shut down cleanly when GUI exits."""
-        self._release_remote_session_if_active()
-        if self.worker.state() != QProcess.NotRunning:
-            logger.info("Terminating worker process")
-            self.worker.terminate()
-            if not self.worker.waitForFinished(2000):
-                logger.warning("Worker did not terminate in time; killing process")
-                self.worker.kill()
-                self.worker.waitForFinished(1000)
+    def _shutdown_worker(self) -> None:
+        """Shut down the worker process cleanly, suppressing the crash error signal."""
+        if self.worker.state() == QProcess.NotRunning:
+            return
+        self._shutting_down = True
+        logger.info("Shutting down worker process")
+        self.worker.terminate()
+        if not self.worker.waitForFinished(2000):
+            logger.warning("Worker did not terminate in time; killing process")
+            self.worker.kill()
+            self.worker.waitForFinished(1000)
 
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Ensure worker process is shut down cleanly when GUI exits."""
+        self._release_remote_session_if_active()
+        self._shutdown_worker()
         super().closeEvent(event)
 

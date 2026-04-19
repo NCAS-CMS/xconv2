@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import shlex
-from typing import Any
+from typing import Any, Callable
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QPixmap
@@ -45,8 +45,8 @@ class InfoMessageDialog(QDialog):
         content: str,
     ) -> None:
         super().__init__(parent)
+        self.setAttribute(Qt.WA_DeleteOnClose)
         self.setWindowTitle(title)
-        self.resize(400, 300)
 
         layout = QVBoxLayout(self)
 
@@ -61,6 +61,13 @@ class InfoMessageDialog(QDialog):
         close_button.clicked.connect(self.accept)
         layout.addWidget(close_button)
 
+        # Size to fit content: fix width first so word-wrap height is correct
+        content_label.setFixedWidth(380)
+        content_label.adjustSize()
+        line_height = content_label.fontMetrics().lineSpacing()
+        needed_height = content_label.sizeHint().height() + close_button.sizeHint().height() + layout.contentsMargins().top() + layout.contentsMargins().bottom() + layout.spacing() * 2 + line_height
+        self.resize(400, min(max(needed_height, 150), 700))
+
     @classmethod
     def show_info(
         cls,
@@ -70,7 +77,7 @@ class InfoMessageDialog(QDialog):
     ) -> None:
         """Show the info dialog."""
         dialog = cls(parent, title, content)
-        dialog.exec()
+        dialog.show()
 
 
 def create_info_button(
@@ -1652,6 +1659,32 @@ class RemoteConfigurationDialog(QDialog):
             return None, False, dialog.state()
         return dialog.configuration(), True, dialog.state()
 
+    @classmethod
+    def show_non_modal(
+        cls,
+        parent: QWidget | None,
+        state: dict[str, Any] | None = None,
+        on_finished: Callable[[dict[str, Any] | None, bool, dict[str, Any]], None] | None = None,
+    ) -> "RemoteConfigurationDialog":
+        """Show the dialog non-modally and call on_finished(config, ok, next_state) when done."""
+        dialog = cls(parent, state=state)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        dialog.setWindowModality(Qt.NonModal)
+
+        def _on_finished(result: int) -> None:
+            if on_finished is None:
+                return
+            next_state = dialog.state()
+            if result != QDialog.Accepted:
+                on_finished(None, False, next_state)
+                return
+            config = dialog.configuration()
+            on_finished(config, config is not None, next_state)
+
+        dialog.finished.connect(_on_finished)
+        dialog.show()
+        return dialog
+
 
 class RemoteOpenDialog(QDialog):
     """Open an existing remote configuration by short name."""
@@ -1858,7 +1891,7 @@ class RemoteOpenDialog(QDialog):
         parent: QWidget | None,
         state: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any] | None, bool, dict[str, Any]]:
-        """Show the remote-open dialog and return selected configuration."""
+        """Show the remote-open dialog and return selected configuration (blocking)."""
         dialog = cls(parent, state=state)
         result = dialog.exec()
         next_state = dialog.state()
