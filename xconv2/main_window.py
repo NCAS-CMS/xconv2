@@ -19,8 +19,9 @@ import time
 import uuid
 from pathlib import Path
 from urllib.parse import unquote, urlparse
+import sys
 
-from PySide6.QtCore import QEventLoop, QProcess
+from PySide6.QtCore import QEventLoop, QProcess, QTimer
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QApplication, QDialog, QInputDialog, QLineEdit, QListWidgetItem, QMessageBox
 
@@ -46,6 +47,15 @@ from .ui.remote_file_navigator import (
 )
 
 logger = logging.getLogger(__name__)
+
+def _get_worker_path() -> str:
+    """ Find the worker executable, since we may be running in 
+    a frozen environment.
+    """
+    worker = Path(sys.executable).parent / "cf-worker"
+    if sys.platform == "win32":
+        worker = worker.with_suffix(".exe")
+    return str(worker)
 
 
 class CFVMain(CFVCore):
@@ -81,9 +91,20 @@ class CFVMain(CFVCore):
         if app is not None:
             app.aboutToQuit.connect(self._shutdown_worker)
 
-        import sys
-        from pathlib import Path
-        _worker_bin = str(Path(sys.executable).parent / "cf-worker")
+
+        _worker_bin = _get_worker_path()
+        if not Path(_worker_bin).exists():
+            logger.error("Worker executable not found: %s", _worker_bin)
+            QTimer.singleShot(0, lambda: (
+                QMessageBox.critical(
+                    None,
+                    "Worker not found",
+                    f"The cf-worker executable was not found:\n\n{_worker_bin}\n\n"
+                    "Please reinstall xconv2 or check your PATH.",
+                ),
+                QApplication.instance().exit(1),  # type: ignore[union-attr]
+            ))
+            return
         self.worker.start(_worker_bin)
         logger.info("Started worker process: %s", self.worker.program())
 

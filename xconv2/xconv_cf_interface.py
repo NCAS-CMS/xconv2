@@ -70,44 +70,6 @@ def field_info(fields: object) -> list[dict[str, object]]:
     return rows
 
 
-def coordinate_info_obsolete(field: object) -> list[tuple[str, list[str]]]:
-    """
-    Extract plottable 1D dimension-coordinate values.
-
-    Reads dimension coordinates from a field and returns only coordinates with
-    more than one value so the GUI can build useful range sliders.
-
-    Args:
-        field: CF field-like object exposing dimension coordinate accessors.
-
-    Returns:
-        list[tuple[str, list[str]]]: Coordinate identity with serialized values.
-    """
-    coords: list[tuple[str, list[str]]] = []
-    for key, c in field.dimension_coordinates(todict=True).items():
-        try:
-            arr = getattr(c, "array", None)
-        except Exception as exc:
-            # Some backend combinations (notably newer h5netcdf/h5py stacks)
-            # can fail when materializing coordinate arrays. Skip only the
-            # problematic coordinate so metadata loading can continue.
-            logger.warning(
-                "Skipping coordinate in metadata extraction due to backend read error: key=%s identity=%s error=%s",
-                key,
-                c.identity(default="unknown"),
-                exc,
-            )
-            continue
-        if arr is None:
-            continue
-        if len(arr) <= 1:
-            continue
-        vals = [str(x) for x in arr]
-        coords.append((c.identity(default="unknown"), vals, str(getattr(c, "Units",""))))
-
-    return coords
-
-
 def coordinate_info(field: object) -> list[tuple[str, list[str], str]]:
     """
     Extract plottable 1D dimension-coordinate values with units.
@@ -133,22 +95,31 @@ def coordinate_info(field: object) -> list[tuple[str, list[str], str]]:
             )
             return None
 
+    def _iter_one_d_constructs() -> object:
+        one_d_coords = field.coordinates(filter_by_naxes=(1,))
+        for construct in one_d_coords.values():
+            arr = _safe_array(construct)
+            if arr is None or len(arr) <= 1:
+                continue
+            yield construct, arr
+
+    def _append_coordinate_values(construct: object, values: object) -> None:
+        name = str(construct.identity(default="unknown"))
+        if name in seen_names:
+            return
+        units = str(getattr(construct, "Units", ""))
+        if units.startswith('degrees'):
+           vals = [f'{v:.2f}' for v in values]
+        else:
+            vals = [str(x) for x in values]
+        coords.append((name, vals, units))
+        seen_names.add(name)
+
     coords: list[tuple[str, list[str], str]] = []
     seen_names: set[str] = set()
 
-    one_d_coords = field.coordinates(filter_by_naxes=(1,))
-    for construct in one_d_coords.values():
-        arr = _safe_array(construct)
-        if arr is None or len(arr) <= 1:
-            continue
-
-        name =  str(construct.identity(default="unknown"))
-        if name in seen_names:
-            continue
-
-        vals = [str(x) for x in arr]
-        coords.append((name, vals, str(getattr(construct, "Units", ""))))
-        seen_names.add(name)
+    for construct, arr in _iter_one_d_constructs():
+        _append_coordinate_values(construct, arr)
 
     if coords:
         return coords
@@ -178,13 +149,8 @@ def coordinate_info(field: object) -> list[tuple[str, list[str], str]]:
         if count <= 1:
             continue
 
-        name =  str(construct.identity(default="unknown"))
-        if name in seen_names:
-            continue
-
-        vals = [str(x) for x in np.linspace(lo, hi, num=count)]
-        coords.append((name, vals,str(getattr(construct, "Units", ""))))
-        seen_names.add(name)
+        vals = np.linspace(lo, hi, num=count)
+        _append_coordinate_values(construct, vals)
 
     return coords
 
