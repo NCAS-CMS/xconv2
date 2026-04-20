@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from xconv2.aaa.aaa_config import get_locations
-from xconv2.tooltips import COLLAPSE_METHODS, REMOTE_CONFIGURATION
+from xconv2.tooltips import REMOTE_CONFIGURATION
 
 try:
     from p5rem import discover_remote_conda_envs
@@ -50,6 +50,19 @@ class InfoMessageDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
+        # Under-construction logo
+        _logo_h = 0
+        logo_path = Path(__file__).parent.parent / "assets" / "under-construction.svg"
+        if logo_path.exists():
+            logo_pixmap = QPixmap(str(logo_path))
+            if not logo_pixmap.isNull():
+                logo_pixmap = logo_pixmap.scaledToWidth(80, Qt.SmoothTransformation)
+                logo_label = QLabel()
+                logo_label.setPixmap(logo_pixmap)
+                logo_label.setAlignment(Qt.AlignCenter)
+                layout.addWidget(logo_label)
+                _logo_h = logo_pixmap.height() + layout.spacing()
+
         content_label = QLabel(content)
         content_label.setTextFormat(Qt.RichText)
         content_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
@@ -65,7 +78,7 @@ class InfoMessageDialog(QDialog):
         content_label.setFixedWidth(380)
         content_label.adjustSize()
         line_height = content_label.fontMetrics().lineSpacing()
-        needed_height = content_label.sizeHint().height() + close_button.sizeHint().height() + layout.contentsMargins().top() + layout.contentsMargins().bottom() + layout.spacing() * 2 + line_height
+        needed_height = _logo_h + content_label.sizeHint().height() + close_button.sizeHint().height() + layout.contentsMargins().top() + layout.contentsMargins().bottom() + layout.spacing() * 2 + line_height
         self.resize(400, min(max(needed_height, 150), 700))
 
     @classmethod
