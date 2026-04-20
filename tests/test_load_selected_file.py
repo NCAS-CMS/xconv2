@@ -378,10 +378,18 @@ def test_https_locations_from_configure_are_passed_to_open_dialog(monkeypatch: p
         "archive": {"url": "https://archive.example.org/data"},
     }
 
+    def _fake_show_non_modal(cls, parent, state=None, on_finished=None):
+        """Mock show_non_modal to call on_finished directly without creating a dialog."""
+        next_state = dict(state or {})
+        next_state["https_locations"] = configured_https
+        if on_finished:
+            on_finished(None, False, next_state)
+        return None
+
     monkeypatch.setattr(
         main_window.RemoteConfigurationDialog,
-        "get_configuration",
-        lambda _parent, state=None: (None, False, {"https_locations": configured_https, **(state or {})}),
+        "show_non_modal",
+        classmethod(_fake_show_non_modal)
     )
 
     captured_state: dict[str, object] = {}

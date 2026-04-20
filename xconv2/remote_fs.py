@@ -39,6 +39,9 @@ def _forward_logger_output(
             except Exception:
                 return
 
+    # Also track child loggers to ensure propagation
+    child_loggers_to_enable: list[logging.Logger] = []
+
     for name in logger_names:
         target_logger = logging.getLogger(name)
         handler = _CallbackHandler()
@@ -47,7 +50,16 @@ def _forward_logger_output(
         previous_level = target_logger.level
         target_logger.addHandler(handler)
         target_logger.setLevel(logging.DEBUG)
+        target_logger.propagate = True  # Ensure propagation is enabled
         handlers.append((target_logger, handler, previous_level))
+        
+        # Also enable propagation on common child loggers
+        for child_name in ["paramiko.transport", "p5rem.bootstrap"]:
+            if child_name.startswith(name + "."):
+                child_logger = logging.getLogger(child_name)
+                child_logger.propagate = True
+                child_logger.setLevel(logging.DEBUG)
+                child_loggers_to_enable.append(child_logger)
 
     try:
         yield

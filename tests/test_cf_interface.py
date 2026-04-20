@@ -76,8 +76,8 @@ def test_coordinate_info_filters_singletons_and_serializes_values() -> None:
 
     assert payload == [
         ('time', ['120.5', '121.5', '122.5'], 'days since 1979-1-1 gregorian'),
-        ('grid_latitude', ['0.44', '0.0', '-0.44', '-0.88'], 'degrees'),
-        ('grid_longitude', ['-1.18', '-0.74', '-0.3', '0.14', '0.58'], 'degrees')
+        ('grid_latitude', ['0.44', '0.00', '-0.44', '-0.88'], 'degrees'),
+        ('grid_longitude', ['-1.18', '-0.74', '-0.30', '0.14', '0.58'], 'degrees')
     ]
 
 
@@ -101,8 +101,9 @@ def test_coordinate_info_nemo_uses_2d_fallback_ranges() -> None:
     assert len(lon_values) == 1440
 
     # Ranges are synthesized from directional min/max.
+    # Note: values are formatted to .2f precision for degrees coordinates
     assert float(lat_values[0]) == pytest.approx(-89.5)
-    assert float(lat_values[-1]) == pytest.approx(89.94786834716797)
+    assert float(lat_values[-1]) == pytest.approx(89.95)  # 89.94786... rounded to .2f
     assert float(lon_values[0]) == pytest.approx(-180.0)
     assert float(lon_values[-1]) == pytest.approx(180.0)
 

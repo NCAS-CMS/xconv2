@@ -22,6 +22,12 @@ class _DummyButton:
     def setEnabled(self, enabled: bool) -> None:
         self.enabled = enabled
 
+    def show(self) -> None:
+        pass
+
+    def hide(self) -> None:
+        pass
+
 
 class _DummyLabel:
     def __init__(self) -> None:
@@ -60,6 +66,7 @@ def test_refresh_plot_summary_enables_options_for_lineplot() -> None:
     host.save_code_button = _DummyButton()
     host.save_plot_button = _DummyButton()
     host.plot_view_controller = _DummyComboController()
+    host.plot_info_button = _DummyButton()
     host.last_varying_dims = None
     host.available_plot_kinds = []
     host.selected_plot_kind = None
