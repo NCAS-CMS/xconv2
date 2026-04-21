@@ -11,6 +11,8 @@ from xconv2.cf_templates import coordinate_list
 from xconv2.xconv_cf_interface import coordinate_info, field_info
 from xconv2.gui import CFVMain
 import xconv2.main_window as main_window
+import xconv2.remote_access as _remote_access_mod
+import xconv2.ui.remote_file_navigator as _remote_file_nav_mod
 
 
 @dataclass
@@ -513,12 +515,12 @@ def test_open_remote_from_config_keeps_existing_session_and_clears_loaded_ui(
     window = _DummyRemoteOpenWindow()
 
     monkeypatch.setattr(
-        main_window,
+        _remote_access_mod,
         "build_remote_filesystem_spec",
         lambda _config: types.SimpleNamespace(display_name="HTTP"),
     )
-    monkeypatch.setattr(main_window, "spec_to_descriptor", lambda _spec, cache=None: {"protocol": "http", "cache": cache})
-    monkeypatch.setattr(main_window, "remote_descriptor_hash", lambda _descriptor: "hash-1")
+    monkeypatch.setattr(_remote_access_mod, "spec_to_descriptor", lambda _spec, cache=None: {"protocol": "http", "cache": cache})
+    monkeypatch.setattr(_remote_access_mod, "remote_descriptor_hash", lambda _descriptor: "hash-1")
 
     class _FakeLogDialog:
         def __init__(self, *_args, **_kwargs) -> None:
@@ -540,8 +542,8 @@ def test_open_remote_from_config_keeps_existing_session_and_clears_loaded_ui(
         def exec(self) -> int:
             return QDialog.Rejected
 
-    monkeypatch.setattr(main_window, "RemoteLoginLogDialog", _FakeLogDialog)
-    monkeypatch.setattr(main_window, "RemoteFileNavigatorDialog", _FakeNavigator)
+    monkeypatch.setattr(_remote_file_nav_mod, "RemoteLoginLogDialog", _FakeLogDialog)
+    monkeypatch.setattr(_remote_file_nav_mod, "RemoteFileNavigatorDialog", _FakeNavigator)
     monkeypatch.setattr(main_window.QApplication, "processEvents", staticmethod(lambda: None))
 
     class _FakeLoop:
@@ -614,11 +616,11 @@ def test_browse_remote_shutdown_session_releases_active_session(
     window = _DummyBrowseWindow()
 
     monkeypatch.setattr(
-        main_window,
+        _remote_access_mod,
         "build_remote_filesystem_spec",
         lambda _config: types.SimpleNamespace(display_name="SSH", protocol="sftp", root_path="."),
     )
-    monkeypatch.setattr(main_window, "RemoteFileNavigatorDialog", _FakeNavigator)
+    monkeypatch.setattr(_remote_file_nav_mod, "RemoteFileNavigatorDialog", _FakeNavigator)
 
     CFVMain._browse_remote(window)
 
@@ -873,16 +875,16 @@ def test_open_remote_uri_direct_reuses_active_matching_session(monkeypatch: pyte
     window = _DummyUriWindow()
 
     monkeypatch.setattr(
-        main_window,
+        _remote_access_mod,
         "build_remote_filesystem_spec",
         lambda _config: types.SimpleNamespace(display_name="SSH"),
     )
     monkeypatch.setattr(
-        main_window,
+        _remote_access_mod,
         "spec_to_descriptor",
         lambda _spec, cache=None: {"protocol": "sftp", "cache": cache},
     )
-    monkeypatch.setattr(main_window, "remote_descriptor_hash", lambda _descriptor: "hash-ssh")
+    monkeypatch.setattr(_remote_access_mod, "remote_descriptor_hash", lambda _descriptor: "hash-ssh")
 
     CFVMain._open_remote_uri_direct(
         window,

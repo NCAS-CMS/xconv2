@@ -6,7 +6,9 @@ from .dialogs import (
     OpenURIDialog,
     RemoteConfigurationDialog,
 )
-from .remote_file_navigator import RemoteFileNavigatorDialog
+# RemoteFileNavigatorDialog is intentionally NOT imported here; it drags in
+# p5rem/paramiko at import time which adds ~400 ms to GUI startup.  Import it
+# lazily wherever it is needed.
 
 __all__ = [
     "InputDialogCustom",

@@ -33,29 +33,57 @@ from .cf_templates import (
     save_data_from_selection,
 )
 from .core_window import CFVCore
-from .remote_access import (
-    RemoteEntry,
-    build_remote_filesystem_spec,
-    remote_descriptor_hash,
-    spec_to_descriptor,
-)
+# Remote-access helpers are imported lazily (inside the methods that use them)
+# so that p5rem/paramiko are not loaded at GUI startup.
 from .ui.dialogs import OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog
-from .ui.remote_file_navigator import (
-    RemoteFileNavigatorDialog,
-    RemoteLoginLogDialog,
-    _XconvHostKeyPolicy,
-)
 
 logger = logging.getLogger(__name__)
 
 def _get_worker_path() -> str:
-    """ Find the worker executable, since we may be running in 
-    a frozen environment.
+    """Find the worker executable, supporting both dev and frozen (PyInstaller) environments.
+
+    In PyInstaller one-dir builds the worker binary is collected as a BINARY
+    type.  At runtime this ends up at different locations:
+
+    * ``dist/xconv2/_internal/cf-worker`` (one-dir collect output, dev/CI)
+    * ``Contents/Frameworks/cf-worker`` (macOS ``.app`` bundle - PyInstaller 6
+      moves BINARY files from ``_internal/`` to ``Frameworks/`` when assembling
+      the macOS bundle; ``sys._MEIPASS`` therefore points to ``Frameworks/``)
+    * ``Contents/MacOS/cf-worker`` (legacy two-one-file bundles)
+
+    We search all known locations and return the first that exists.
     """
-    worker = Path(sys.executable).parent / "cf-worker"
+    name = "cf-worker"
     if sys.platform == "win32":
-        worker = worker.with_suffix(".exe")
-    return str(worker)
+        name += ".exe"
+
+    if not getattr(sys, "frozen", False):
+        # Development / editable install: worker is a sibling of the GUI launcher.
+        return str(Path(sys.executable).parent / name)
+
+    # Frozen (PyInstaller) – try candidate paths in priority order.
+    candidates: list[Path] = []
+
+    # 1. sys._MEIPASS — set by the bootloader; for one-dir macOS bundles this
+    #    resolves to Contents/Frameworks/, which is where BINARY files land.
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / name)
+
+    exe_dir = Path(sys.executable).parent
+    # 2. Explicit macOS Frameworks directory (one-dir .app layout).
+    if sys.platform == "darwin":
+        candidates.append(exe_dir.parent / "Frameworks" / name)
+    # 3. Same directory as the launcher (legacy two-one-file layout / non-macOS).
+    candidates.append(exe_dir / name)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+
+    # Nothing found – return the most-likely path so the missing-file error
+    # message shows a meaningful location.
+    return str(candidates[-1] if candidates else exe_dir / name)
 
 
 class CFVMain(CFVCore):
@@ -107,6 +135,9 @@ class CFVMain(CFVCore):
             return
         self.worker.start(_worker_bin)
         logger.info("Started worker process: %s", self.worker.program())
+        # Show an initialisation indicator immediately after the first paint so
+        # the user knows the worker is loading even before it sends STATUS:.
+        QTimer.singleShot(0, lambda: self._show_status_message("Initialising worker…"))
 
     def on_file_selected(self, file_path: str) -> None:
         """Handle file selection by requesting worker metadata."""
@@ -276,6 +307,11 @@ class CFVMain(CFVCore):
                 else:
                     logger.warning("Unexpected IMG_READY payload type: %s", type(payload).__name__)
 
+            elif line == "READY":
+                # Worker has finished all heavy imports and is ready for tasks.
+                logger.info("Worker ready signal received")
+                self._show_status_message("Ready")
+
             elif line == "IMG_READY":
                 self._show_status_message("Plot Updated.")
                 if self._plot_request_in_flight:
@@ -404,6 +440,10 @@ class CFVMain(CFVCore):
 
     def _open_remote_from_config(self, config: dict[str, object]) -> None:
         """Perform remote login once in the worker, then navigate via IPC using a nested QEventLoop."""
+        from .remote_access import (  # noqa: PLC0415
+            build_remote_filesystem_spec, remote_descriptor_hash, spec_to_descriptor,
+        )
+        from .ui.remote_file_navigator import RemoteFileNavigatorDialog, RemoteLoginLogDialog  # noqa: PLC0415
         if not isinstance(config, dict):
             return
 
@@ -537,6 +577,10 @@ class CFVMain(CFVCore):
         host_alias: str,
     ) -> None:
         """Open a specific remote URI directly without launching the navigator dialog."""
+        from .remote_access import (  # noqa: PLC0415
+            build_remote_filesystem_spec, remote_descriptor_hash, spec_to_descriptor,
+        )
+        from .ui.remote_file_navigator import RemoteLoginLogDialog  # noqa: PLC0415
         if not isinstance(config, dict):
             return
 
@@ -933,6 +977,7 @@ class CFVMain(CFVCore):
 
         client = paramiko.SSHClient()
         client.load_system_host_keys()
+        from .ui.remote_file_navigator import _XconvHostKeyPolicy  # noqa: PLC0415
         client.set_missing_host_key_policy(_XconvHostKeyPolicy())
         try:
             client.connect(
@@ -1379,6 +1424,8 @@ class CFVMain(CFVCore):
         switch to a different remote at any time.
         """
         if self._remote_session_id and self._last_remote_config:
+            from .remote_access import build_remote_filesystem_spec  # noqa: PLC0415
+            from .ui.remote_file_navigator import RemoteFileNavigatorDialog  # noqa: PLC0415
             try:
                 spec = build_remote_filesystem_spec(self._last_remote_config)
             except Exception as exc:

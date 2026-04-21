@@ -718,6 +718,17 @@ def main():
     logger.info("Worker starting")
     logger.info("Log file: %s", log_file)
     try:
+        logger.info(
+            "MATPLOTLIB_PATHS cache=%s config=%s env[MPLCONFIGDIR]=%s env[XDG_CACHE_HOME]=%s env[HOME]=%s",
+            matplotlib.get_cachedir(),
+            matplotlib.get_configdir(),
+            os.environ.get("MPLCONFIGDIR"),
+            os.environ.get("XDG_CACHE_HOME"),
+            os.environ.get("HOME"),
+        )
+    except Exception:
+        logger.exception("Failed to log matplotlib cache/config paths")
+    try:
         import cfdm
 
         logger.info(
@@ -739,7 +750,11 @@ def main():
 
     # Expose helper in the exec namespace so GUI-issued tasks can emit messages.
     worker_globals['send_to_gui'] = send_to_gui
+    # Signal that all heavy imports (cf, cfplot, scipy, …) have completed and
+    # the worker is ready to accept tasks.  The GUI shows "Initialising worker…"
+    # until this line is received.
     send_to_gui("STATUS:Worker Initialized (Pure-Python/pyfive)")
+    print("READY", flush=True)
 
     current_block = []
 

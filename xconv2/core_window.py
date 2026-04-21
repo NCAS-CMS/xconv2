@@ -65,7 +65,8 @@ from .ui.plot_view_controller import PlotViewController
 from .ui.selection_controller import SelectionController
 from .ui.dialogs import OpenGlobDialog, OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog, create_info_button
 from .tooltips import CACHE_MANAGEMENT, SELECTION_HELP
-from .ui.remote_file_navigator import RemoteFileNavigatorDialog
+# RemoteFileNavigatorDialog is imported lazily (inside the methods that open it)
+# to avoid loading p5rem/paramiko at GUI startup.
 from .ui.settings_store import SettingsStore
 from .cache_utils import disk_cache_usage, parse_disk_expiry_seconds, prune_disk_cache
 from .logging_utils import (
@@ -76,7 +77,8 @@ from .logging_utils import (
     get_log_file_path,
     summarize_scope_levels,
 )
-from .remote_access import RemoteAccessSession
+# RemoteAccessSession is imported lazily to avoid loading p5rem/paramiko at GUI startup.
+# Any method that needs it should do: from .remote_access import RemoteAccessSession
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -157,6 +159,7 @@ class LogViewerDialog(QDialog):
             host._apply_logging_configuration_from_ui(scope_levels=selected_scope_levels)
         else:
             applied = apply_scoped_runtime_logging(selected_scope_levels)
+            from .remote_access import RemoteAccessSession  # noqa: PLC0415
             RemoteAccessSession.configure_logging(scope_levels=applied)
 
         self._refresh_logging_status_label()
@@ -170,6 +173,7 @@ class LogViewerDialog(QDialog):
         host = self.parent()
         if host is not None and hasattr(host, "_current_logging_configuration"):
             return host._current_logging_configuration()
+        from .remote_access import RemoteAccessSession  # noqa: PLC0415
         return RemoteAccessSession.logging_configuration()
 
     def showEvent(self, event) -> None:  # type: ignore[override]
@@ -493,6 +497,7 @@ class CFVCore(QMainWindow):
 
     def _current_logging_configuration(self):
         """Return the current GUI-process runtime logging configuration."""
+        from .remote_access import RemoteAccessSession  # noqa: PLC0415
         return RemoteAccessSession.logging_configuration()
 
     def _apply_logging_configuration_from_ui(
@@ -501,6 +506,7 @@ class CFVCore(QMainWindow):
         scope_levels: dict[str, int | str],
     ) -> None:
         """Apply GUI-process runtime logging updates from the log viewer."""
+        from .remote_access import RemoteAccessSession  # noqa: PLC0415
         applied = apply_scoped_runtime_logging(scope_levels)
         RemoteAccessSession.configure_logging(scope_levels=applied)
         self._show_status_message(
@@ -1762,6 +1768,7 @@ class CFVCore(QMainWindow):
             self._save_settings()
             if not ok or config is None:
                 return
+            from .ui.remote_file_navigator import RemoteFileNavigatorDialog  # noqa: PLC0415
             selected_uri, selected_ok = RemoteFileNavigatorDialog.get_remote_selection(self, config)
             if not selected_ok:
                 return
@@ -1817,6 +1824,7 @@ class CFVCore(QMainWindow):
             return
         if not ok or config is None:
             return
+        from .ui.remote_file_navigator import RemoteFileNavigatorDialog  # noqa: PLC0415
         selected_uri, selected_ok = RemoteFileNavigatorDialog.get_remote_selection(self, config)
         if not selected_ok:
             return

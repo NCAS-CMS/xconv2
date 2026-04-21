@@ -28,11 +28,8 @@ from PySide6.QtWidgets import (
 
 from xconv2.aaa.aaa_config import get_locations
 from xconv2.tooltips import REMOTE_CONFIGURATION
-
-try:
-    from p5rem import discover_remote_conda_envs
-except ImportError:
-    discover_remote_conda_envs = None
+# p5rem is imported lazily inside _discover_ssh_remote_python to avoid loading
+# paramiko at GUI startup.
 
 
 class InfoMessageDialog(QDialog):
@@ -1118,6 +1115,11 @@ class RemoteConfigurationDialog(QDialog):
 
     def _discover_ssh_remote_python(self) -> None:
         """Populate remote python commands by discovering remote conda environments."""
+        try:
+            from p5rem import discover_remote_conda_envs  # noqa: PLC0415
+        except ImportError:
+            discover_remote_conda_envs = None
+
         if discover_remote_conda_envs is None:
             QMessageBox.warning(
                 self,
