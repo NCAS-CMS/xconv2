@@ -34,13 +34,16 @@ gui_datas = xconv2_datas
 worker_datas = xconv2_datas + cfplot_datas
 
 # UDUNITS database XML — cfunits requires it at runtime in frozen mode.
-udunits_xml_candidates = [
-    Path(sys.prefix) / "share" / "udunits" / "udunits2.xml",
-    Path(os.environ.get("CONDA_PREFIX", "")) / "share" / "udunits" / "udunits2.xml",
+# udunits2.xml uses <import href="udunits2-base.xml"> etc., so we must bundle
+# the entire udunits/ directory, not just the top-level file.
+udunits_dir_candidates = [
+    Path(sys.prefix) / "share" / "udunits",
+    Path(os.environ.get("CONDA_PREFIX", "")) / "share" / "udunits",
 ]
-for xml_path in udunits_xml_candidates:
-    if xml_path and xml_path.exists():
-        worker_datas.append((str(xml_path), "udunits"))
+for udunits_dir in udunits_dir_candidates:
+    if udunits_dir and udunits_dir.is_dir():
+        for xml_file in udunits_dir.glob("*.xml"):
+            worker_datas.append((str(xml_file), "udunits"))
         break
 
 # UDUNITS native library — only the worker calls cfunits.
@@ -110,18 +113,21 @@ WORKER_EXCLUDES = [
     "notebook", "nbformat", "nbconvert",
     "tornado", "bokeh",
     # Test suites (large, never executed at runtime)
+    # NOTE: numpy.testing is NOT excluded — scipy.interpolate imports it transitively
+    # via scipy/_lib/array_api_compat at module level.
     "matplotlib.tests", "matplotlib.testing",
-    "numpy.tests", "numpy.testing",
+    "numpy.tests",
     "scipy.tests",
     "cf.test",
     "cfplot.test",
 ]
 
 
-# -- Worker executable --------------------------------------------------------
-# Built first as a self-contained one-file binary so it can be embedded inside
-# the GUI's one-dir COLLECT below.  The worker performs all heavy imports
-# (cf, cfplot, scipy, …) in its own process; the GUI never loads them.
+# -- Worker executable (one-dir mode) ----------------------------------------
+# The worker shares the same COLLECT/_internal directory as the GUI, so there
+# is no extraction step and no duplication of shared libraries.  Both
+# executables get exclude_binaries=True; all binaries and datas from both
+# analyses are merged into a single COLLECT below.
 
 worker_analysis = Analysis(
     [str(project_root / "pyinstaller_worker_entry.py")],
@@ -143,9 +149,9 @@ worker_pyz = PYZ(worker_analysis.pure, worker_analysis.zipped_data, cipher=block
 worker_exe = EXE(
     worker_pyz,
     worker_analysis.scripts,
-    worker_analysis.binaries,
-    worker_analysis.zipfiles,
-    worker_analysis.datas,
+    [],
+    [],
+    [],
     [],
     name="cf-worker",
     debug=False,
@@ -154,6 +160,7 @@ worker_exe = EXE(
     upx=False,  # UPX corrupts macOS ARM64 bytecode archives
     upx_exclude=[],
     runtime_tmpdir=None,
+    exclude_binaries=True,  # one-dir mode: binaries/datas go to COLLECT, not EXE
     console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -166,8 +173,7 @@ worker_exe = EXE(
 # -- GUI executable (one-dir mode) --------------------------------------------
 # One-dir avoids the startup extraction penalty of one-file bundles.  All
 # shared .so/.dylib files live pre-extracted in _internal/ so the OS can load
-# them directly on launch.  The self-contained worker binary is embedded in
-# the same MacOS/ directory so _get_worker_path() can locate it at runtime.
+# them directly on launch.
 
 gui_analysis = Analysis(
     [str(project_root / "pyinstaller_gui_entry.py")],
@@ -211,26 +217,21 @@ gui_exe = EXE(
     entitlements_file=None,
 )
 
-# COLLECT merges the GUI launcher, its pre-extracted dependencies, and the
-# one-file worker binary into a single directory.  BUNDLE wraps this directory
-# into the final .app structure.
+# COLLECT merges both executables and their combined dependencies into a single
+# directory.  BUNDLE wraps this into the final .app structure.
 #
-# Resulting layout inside xconv2.app/Contents/MacOS/:
-#   xconv2        — GUI launcher (fast, no extraction)
-#   cf-worker     — worker self-extracting archive (runs in background)
-#   _internal/    — pre-extracted GUI Python runtime and .so files
+# Resulting layout inside xconv2.app/Contents/Frameworks/ (via BUNDLE):
+#   xconv2        — GUI launcher (symlinked into Contents/MacOS/)
+#   cf-worker     — worker launcher (no extraction on launch)
+#   _internal/    — shared .so/.dylib files from both analyses
 #
-# The one-file worker EXE is referenced by its assembled output path (DISTPATH
-# / "cf-worker") rather than by the EXE object itself.  Passing an EXE object
-# to COLLECT causes PyInstaller to iterate over all of the EXE's embedded
-# source-file TOC entries and try to copy them individually, which fails.
-_worker_built = str(Path(DISTPATH) / "cf-worker")
+# Both EXEs share one _internal/ — no duplication, no temp-dir extraction.
 gui_coll = COLLECT(
     gui_exe,
-    gui_analysis.binaries,
-    gui_analysis.zipfiles,
-    gui_analysis.datas,
-    [("cf-worker", _worker_built, "BINARY")],
+    worker_exe,
+    gui_analysis.binaries + worker_analysis.binaries,
+    gui_analysis.zipfiles + worker_analysis.zipfiles,
+    gui_analysis.datas + worker_analysis.datas,
     strip=False,
     upx=False,
     upx_exclude=[],

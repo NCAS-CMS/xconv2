@@ -9,10 +9,10 @@ from urllib.parse import urlparse
 import fsspec
 from fsspec.implementations.cached import CachingFileSystem
 
-try:
-    from p5rem import bootstrap_session
-except ImportError:
-    bootstrap_session = None
+# p5rem (and its heavy paramiko dependency) is imported lazily inside
+# RemoteFileSystemFactory when an SSH/SFTP URL is opened, so that workers
+# and headless imports don't pay the paramiko startup cost.
+bootstrap_session = None  # populated on first SSH use
 
 
 logger = logging.getLogger(__name__)
@@ -662,8 +662,12 @@ class RemoteFileSystemFactory:
                 self.root_path = url
 
             case "ssh" | "sftp":
+                global bootstrap_session
                 if bootstrap_session is None:
-                    raise ImportError("p5rem is required for SSH/SFTP support. Install it with: pip install p5rem")
+                    try:
+                        from p5rem import bootstrap_session  # noqa: F811
+                    except ImportError:
+                        raise ImportError("p5rem is required for SSH/SFTP support. Install it with: pip install p5rem") from None
                 
                 parsed = urlparse(url)
                 if not parsed.hostname:
