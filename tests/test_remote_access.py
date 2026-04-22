@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 import pytest
 
 from xconv2.remote_access import (
     RemoteAccessSession,
+    RemoteFilesystemSpec,
     build_remote_filesystem_spec,
     create_filesystem,
     normalize_remote_datasets_for_cf_read,
@@ -272,7 +275,6 @@ def test_build_remote_filesystem_spec_ssh_includes_remote_python_and_login_shell
     assert spec.storage_options["username"] == "alice"
     assert spec.storage_options["remote_python"] == "conda run -n work26 python"
     assert spec.storage_options["login_shell"] is True
-
 
 def test_build_remote_filesystem_spec_ssh_reads_remote_python_from_add_new_shape() -> None:
     spec = build_remote_filesystem_spec(
