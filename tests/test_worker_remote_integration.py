@@ -13,6 +13,14 @@ from xconv2.ui.settings_store import SettingsStore
 import xconv2.worker as worker
 
 
+def _has_blockcache_index(cache_dir: Path) -> bool:
+    """Return True when blockcache index exists in either supported layout."""
+    return any(
+        candidate.is_file()
+        for candidate in (cache_dir / "cache", cache_dir / "fsspec" / "cache")
+    )
+
+
 
 @pytest.mark.integration
 def test_worker_remote_open_from_minio_emits_metadata(minio_service, temp_bucket) -> None:
@@ -411,7 +419,7 @@ def test_worker_remote_open_s3_with_disk_block_cache(minio_service, temp_bucket,
     )
     _assert_successful_open(messages, session_id="open-disk-cache", uri=uri)
     # The blockcache index file must exist after reading real data.
-    assert (cache_dir / "cache").is_file()
+    assert _has_blockcache_index(cache_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -491,7 +499,7 @@ def test_read_remote_fields_s3_with_disk_cache(minio_service, temp_bucket, tmp_p
         worker.remote_session_pool.clear()
 
     assert fields
-    assert (cache_dir / "cache").is_file()
+    assert _has_blockcache_index(cache_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -583,7 +591,7 @@ def test_disk_cache_works_without_cf_read(minio_service, temp_bucket, tmp_path) 
         handle1.close()
 
     assert data1, "First read returned no data"
-    assert (cache_dir / "cache").is_file(), "Blockcache index file not created after first read"
+    assert _has_blockcache_index(cache_dir), "Blockcache index file not created after first read"
 
     # Wait for MinIO's Prometheus scrape interval to tick (~10 s).
     time.sleep(12)
@@ -667,7 +675,7 @@ def test_disk_cache_persists_across_filesystem_recreation(minio_service, temp_bu
         h1.close()
 
     assert data1
-    assert (cache_dir / "cache").is_file(), "Blockcache index missing after first read"
+    assert _has_blockcache_index(cache_dir), "Blockcache index missing after first read"
 
     time.sleep(12)
     after_first = _minio_bytes_sent(minio_service.metrics_url)
@@ -836,7 +844,7 @@ def test_worker_remote_open_disk_cache_survives_release_recreate(minio_service, 
         first_open_bytes = after_first - before_first
 
         assert first_open_bytes > 0, "First REMOTE_OPEN should transfer bytes from MinIO"
-        assert (cache_dir / "cache").is_file(), "Blockcache index missing after first REMOTE_OPEN"
+        assert _has_blockcache_index(cache_dir), "Blockcache index missing after first REMOTE_OPEN"
 
         # Release current worker session to force true recreation.
         worker._handle_control_task(
@@ -962,7 +970,7 @@ def test_worker_remote_open_large_logged_s3_key_cache_hits_on_second_open(minio_
         first_open_bytes = after_first - before_first
 
         assert first_open_bytes > 0, "First large-file REMOTE_OPEN should transfer bytes from MinIO"
-        assert (cache_dir / "cache").is_file(), "Blockcache index missing after first large-file REMOTE_OPEN"
+        assert _has_blockcache_index(cache_dir), "Blockcache index missing after first large-file REMOTE_OPEN"
 
         # Release/recreate to mimic app lifecycle exactly before second open.
         worker._handle_control_task(
@@ -1065,7 +1073,7 @@ def test_large_logged_s3_key_direct_read_cache_hits_on_second_open(minio_service
         h1.close()
 
     assert data1
-    assert (cache_dir / "cache").is_file(), "Blockcache index missing after first direct open"
+    assert _has_blockcache_index(cache_dir), "Blockcache index missing after first direct open"
 
     time.sleep(12)
     after_first = _minio_bytes_sent(minio_service.metrics_url)
@@ -1146,7 +1154,7 @@ def test_worker_prepared_filesystem_large_key_direct_read_cache_hits_on_second_o
             h1.close()
 
         assert data1
-        assert (cache_dir / "cache").is_file(), "Blockcache index missing after worker-prepared direct read"
+        assert _has_blockcache_index(cache_dir), "Blockcache index missing after worker-prepared direct read"
 
         time.sleep(12)
         after_first = _minio_bytes_sent(minio_service.metrics_url)

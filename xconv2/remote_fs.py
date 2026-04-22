@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from pathlib import PurePosixPath
 from pathlib import Path
 from time import perf_counter
-from typing import Callable
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 import fsspec
@@ -16,6 +16,79 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
+
+
+class _CacheAwareCatRangesFSProxy:
+    """Per-handle FS adapter that serves cat_ranges from the handle cache.
+
+    fsspec CachingFileSystem returns the underlying remote file handle and
+    patches ``handle.cache`` for normal read/seek calls, but ``handle.fs`` still
+    points at the raw backend filesystem. pyfive's remote bulk path calls
+    ``handle.fs.cat_ranges(...)`` directly, which bypasses the patched cache.
+
+    This adapter preserves all FS behavior via delegation and only intercepts
+    cat_ranges for the current handle/path.
+    """
+
+    def __init__(self, fs: Any, handle: Any) -> None:
+        self._fs = fs
+        self._handle = handle
+        self.protocol = getattr(fs, "protocol", None)
+
+    def cat_ranges(
+        self,
+        paths,
+        starts,
+        ends,
+        max_gap: Any = None,
+        on_error: str = "return",
+        **kwargs,
+    ):
+        if max_gap is not None:
+            return self._fs.cat_ranges(
+                paths,
+                starts,
+                ends,
+                max_gap=max_gap,
+                on_error=on_error,
+                **kwargs,
+            )
+
+        if not isinstance(paths, list):
+            raise TypeError
+        if not isinstance(starts, list):
+            starts = [starts] * len(paths)
+        if not isinstance(ends, list):
+            ends = [ends] * len(paths)
+        if len(starts) != len(paths) or len(ends) != len(paths):
+            raise ValueError(
+                "cat_ranges argument length mismatch: "
+                f"len(paths)={len(paths)}, len(starts)={len(starts)}, len(ends)={len(ends)}"
+            )
+
+        cache = getattr(self._handle, "cache", None)
+        fetch = getattr(cache, "_fetch", None)
+        handle_path = getattr(self._handle, "path", None)
+
+        if not callable(fetch) or not isinstance(handle_path, str):
+            return self._fs.cat_ranges(paths, starts, ends, on_error=on_error, **kwargs)
+
+        out = []
+        for path, start, end in zip(paths, starts, ends):
+            try:
+                if path == handle_path:
+                    out.append(fetch(start, end))
+                else:
+                    out.append(self._fs.cat_file(path, start, end, **kwargs))
+            except Exception as exc:
+                if on_error == "return":
+                    out.append(exc)
+                else:
+                    raise
+        return out
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._fs, name)
 
 
 @contextmanager
@@ -70,7 +143,12 @@ def _forward_logger_output(
 
 
 class ShimmyFS(fsspec.AbstractFileSystem):
-    """Proxy a filesystem while forcing a default block size on open()."""
+    """
+    Proxy a filesystem while forcing a default block size on open().
+    This ensures user code and fsspec's CachingFileSystem stay in sync on block metadata, 
+    so that when users select their own blocksize parameters, they stay consistent with
+    the cache's expectations and avoid silent cache misses or redundant reads.     
+    """
 
     def __init__(
         self,
@@ -86,10 +164,12 @@ class ShimmyFS(fsspec.AbstractFileSystem):
         # Ensure protocol is exposed for compatibility
         self.protocol = getattr(fs, "protocol", None)
 
-    def open(self, path, mode: str = "rb", **kwargs):
-        requested_block_size = kwargs.get("block_size")
+    def _apply_block_size(self, path: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Force a consistent block_size for cache coherence across code paths."""
+        adjusted = dict(kwargs)
+        requested_block_size = adjusted.get("block_size")
         if requested_block_size is None:
-            kwargs["block_size"] = self.block_size
+            adjusted["block_size"] = self.block_size
         elif requested_block_size != self.block_size:
             logger.warning(
                 "Overriding block_size from %s to %s for %s",
@@ -97,10 +177,65 @@ class ShimmyFS(fsspec.AbstractFileSystem):
                 self.block_size,
                 path,
             )
-            kwargs["block_size"] = self.block_size
+            adjusted["block_size"] = self.block_size
+        return adjusted
 
-        logger.info("Opening %s with block_size=%s", path, kwargs["block_size"])
-        return self.fs.open(path, mode, **kwargs)
+    def open(self, path, mode: str = "rb", **kwargs):
+        adjusted_kwargs = self._apply_block_size(path, kwargs)
+        logger.info("Opening %s with block_size=%s", path, adjusted_kwargs["block_size"])
+        handle = self.fs.open(path, mode, **adjusted_kwargs)
+
+        # CachingFileSystem patches handle.cache but leaves handle.fs pointing
+        # at the raw backend FS; pyfive calls handle.fs.cat_ranges directly.
+        fs = getattr(handle, "fs", None)
+        if fs is not None and not isinstance(fs, _CacheAwareCatRangesFSProxy):
+            cache = getattr(handle, "cache", None)
+            if callable(getattr(cache, "_fetch", None)):
+                handle.fs = _CacheAwareCatRangesFSProxy(fs, handle)
+
+        return handle
+
+    def cat_ranges(
+        self,
+        paths,
+        starts,
+        ends,
+        max_gap: Any = None,
+        on_error: str = "return",
+        **kwargs,
+    ):
+        """Read byte ranges while preserving kwargs for cat_file/open.
+
+        fsspec's AbstractFileSystem.cat_ranges currently drops kwargs when
+        calling cat_file(). We need block_size to flow through to keep cache
+        block metadata consistent across serial and cat_ranges code paths.
+        This is a bug in fsspec: https://github.com/fsspec/filesystem_spec/issues/2016
+        """
+        if max_gap is not None:
+            raise NotImplementedError
+        if not isinstance(paths, list):
+            raise TypeError
+        if not isinstance(starts, list):
+            starts = [starts] * len(paths)
+        if not isinstance(ends, list):
+            ends = [ends] * len(paths)
+        if len(starts) != len(paths) or len(ends) != len(paths):
+            raise ValueError(
+                "cat_ranges argument length mismatch: "
+                f"len(paths)={len(paths)}, len(starts)={len(starts)}, len(ends)={len(ends)}"
+            )
+
+        out = []
+        for path, start, end in zip(paths, starts, ends):
+            adjusted_kwargs = self._apply_block_size(path, kwargs)
+            try:
+                out.append(self.fs.cat_file(path, start, end, **adjusted_kwargs))
+            except Exception as exc:
+                if on_error == "return":
+                    out.append(exc)
+                else:
+                    raise
+        return out
 
     def glob(self, path, **kwargs):
         matches = self.fs.glob(path, **kwargs)
