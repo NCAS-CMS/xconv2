@@ -10,11 +10,17 @@ def _configure_matplotlib_cache() -> None:
 
     PyInstaller's bootloader sets MPLCONFIGDIR to a per-run temp dir before
     Python starts, causing matplotlib to rebuild its font cache on every launch.
-    Unconditionally override it with a stable location in the user's home dir.
+    Unconditionally override it with a stable, platform-appropriate location.
     """
-    config_dir = os.path.join(
-        os.path.expanduser("~"), "Library", "Application Support", "xconv2", "matplotlib"
-    )
+    import platform
+    if platform.system() == "Darwin":
+        config_dir = os.path.join(
+            os.path.expanduser("~"), "Library", "Application Support", "xconv2", "matplotlib"
+        )
+    else:
+        # Linux/other: respect XDG_DATA_HOME or fall back to ~/.local/share
+        xdg = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+        config_dir = os.path.join(xdg, "xconv2", "matplotlib")
     os.makedirs(config_dir, exist_ok=True)
     os.environ["MPLCONFIGDIR"] = config_dir
 

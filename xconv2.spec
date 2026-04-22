@@ -4,8 +4,11 @@ Builds two executables:
 - xconv2 (GUI)
 - cf-worker (backend worker process launched by the GUI)
 
-The GUI expects cf-worker to be located beside the main executable, so both are
-included in the same macOS app bundle.
+Both executables share a single _internal/ directory produced by COLLECT so
+there is no per-launch extraction overhead.  On macOS the result is wrapped in
+a .app bundle; on Linux the COLLECT directory is the distributable artifact.
+
+Target platforms: macOS (arm64/x86_64) and Linux (x86_64).
 """
 
 import os
@@ -47,12 +50,20 @@ for udunits_dir in udunits_dir_candidates:
         break
 
 # UDUNITS native library — only the worker calls cfunits.
+# Library name differs by platform: .dylib on macOS, .so.0 on Linux.
 udunits_binaries = []
+if sys.platform == "darwin":
+    _udunits_lib_names = ["libudunits2.dylib", "libudunits2.0.dylib"]
+else:
+    _udunits_lib_names = ["libudunits2.so.0", "libudunits2.so"]
+_udunits_lib_roots = [
+    Path(sys.prefix) / "lib",
+    Path(os.environ.get("CONDA_PREFIX", "")) / "lib",
+]
 udunits_lib_candidates = [
-    Path(sys.prefix) / "lib" / "libudunits2.dylib",
-    Path(sys.prefix) / "lib" / "libudunits2.0.dylib",
-    Path(os.environ.get("CONDA_PREFIX", "")) / "lib" / "libudunits2.dylib",
-    Path(os.environ.get("CONDA_PREFIX", "")) / "lib" / "libudunits2.0.dylib",
+    root / name
+    for root in _udunits_lib_roots
+    for name in _udunits_lib_names
 ]
 for lib_path in udunits_lib_candidates:
     if lib_path and lib_path.exists():
@@ -192,6 +203,12 @@ gui_analysis = Analysis(
 )
 gui_pyz = PYZ(gui_analysis.pure, gui_analysis.zipped_data, cipher=block_cipher, optimize=2)
 
+# Icon: .icns for macOS, .png for Linux (used for .desktop integration).
+if sys.platform == "darwin":
+    _gui_icon = str(project_root / "xconv2" / "assets" / "cf-logo.icns")
+else:
+    _gui_icon = str(project_root / "xconv2" / "assets" / "cf-logo.svg")
+
 # In one-dir mode the EXE is the lightweight launcher stub only; binaries,
 # zipfiles, and datas are passed to COLLECT instead.
 gui_exe = EXE(
@@ -215,13 +232,15 @@ gui_exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=_gui_icon,
 )
 
 # COLLECT merges both executables and their combined dependencies into a single
-# directory.  BUNDLE wraps this into the final .app structure.
+# directory.  On macOS this is wrapped by BUNDLE into a .app; on Linux the
+# COLLECT directory is the distributable artifact.
 #
-# Resulting layout inside xconv2.app/Contents/Frameworks/ (via BUNDLE):
-#   xconv2        — GUI launcher (symlinked into Contents/MacOS/)
+# Layout (macOS: inside xconv2.app/Contents/Frameworks/, Linux: dist/xconv2/):
+#   xconv2        — GUI launcher
 #   cf-worker     — worker launcher (no extraction on launch)
 #   _internal/    — shared .so/.dylib files from both analyses
 #
@@ -240,9 +259,10 @@ gui_coll = COLLECT(
 
 # Keep both executables in the same .app so CFVMain can find cf-worker at:
 # Path(sys.executable).parent / "cf-worker"
-app = BUNDLE(
-    gui_coll,
-    name="xconv2.app",
-    icon=None,
-    bundle_identifier="org.xconv2.app",
-)
+if sys.platform == "darwin":
+    app = BUNDLE(
+        gui_coll,
+        name="xconv2.app",
+        icon=_gui_icon,
+        bundle_identifier="org.xconv2.app",
+    )
