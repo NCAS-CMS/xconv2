@@ -4,6 +4,18 @@ import ctypes.util
 import os
 import sys
 
+# PyInstaller static-analysis anchor imports.
+#
+# These packages are imported dynamically down the cf/cfdm remote-read path,
+# which means PyInstaller can miss them in some build configurations. Keep
+# this block so they are always discoverable at build time without affecting
+# runtime behavior.
+if False:  # pragma: no cover
+    import pyfive  # noqa: F401
+    import cbor2  # noqa: F401
+    import p5rem  # noqa: F401
+    import paramiko  # noqa: F401
+
 
 def _configure_matplotlib_cache() -> None:
     """Use a persistent matplotlib config dir so the font cache survives restarts.

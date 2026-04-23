@@ -15,7 +15,7 @@ import os
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
 
 block_cipher = None
@@ -27,14 +27,29 @@ project_root = Path(SPECPATH)
 # xconv2 package assets (icons, SVG, UI files) — needed by both GUI and worker.
 xconv2_datas = collect_data_files("xconv2", include_py_files=False)
 
+# Project metadata needed at runtime for version reporting in frozen builds.
+project_metadata_datas = [
+    (str(project_root / "pyproject.toml"), "."),
+]
+
 # cfplot colourmap files (.rgb) — only the worker renders plots.
 cfplot_datas = collect_data_files("cfplot", include_py_files=False)
 
 # GUI bundle: xconv2 assets only.
-gui_datas = xconv2_datas
+gui_datas = xconv2_datas + project_metadata_datas
 
 # Worker bundle: xconv2 assets + cfplot colourmaps + UDUNITS XML.
-worker_datas = xconv2_datas + cfplot_datas
+worker_datas = xconv2_datas + cfplot_datas + project_metadata_datas
+
+# Some optional remote-read dependencies are imported dynamically via cf/cfdm
+# and may be dropped from PYZ by modulegraph. Ship their package sources as
+# data (including .py) as a deterministic fallback.
+worker_datas += collect_data_files("pyfive", include_py_files=True)
+worker_datas += collect_data_files("p5rem", include_py_files=True)
+# pyfive imports its own version via importlib.metadata.version("pyfive") at
+# import time. Include dist-info metadata so this works in frozen builds.
+worker_datas += copy_metadata("pyfive")
+worker_datas += copy_metadata("p5rem")
 
 # UDUNITS database XML — cfunits requires it at runtime in frozen mode.
 # udunits2.xml uses <import href="udunits2-base.xml"> etc., so we must bundle
@@ -80,7 +95,7 @@ gui_hiddenimports: list[str] = []
 # Worker uses dynamic imports inside cf/cfplot; collect all submodules so
 # frozen code can resolve them at runtime.
 worker_hiddenimports: list[str] = []
-for _pkg in ("xconv2", "cf", "cfdm", "cfplot"):
+for _pkg in ("xconv2", "cf", "cfdm", "cfplot", "pyfive", "cbor2", "p5rem", "paramiko"):
     worker_hiddenimports.extend(collect_submodules(_pkg))
 
 
@@ -265,4 +280,14 @@ if sys.platform == "darwin":
         name="xconv2.app",
         icon=_gui_icon,
         bundle_identifier="org.xconv2.app",
+        info_plist={
+            # Show in Dock and App Switcher like a normal foreground app.
+            # PyInstaller defaults this to True for windowed apps, which
+            # produces a background-agent app with no Dock icon.
+            "LSUIElement": False,
+            # Human-readable name shown in Dock / About This Mac.
+            "CFBundleName": "xconv2",
+            "CFBundleDisplayName": "xconv2",
+            "CFBundleShortVersionString": "1.0",
+        },
     )
