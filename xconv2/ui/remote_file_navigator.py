@@ -731,7 +731,7 @@ class RemoteLoginLogDialog(QDialog):
     def _scroll_to_end(self) -> None:
         """Force the log viewport to the newest line."""
         if not self._follow_log_output or self._auto_scrolling:
-            logger.info(
+            logger.debug(
                 "REMOTE_LOG scroll skipped follow=%s auto=%s",
                 self._follow_log_output,
                 self._auto_scrolling,
