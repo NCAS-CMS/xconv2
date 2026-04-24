@@ -392,6 +392,7 @@ class CFVMain(CFVCore):
 
     def _load_selected_file(self, file_path: str) -> None:
         """Load selected file in worker and publish field metadata."""
+        self._clear_loaded_data_views()
         self._show_status_message(f"Loading file: {file_path}")
         logger.info("Loading file in worker: %s", file_path)
 
@@ -410,6 +411,7 @@ class CFVMain(CFVCore):
             self._show_status_message("Remote worker session is not initialized.", is_error=True)
             return
 
+        self._clear_loaded_data_views()
         self._show_status_message(f"Loading remote file: {uri}")
         self._send_worker_control_task(
             "REMOTE_OPEN",
