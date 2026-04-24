@@ -161,8 +161,31 @@ class RemoteAccessSession:
         return cls._logging_configuration
 
     def list_entries(self, path: str) -> list[RemoteEntry]:
-        """List and normalize directory entries from the backing filesystem."""
-        listing = self.filesystem.ls(path, detail=True)
+        """List and normalize directory entries from the backing filesystem.
+        
+        For HTTP listings, retries with trailing "/" if the initial request fails,
+        since some OldDAP2 servers require it for directory URLs.
+        """
+        try:
+            listing = self.filesystem.ls(path, detail=True)
+        except Exception as exc:
+            # Retry HTTP directory URLs with trailing slash
+            parsed = urlparse(path)
+            is_http_candidate = parsed.scheme in ("http", "https")
+            if is_http_candidate and not path.endswith("/"):
+                try:
+                    logger.debug(
+                        f"Initial ls() failed for {path}, retrying with trailing slash: {exc}"
+                    )
+                    listing = self.filesystem.ls(path + "/", detail=True)
+                except Exception as retry_exc:
+                    logger.warning(
+                        f"ls() failed for {path} and {path + '/'}: {retry_exc}"
+                    )
+                    raise
+            else:
+                raise
+        
         if not isinstance(listing, list):
             return []
         entries = normalize_remote_entries(listing)
