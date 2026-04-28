@@ -4,6 +4,40 @@ import ctypes.util
 import os
 import sys
 
+print("--- WORKER BOOT DIAGNOSTIC ---")
+try:
+    import ssl
+    print(f"SSL Status: OK (OpenSSL {ssl.OPENSSL_VERSION})")
+except Exception as e:
+    print(f"SSL Status: BROKEN ({type(e).__name__}: {e})")
+
+
+print("--- DEBUG SSL START ---")
+try:
+    import ssl
+    print(f"SSL Version: {ssl.OPENSSL_VERSION}")
+except ImportError as e:
+    print(f"FAILED to import ssl: {e}")
+    try:
+        import _ssl
+        print("Native _ssl imported, but high-level ssl failed.")
+    except ImportError as e2:
+        print(f"FAILED to import native _ssl: {e2}")
+print("--- DEBUG SSL END ---")
+
+import fsspec
+try:
+    import s3fs
+    from fsspec.registry import register_implementation
+    register_implementation("s3", s3fs.S3FileSystem, clobber=True)
+    register_implementation("s3a", s3fs.S3FileSystem, clobber=True)
+    print("DEBUG: s3fs registered successfully")
+except Exception as e:
+    # Print the ACTUAL error to stderr so it shows up in your logs
+    import traceback
+    print(f"DEBUG: Failed to register s3fs. Error: {e}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    
 # PyInstaller static-analysis anchor imports.
 #
 # These packages are imported dynamically down the cf/cfdm remote-read path,
@@ -15,7 +49,6 @@ if False:  # pragma: no cover
     import cbor2  # noqa: F401
     import p5rem  # noqa: F401
     import paramiko  # noqa: F401
-
 
 def _configure_matplotlib_cache() -> None:
     """Use a persistent matplotlib config dir so the font cache survives restarts.

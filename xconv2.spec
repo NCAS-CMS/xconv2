@@ -21,7 +21,20 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy
 block_cipher = None
 project_root = Path(SPECPATH)
 
+# -- SSL/curl exclusions for Linux --------------------------------------------
+# On Linux, exclude libssl, libcrypto and libcurl from the bundle and let them
+# come from the host system. This avoids OpenSSL version mismatches between
+# the bundled libssl and the system libcurl. Not needed on macOS where the
+# system ships its own curl/ssl.
 
+def filter_system_libs(binaries):
+    if sys.platform == "darwin":
+        return binaries
+    exclude_prefixes = ("libssl.so", "libcrypto.so", "libcurl.so")
+    return [b for b in binaries if not any(
+        Path(b[0]).name.startswith(prefix) for prefix in exclude_prefixes
+	)]
+	    
 # -- Data files ---------------------------------------------------------------
 
 # xconv2 package assets (icons, SVG, UI files) — needed by both GUI and worker.
@@ -50,6 +63,22 @@ worker_datas += collect_data_files("p5rem", include_py_files=True)
 # import time. Include dist-info metadata so this works in frozen builds.
 worker_datas += copy_metadata("pyfive")
 worker_datas += copy_metadata("p5rem")
+
+# Force-include the s3fs and fsspec source code
+#worker_datas += collect_data_files("s3fs", include_py_files=True)
+#worker_datas += collect_data_files("fsspec", include_py_files=True)
+worker_datas += collect_data_files("aiobotocore", include_py_files=True)
+# botocore needs its JSON data files to function
+worker_datas += collect_data_files("botocore", include_py_files=False)
+
+# Force-include urllib3 source code
+#worker_datas += collect_data_files("urllib3", include_py_files=True)
+worker_datas += copy_metadata("urllib3")
+
+# Add metadata for the filesystem handlers
+worker_datas += copy_metadata("s3fs")
+worker_datas += copy_metadata("fsspec")
+worker_datas += copy_metadata("aiobotocore")
 
 # UDUNITS database XML — cfunits requires it at runtime in frozen mode.
 # udunits2.xml uses <import href="udunits2-base.xml"> etc., so we must bundle
@@ -84,7 +113,48 @@ for lib_path in udunits_lib_candidates:
     if lib_path and lib_path.exists():
         udunits_binaries.append((str(lib_path), "."))
         break
+	
+# BLAS/CBLAS native library
+blas_binaries = []
+if sys.platform == "darwin":
+    _blas_lib_names = ["libcblas.dylib", "libcblas.3.dylib", "libopenblas.dylib"]
+else:
+    # Linux names
+    _blas_lib_names = ["libcblas.so.3", "libcblas.so", "libopenblas.so.0", "libopenblas.so.3"]
 
+_lib_roots = [
+    Path(sys.prefix) / "lib",
+    Path(os.environ.get("CONDA_PREFIX", "")) / "lib",
+]
+
+blas_lib_candidates = [
+    root / name
+    for root in _lib_roots
+    for name in _blas_lib_names
+]
+
+for lib_path in blas_lib_candidates:
+    if lib_path.exists():
+        blas_binaries.append((str(lib_path), "."))
+        # Important: libcblas often depends on libblas or libopenblas. 
+        # If we find OpenBLAS, it usually contains both, so we can stop.
+        break
+
+# NEW: Aggressive SSL capture for Conda/Linux
+ssl_binaries = []
+if sys.platform == "linux":
+    # Try to find where your current python's libs are
+    lib_path = Path(sys.prefix) / "lib"
+    # We need the actual files, not just symlinks
+    for lib_pattern in ["libssl.so*", "libcrypto.so*"]:
+        for f in lib_path.glob(lib_pattern):
+            if f.is_file() and not f.is_symlink():
+                ssl_binaries.append((str(f), "."))
+    
+    # Also find the Python SSL extension itself just in case
+    ext_path = Path(sys.prefix) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "lib-dynload"
+    for f in ext_path.glob("_ssl*"):
+        ssl_binaries.append((str(f), "lib-dynload"))
 
 # -- Hidden imports -----------------------------------------------------------
 
@@ -95,10 +165,31 @@ gui_hiddenimports: list[str] = []
 # Worker uses dynamic imports inside cf/cfplot; collect all submodules so
 # frozen code can resolve them at runtime.
 worker_hiddenimports: list[str] = []
-for _pkg in ("xconv2", "cf", "cfdm", "cfplot", "pyfive", "cbor2", "p5rem", "paramiko"):
+for _pkg in ("xconv2", "cf", "cfdm", "cfplot", "pyfive", "cbor2", "p5rem", "paramiko", "s3fs", "fsspec", "urllib3", "aiohttp"):
     worker_hiddenimports.extend(collect_submodules(_pkg))
 
+# Sometimes collect_submodules misses specific sub-dependencies if
+# they aren't explicitly imported in the package's __init__.py.
+worker_hiddenimports.extend(
+    [
+	's3fs.core',
+	'fsspec.implementations.local',
+	'fsspec.implementations.s3fs',
+	'aiobotocore'
+	'botocore',
+	'importlib_metadata', # fsspec uses this for discovery
+    ]
+)
 
+# Add urllib3 and the standard ssl module to your worker_hiddenimports
+# list:
+worker_hiddenimports.extend([
+    'urllib3',
+    'urllib3.util',
+    'urllib3.util.ssl_',
+    'ssl',  # Ensure the standard library ssl is tracked
+    'engineio', # Often used in these stacks
+])
 # -- Excludes -----------------------------------------------------------------
 
 # Modules excluded from the GUI bundle.  The GUI only needs PySide6 + the
@@ -158,7 +249,7 @@ WORKER_EXCLUDES = [
 worker_analysis = Analysis(
     [str(project_root / "pyinstaller_worker_entry.py")],
     pathex=[str(project_root)],
-    binaries=udunits_binaries,
+    binaries=udunits_binaries + blas_binaries + ssl_binaries,
     datas=worker_datas,
     hiddenimports=worker_hiddenimports,
     hookspath=[],
@@ -260,17 +351,29 @@ gui_exe = EXE(
 #   _internal/    — shared .so/.dylib files from both analyses
 #
 # Both EXEs share one _internal/ — no duplication, no temp-dir extraction.
-gui_coll = COLLECT(
-    gui_exe,
-    worker_exe,
-    gui_analysis.binaries + worker_analysis.binaries,
-    gui_analysis.zipfiles + worker_analysis.zipfiles,
-    gui_analysis.datas + worker_analysis.datas,
-    strip=False,
-    upx=False,
-    upx_exclude=[],
-    name="xconv2",
-)
+## gui_coll = COLLECT(
+##     gui_exe,
+##     worker_exe,
+##     filter_system_libs(gui_analysis.binaries + worker_analysis.binaries),
+##     gui_analysis.zipfiles + worker_analysis.zipfiles,
+##     gui_analysis.datas + worker_analysis.datas,
+##     strip=False,
+##     upx=False,
+##     upx_exclude=[],
+##     name="xconv2",
+## ) 
+
+#gui_coll = COLLECT(
+#    gui_exe,
+#    worker_exe,
+#    gui_analysis.binaries + worker_analysis.binaries,
+#    gui_analysis.zipfiles + worker_analysis.zipfiles,
+#    gui_analysis.datas + worker_analysis.datas,
+#    strip=False,
+#    upx=False,
+#    upx_exclude=[],
+#    name="xconv2",
+#)
 
 # Keep both executables in the same .app so CFVMain can find cf-worker at:
 # Path(sys.executable).parent / "cf-worker"
