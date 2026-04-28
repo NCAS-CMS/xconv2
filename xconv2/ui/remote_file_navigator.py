@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import hashlib
 import json
+import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from pathlib import PurePosixPath
 from typing import Any, Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -22,6 +23,237 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from xconv2 import remote_access as remote_core
+from xconv2 import remote_fs
+
+
+logger = logging.getLogger(__name__)
+
+
+def _current_remote_logging_configuration():
+    """Return the shared runtime remote logging configuration."""
+    return remote_core.RemoteAccessSession.logging_configuration()
+
+
+class _ConfiguredRemoteFileSystem:
+    """Proxy filesystem that injects default open kwargs for read caching."""
+
+    def __init__(self, filesystem: Any, *, open_defaults: dict[str, Any]) -> None:
+        self._filesystem = filesystem
+        self._open_defaults = dict(open_defaults)
+        self.protocol = getattr(filesystem, "protocol", None)
+
+    def open(self, path: str, mode: str = "rb", **kwargs: Any):
+        """Open a path while applying configured cache defaults for reads."""
+        return self._filesystem.open(path, mode=mode, **self._merge_open_kwargs(mode, kwargs))
+
+    def _open(self, path: str, mode: str = "rb", **kwargs: Any):
+        """Delegate low-level open while applying configured cache defaults for reads."""
+        return self._filesystem._open(path, mode=mode, **self._merge_open_kwargs(mode, kwargs))
+
+    def _merge_open_kwargs(self, mode: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+        if "r" not in mode:
+            return kwargs
+        merged = dict(self._open_defaults)
+        merged.update(kwargs)
+        return merged
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._filesystem, name)
+
+
+def _instrument_file_handle_with_logging(handle: Any, *, label: str, path: str) -> Any:
+    """Attach logging to a file handle instance without changing its identity."""
+    if getattr(handle, "_xconv_logging_wrapped_handle", False):
+        return handle
+
+    base_cls = type(handle)
+
+    def read(self, *args: Any, **kwargs: Any):
+        started = time.perf_counter()
+        result = base_cls.read(self, *args, **kwargs)
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        size = len(result) if isinstance(result, (bytes, bytearray, memoryview, str)) else "na"
+        logger.info(
+            "REMOTE_FS file_read label=%s path=%r request=%r size=%s elapsed_ms=%d",
+            self._xconv_log_label,
+            self._xconv_log_path,
+            args[0] if args else None,
+            size,
+            elapsed_ms,
+        )
+        return result
+
+    def seek(self, *args: Any, **kwargs: Any):
+        started = time.perf_counter()
+        result = base_cls.seek(self, *args, **kwargs)
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        logger.info(
+            "REMOTE_FS file_seek label=%s path=%r args=%r kwargs=%r elapsed_ms=%d result=%r",
+            self._xconv_log_label,
+            self._xconv_log_path,
+            args,
+            kwargs,
+            elapsed_ms,
+            result,
+        )
+        return result
+
+    def close(self):
+        logger.info("REMOTE_FS file_close label=%s path=%r", self._xconv_log_label, self._xconv_log_path)
+        return base_cls.close(self)
+
+    def _fetch_range(self, *args: Any, **kwargs: Any):
+        fetch = getattr(base_cls, "_fetch_range", None)
+        if not callable(fetch):
+            raise AttributeError("Underlying handle does not support _fetch_range")
+
+        started = time.perf_counter()
+        result = fetch(self, *args, **kwargs)
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        start = args[0] if len(args) > 0 else kwargs.get("start")
+        end = args[1] if len(args) > 1 else kwargs.get("end")
+        size = len(result) if isinstance(result, (bytes, bytearray, memoryview, str)) else "na"
+        logger.info(
+            "REMOTE_FS file_fetch_range label=%s path=%r start=%r end=%r size=%s elapsed_ms=%d",
+            self._xconv_log_label,
+            self._xconv_log_path,
+            start,
+            end,
+            size,
+            elapsed_ms,
+        )
+        return result
+
+    overrides: dict[str, Any] = {}
+    for name, fn in [("read", read), ("seek", seek), ("close", close), ("_fetch_range", _fetch_range)]:
+        if hasattr(base_cls, name):
+            overrides[name] = fn
+
+    proxy_cls = type(f"_LoggingHandle_{base_cls.__name__}", (base_cls,), overrides)
+    handle.__class__ = proxy_cls
+    handle._xconv_log_label = label
+    handle._xconv_log_path = path
+    handle._xconv_logging_wrapped_handle = True
+    return handle
+
+
+def _wrap_filesystem_with_logging(filesystem: Any, *, label: str) -> Any:
+    """Return *filesystem* with logging wrappers injected on key I/O methods.
+
+    Rather than using a proxy class (which breaks fsspec's BlockCache because it
+    does ``getattr(type(self.fs), method)`` class-level lookups), we dynamically
+    subclass the *actual* filesystem type and swizzle the instance's ``__class__``.
+    Every attribute not explicitly overridden here is inherited correctly.
+    """
+    if not _current_remote_logging_configuration().should_trace_filesystem():
+        return filesystem
+
+    base_cls = type(filesystem)
+
+    def _open(self, path: str, mode: str = "rb", **kwargs: Any):
+        started = time.perf_counter()
+        handle = base_cls._open(self, path, mode=mode, **kwargs)
+        logger.info(
+            "REMOTE_FS _open label=%s path=%r mode=%s elapsed_ms=%d",
+            label, path, mode, int((time.perf_counter() - started) * 1000),
+        )
+        if _current_remote_logging_configuration().should_trace_file_io():
+            return _instrument_file_handle_with_logging(handle, label=label, path=path)
+        return handle
+
+    def open(self, path: str, mode: str = "rb", **kwargs: Any):
+        started = time.perf_counter()
+        handle = base_cls.open(self, path, mode=mode, **kwargs)
+        logger.info(
+            "REMOTE_FS open label=%s path=%r mode=%s elapsed_ms=%d",
+            label, path, mode, int((time.perf_counter() - started) * 1000),
+        )
+        if _current_remote_logging_configuration().should_trace_file_io():
+            return _instrument_file_handle_with_logging(handle, label=label, path=path)
+        return handle
+
+    def info(self, path: str, **kwargs: Any):
+        started = time.perf_counter()
+        result = base_cls.info(self, path, **kwargs)
+        logger.info(
+            "REMOTE_FS info label=%s path=%r elapsed_ms=%d",
+            label, path, int((time.perf_counter() - started) * 1000),
+        )
+        return result
+
+    def ls(self, path: str, detail: bool = True, **kwargs: Any):
+        started = time.perf_counter()
+        result = base_cls.ls(self, path, detail=detail, **kwargs)
+        logger.info(
+            "REMOTE_FS ls label=%s path=%r elapsed_ms=%d count=%d",
+            label, path, int((time.perf_counter() - started) * 1000),
+            len(result) if hasattr(result, "__len__") else -1,
+        )
+        return result
+
+    def glob(self, path: str, **kwargs: Any):
+        started = time.perf_counter()
+        result = base_cls.glob(self, path, **kwargs)
+        logger.info(
+            "REMOTE_FS glob label=%s path=%r elapsed_ms=%d count=%d",
+            label, path, int((time.perf_counter() - started) * 1000),
+            len(result) if hasattr(result, "__len__") else -1,
+        )
+        return result
+
+    def exists(self, path: str, **kwargs: Any):
+        started = time.perf_counter()
+        result = base_cls.exists(self, path, **kwargs)
+        logger.info(
+            "REMOTE_FS exists label=%s path=%r elapsed_ms=%d result=%r",
+            label, path, int((time.perf_counter() - started) * 1000), result,
+        )
+        return result
+
+    def cat_file(self, path: str, **kwargs: Any):
+        started = time.perf_counter()
+        result = base_cls.cat_file(self, path, **kwargs)
+        size = len(result) if isinstance(result, (bytes, bytearray, memoryview, str)) else "na"
+        logger.info(
+            "REMOTE_FS cat_file label=%s path=%r elapsed_ms=%d size=%s",
+            label, path, int((time.perf_counter() - started) * 1000), size,
+        )
+        return result
+
+    def head(self, path: str, size: int = 1024, **kwargs: Any):
+        started = time.perf_counter()
+        result = base_cls.head(self, path, size=size, **kwargs)
+        logger.info(
+            "REMOTE_FS head label=%s path=%r size=%d elapsed_ms=%d",
+            label, path, size, int((time.perf_counter() - started) * 1000),
+        )
+        return result
+
+    def read_block(self, path: str, offset: int, length: int, **kwargs: Any):
+        started = time.perf_counter()
+        result = base_cls.read_block(self, path, offset, length, **kwargs)
+        logger.info(
+            "REMOTE_FS read_block label=%s path=%r offset=%d length=%d elapsed_ms=%d",
+            label, path, offset, length, int((time.perf_counter() - started) * 1000),
+        )
+        return result
+
+    # Only override methods that actually exist on the base class so we don't
+    # accidentally shadow something with an AttributeError on call.
+    overrides: dict[str, Any] = {}
+    for name, fn in [
+        ("_open", _open), ("open", open), ("info", info), ("ls", ls),
+        ("glob", glob), ("exists", exists), ("cat_file", cat_file),
+        ("head", head), ("read_block", read_block),
+    ]:
+        if hasattr(base_cls, name):
+            overrides[name] = fn
+
+    proxy_cls = type(f"_Logging_{base_cls.__name__}", (base_cls,), overrides)
+    filesystem.__class__ = proxy_cls
+    return filesystem
 
 
 @dataclass(frozen=True)
@@ -54,41 +286,17 @@ def spec_to_descriptor(
     cache: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a JSON-safe descriptor for worker-side warm-up/open tasks."""
-    descriptor = {
-        "protocol": spec.protocol,
-        "storage_options": dict(spec.storage_options),
-        "root_path": spec.root_path,
-        "display_name": spec.display_name,
-        "uri_scheme": spec.uri_scheme,
-        "uri_authority": spec.uri_authority,
-        "proxy_jump": spec.proxy_jump,
-    }
-    if cache is not None:
-        descriptor["cache"] = dict(cache)
-    return descriptor
+    return remote_core.spec_to_descriptor(spec, cache=cache)
 
 
 def descriptor_to_spec(descriptor: dict[str, Any]) -> RemoteFilesystemSpec:
     """Rebuild a filesystem spec from a worker/UI transport descriptor."""
-    return RemoteFilesystemSpec(
-        protocol=str(descriptor.get("protocol", "")),
-        storage_options=dict(descriptor.get("storage_options", {})),
-        root_path=str(descriptor.get("root_path", "")),
-        display_name=str(descriptor.get("display_name", "Remote")),
-        uri_scheme=str(descriptor.get("uri_scheme", "")),
-        uri_authority=str(descriptor.get("uri_authority", "")),
-        proxy_jump=(
-            str(descriptor["proxy_jump"])
-            if descriptor.get("proxy_jump")
-            else None
-        ),
-    )
+    return remote_core.descriptor_to_spec(descriptor)
 
 
 def remote_descriptor_hash(descriptor: dict[str, Any]) -> str:
     """Create a stable hash for descriptor-keyed worker session reuse."""
-    normalized = json.dumps(descriptor, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return remote_core.remote_descriptor_hash(descriptor)
 
 
 def _value_from_keys(details: dict[str, Any], *keys: str) -> str:
@@ -102,29 +310,158 @@ def _value_from_keys(details: dict[str, Any], *keys: str) -> str:
 
 def _parse_proxy_jump(s: str) -> tuple[str | None, str, int]:
     """Parse a ProxyJump directive into (user, host, port). Only the first hop is used."""
-    first = s.split(",")[0].strip()
-    port = 22
-    user: str | None = None
-    if "@" in first:
-        user_part, rest = first.split("@", 1)
-        user = user_part or None
-    else:
-        rest = first
-    if ":" in rest:
-        host, port_str = rest.rsplit(":", 1)
-        try:
-            port = int(port_str)
-        except ValueError:
-            host = rest
-    else:
-        host = rest
-    return user, host, port
+    return remote_fs._parse_proxy_jump(s)
 
 
 def _emit_log(log: Callable[[str], None] | None, message: str) -> None:
     """Write a line to the optional connection log callback."""
     if log is not None:
         log(message)
+
+
+def _prune_incompatible_blockcache_entries(
+    cache_path: Path,
+    *,
+    block_size: int,
+    log: Callable[[str], None] | None = None,
+) -> None:
+    """Remove blockcache entries that were created with a different block size."""
+    index_path = cache_path / "cache"
+    if not index_path.is_file():
+        return
+
+    try:
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.exception("Failed to read blockcache index at %s", index_path)
+        return
+
+    if not isinstance(payload, dict):
+        return
+
+    removed = 0
+    for key, details in list(payload.items()):
+        if not isinstance(details, dict):
+            continue
+        existing_block_size = details.get("blocksize")
+        if not isinstance(existing_block_size, int) or existing_block_size == block_size:
+            continue
+
+        cache_file = details.get("fn")
+        if isinstance(cache_file, str) and cache_file:
+            try:
+                (cache_path / cache_file).unlink(missing_ok=True)
+            except OSError:
+                logger.exception("Failed to remove stale blockcache file %s", cache_file)
+
+        payload.pop(key, None)
+        removed += 1
+
+    if not removed:
+        return
+
+    try:
+        index_path.write_text(json.dumps(payload), encoding="utf-8")
+    except OSError:
+        logger.exception("Failed to write pruned blockcache index at %s", index_path)
+        return
+
+    message = (
+        f"Pruned {removed} incompatible blockcache entr"
+        f"{'y' if removed == 1 else 'ies'} for blocksize={block_size}."
+    )
+    _emit_log(log, message)
+    logger.info(message)
+
+
+def _apply_cache_configuration(
+    filesystem: Any,
+    *,
+    cache: dict[str, Any] | None = None,
+    log: Callable[[str], None] | None = None,
+) -> Any:
+    """Apply optional disk and in-memory caching wrappers to a filesystem."""
+    if cache is None:
+        cache = {}
+
+    disk_mode = str(cache.get("disk_mode", "Disabled")).strip().lower()
+    blocksize_mb = int(cache.get("blocksize_mb", 2) or 0)
+    blocksize_bytes = blocksize_mb * 1024 * 1024 if blocksize_mb > 0 else 2 * 1024 * 1024
+    max_blocks = int(cache.get("max_blocks", 128) or 0)
+    disk_location = str(cache.get("disk_location", "")).strip()
+    disk_expiry = str(cache.get("disk_expiry", "7 days")).strip()
+
+    from xconv2.cache_utils import parse_disk_expiry_seconds
+
+    import fsspec  # type: ignore
+
+    if disk_mode == "blocks":
+        expiry_seconds = parse_disk_expiry_seconds(disk_expiry)
+        _emit_log(
+            log,
+            f"Configuring block disk cache at {disk_location!r} with {blocksize_bytes} byte blocks, max {max_blocks} blocks, expiry {disk_expiry}",
+        )
+
+        try:
+            from pathlib import Path
+
+            cache_path = Path(disk_location).expanduser()
+            cache_path.mkdir(parents=True, exist_ok=True)
+
+            from xconv2.cache_utils import prune_disk_cache
+
+            prune_disk_cache(
+                cache_path,
+                limit_bytes=0,
+                expiry_seconds=expiry_seconds,
+                log=log,
+            )
+
+            # Check for incompatible blockcache entries and purge them.
+            metadata_path = cache_path / "cache"
+            if metadata_path.exists():
+                try:
+                    import json
+
+                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    filtered = {}
+                    for key, detail in metadata.items():
+                        if not isinstance(detail, dict):
+                            continue
+                        cached_blocksize = detail.get("blocksize")
+                        if isinstance(cached_blocksize, int) and cached_blocksize != blocksize_bytes:
+                            fn = str(detail.get("fn", "")).strip()
+                            if fn:
+                                fn_path = cache_path / fn
+                                try:
+                                    fn_path.unlink()
+                                except OSError:
+                                    pass
+                            _emit_log(
+                                log,
+                                f"Purged incompatible cache entry {key!r}: blocksize {cached_blocksize} != {blocksize_bytes}",
+                            )
+                        else:
+                            filtered[key] = detail
+                    if filtered != metadata:
+                        metadata_path.write_text(json.dumps(filtered), encoding="utf-8")
+                except Exception as e:
+                    _emit_log(log, f"Warning: could not check cache compatibility: {e}")
+        except Exception as e:
+            _emit_log(log, f"Warning: could not prepare cache directory: {e}")
+
+        return fsspec.filesystem(
+            "blockcache",
+            fs=filesystem,
+            cache_storage=disk_location,
+            expiry_time=expiry_seconds,
+            check_files=False,
+            blocksize=blocksize_bytes,
+            maxblocks=max_blocks,
+        )
+
+    _emit_log(log, "No caching configured")
+    return filesystem
 
 
 class _XconvHostKeyPolicy:
@@ -272,178 +609,31 @@ def _create_sftp_via_jump(spec: RemoteFilesystemSpec, log: Callable[[str], None]
 
 def build_remote_filesystem_spec(config: dict[str, Any]) -> RemoteFilesystemSpec:
     """Translate remote configuration state into fsspec filesystem arguments."""
-    protocol = str(config.get("protocol", "")).upper()
-    remote = config.get("remote", {})
-    if not isinstance(remote, dict):
-        raise ValueError("Remote configuration is malformed")
-
-    details = remote.get("details", {})
-    if not isinstance(details, dict):
-        details = {}
-
-    if protocol == "S3":
-        alias = str(remote.get("alias") or "S3")
-        url = _value_from_keys(details, "url") or _value_from_keys(remote, "url")
-        key = _value_from_keys(details, "accessKey", "access_key") or _value_from_keys(remote, "access_key")
-        secret = _value_from_keys(details, "secretKey", "secret_key") or _value_from_keys(remote, "secret_key")
-
-        storage_options: dict[str, Any] = {"anon": not (key and secret)}
-        if key and secret:
-            storage_options["key"] = key
-            storage_options["secret"] = secret
-        if url:
-            storage_options["client_kwargs"] = {"endpoint_url": url}
-
-        return RemoteFilesystemSpec(
-            protocol="s3",
-            storage_options=storage_options,
-            root_path="",
-            display_name=alias,
-            uri_scheme="s3",
-            uri_authority="",
-        )
-
-    if protocol == "SSH":
-        alias = str(remote.get("alias") or "SSH")
-        hostname = _value_from_keys(details, "hostname") or _value_from_keys(remote, "hostname")
-        user = _value_from_keys(details, "user") or _value_from_keys(remote, "user")
-        password = _value_from_keys(details, "password") or _value_from_keys(remote, "password")
-        proxyjump_password = _value_from_keys(details, "proxyjump_password") or _value_from_keys(remote, "proxyjump_password")
-        proxyjump_user = _value_from_keys(details, "proxyjump_user") or _value_from_keys(remote, "proxyjump_user")
-        identity_file = _value_from_keys(details, "identityfile", "identity_file") or _value_from_keys(remote, "identity_file")
-        if not hostname:
-            raise ValueError("SSH configuration is missing a hostname")
-
-        proxy_jump_raw = _value_from_keys(details, "proxyjump") or _value_from_keys(remote, "proxyjump")
-
-        storage_options = {"host": hostname}
-        if user:
-            storage_options["username"] = user
-        if password:
-            storage_options["password"] = password
-        if proxyjump_password:
-            storage_options["proxyjump_password"] = proxyjump_password
-        if proxyjump_user:
-            storage_options["proxyjump_username"] = proxyjump_user
-        if identity_file:
-            storage_options["key_filename"] = str(Path(identity_file).expanduser())
-
-        return RemoteFilesystemSpec(
-            protocol="sftp",
-            storage_options=storage_options,
-            root_path=".",
-            display_name=alias,
-            uri_scheme="ssh",
-            uri_authority=hostname,
-            proxy_jump=proxy_jump_raw or None,
-        )
-
-    if protocol in {"HTTP", "HTTPS"}:
-        url = _value_from_keys(details, "url", "base_url") or _value_from_keys(remote, "url", "base_url")
-        if not url:
-            raise ValueError("HTTPS remote navigation is not configured yet")
-        return RemoteFilesystemSpec(
-            protocol="http",
-            storage_options={},
-            root_path=url,
-            display_name="HTTPS",
-            uri_scheme="",
-            uri_authority="",
-        )
-
-    raise ValueError(f"Unsupported remote protocol: {protocol}")
+    return remote_core.build_remote_filesystem_spec(config)
 
 
-def create_filesystem(spec: RemoteFilesystemSpec, log: Callable[[str], None] | None = None) -> Any:
+def create_filesystem(
+    spec: RemoteFilesystemSpec,
+    log: Callable[[str], None] | None = None,
+    cache: dict[str, Any] | None = None,
+) -> Any:
     """Create the underlying fsspec filesystem instance lazily."""
-    if spec.proxy_jump and spec.protocol == "sftp":
-        return _create_sftp_via_jump(spec, log=log)
-
-    try:
-        import fsspec  # type: ignore
-    except ImportError as exc:  # pragma: no cover - exercised at runtime
-        raise RuntimeError("fsspec is required for remote navigation") from exc
-
-    _emit_log(log, f"Connecting filesystem protocol {spec.protocol!r}")
-    return fsspec.filesystem(spec.protocol, **spec.storage_options)
+    return remote_core.create_filesystem(spec, log=log, cache=cache)
 
 
 def normalize_remote_entries(entries: list[Any]) -> list[RemoteEntry]:
     """Normalize fsspec ls results into tree-friendly entries sorted dirs-first."""
-    normalized: list[RemoteEntry] = []
-    for entry in entries:
-        if isinstance(entry, str):
-            raw_path = entry
-            is_dir = raw_path.endswith("/")
-            size: int | None = None
-            is_link = False
-        elif isinstance(entry, dict):
-            raw_path = str(entry.get("name") or entry.get("Key") or "")
-            entry_type = str(entry.get("type", "")).lower()
-            is_dir = entry_type in {"directory", "dir"} or raw_path.endswith("/")
-            is_link = entry_type in {"link", "symlink"} or bool(entry.get("islink") or entry.get("is_link"))
-            raw_size = entry.get("size")
-            size = int(raw_size) if isinstance(raw_size, int) else None
-        else:
-            continue
-
-        cleaned = raw_path.rstrip("/") if raw_path not in {"", "/"} else raw_path
-        if not cleaned and raw_path not in {"", "/"}:
-            continue
-
-        if cleaned in {"", "/"}:
-            display_name = cleaned or "/"
-        else:
-            display_name = PurePosixPath(cleaned).name or cleaned
-
-        normalized.append(
-            RemoteEntry(
-                path=cleaned or raw_path,
-                name=display_name,
-                is_dir=is_dir,
-                size=size,
-                is_link=is_link,
-            )
-        )
-
-    return sorted(normalized, key=lambda item: (not item.is_dir, item.name.lower()))
+    return remote_core.normalize_remote_entries(entries)
 
 
 def resolve_link_entries(entries: list[RemoteEntry], filesystem: Any) -> list[RemoteEntry]:
     """Resolve symlink entries to determine if they target directories."""
-    resolved: list[RemoteEntry] = []
-    for entry in entries:
-        if not entry.is_link or entry.is_dir:
-            resolved.append(entry)
-            continue
-
-        try:
-            target_is_dir = bool(filesystem.isdir(entry.path))
-        except Exception:
-            target_is_dir = False
-
-        if target_is_dir:
-            resolved.append(
-                RemoteEntry(
-                    path=entry.path,
-                    name=entry.name,
-                    is_dir=True,
-                    size=entry.size,
-                    is_link=True,
-                )
-            )
-            continue
-
-        resolved.append(entry)
-
-    return sorted(resolved, key=lambda item: (not item.is_dir, item.name.lower()))
+    return remote_core.resolve_link_entries(entries, filesystem)
 
 
 def filter_hidden_entries(entries: list[RemoteEntry], *, show_hidden: bool) -> list[RemoteEntry]:
     """Optionally remove dot-prefixed entries from a normalized listing."""
-    if show_hidden:
-        return entries
-    return [entry for entry in entries if not entry.name.startswith(".")]
+    return remote_core.filter_hidden_entries(entries, show_hidden=show_hidden)
 
 
 _KNOWN_EXTENSIONS = frozenset((".nc", ".pp"))
@@ -452,54 +642,27 @@ _ZARR_METADATA_FILENAMES = frozenset((".zarray", ".zgroup", ".zmetadata", "zarr.
 
 def filter_type_entries(entries: list[RemoteEntry], *, show_all: bool) -> list[RemoteEntry]:
     """When show_all is False, keep only directories and .nc/.pp files."""
-    if show_all:
-        return entries
-    return [
-        entry for entry in entries
-        if entry.is_dir or PurePosixPath(entry.name).suffix.lower() in _KNOWN_EXTENSIONS
-    ]
+    return remote_core.filter_type_entries(entries, show_all=show_all)
 
 
 def format_size(size: int | None) -> str:
     """Format raw byte sizes using human-readable binary units."""
-    if size is None:
-        return ""
-    if size < 0:
-        return ""
-    if size < 1024:
-        return f"{size} B"
-
-    value = float(size)
-    units = ["KB", "MB", "GB", "TB"]
-    for unit in units:
-        value /= 1024.0
-        if value < 1024.0 or unit == units[-1]:
-            text = f"{value:.1f}".rstrip("0").rstrip(".")
-            return f"{text} {unit}"
-    return ""
+    return remote_core.format_size(size)
 
 
 def is_zarr_path(path: str) -> bool:
     """Return True when a path's leaf-name uses the .zarr suffix."""
-    name = PurePosixPath(path.rstrip("/") or path).name
-    return name.lower().endswith(".zarr")
+    return remote_core.is_zarr_path(path)
 
 
 def directory_contains_zarr_metadata(entries: list[RemoteEntry]) -> bool:
     """Return True when a directory listing looks like a Zarr store root."""
-    names = {entry.name for entry in entries}
-    return bool(names & _ZARR_METADATA_FILENAMES)
+    return remote_core.directory_contains_zarr_metadata(entries)
 
 
 def build_remote_uri(spec: RemoteFilesystemSpec, path: str) -> str:
     """Build a user-facing remote URI from a filesystem path."""
-    cleaned = path.strip()
-    if spec.uri_scheme == "s3":
-        return f"s3://{cleaned.lstrip('/')}"
-    if spec.uri_scheme == "ssh":
-        remote_path = cleaned if cleaned.startswith("/") else f"/{cleaned}"
-        return f"ssh://{spec.uri_authority}{remote_path}"
-    return cleaned
+    return remote_core.build_remote_uri(spec, path)
 
 
 class RemoteLoginLogDialog(QDialog):
@@ -509,12 +672,18 @@ class RemoteLoginLogDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Remote Login")
         self.resize(720, 360)
+        self._follow_log_output = True
+        self._auto_scrolling = False
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(f"Connecting to {display_name}"))
 
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
+        self.log_view.setCenterOnScroll(False)
+        self.log_view.textChanged.connect(self._queue_scroll_to_end)
+        self.log_view.cursorPositionChanged.connect(self._queue_scroll_to_end)
+        self.log_view.verticalScrollBar().rangeChanged.connect(lambda _min, _max: self._queue_scroll_to_end())
         layout.addWidget(self.log_view, 1)
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.Close)
@@ -524,9 +693,70 @@ class RemoteLoginLogDialog(QDialog):
         layout.addWidget(self.buttons)
 
     def append_line(self, message: str) -> None:
-        """Append one log line and flush GUI events."""
-        self.log_view.appendPlainText(message)
-        QApplication.processEvents()
+        """Append one log line and keep the viewport pinned to EOF."""
+        scrollbar = self.log_view.verticalScrollBar()
+        logger.info(
+            "REMOTE_LOG append start len=%d value=%d max=%d",
+            len(message),
+            scrollbar.value(),
+            scrollbar.maximum(),
+        )
+        cursor = self.log_view.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.log_view.setTextCursor(cursor)
+        cursor.insertText(f"{message}\n")
+        self.log_view.setTextCursor(cursor)
+        self.log_view.ensureCursorVisible()
+        logger.info(
+            "REMOTE_LOG append done cursor=%d blocks=%d value=%d max=%d",
+            self.log_view.textCursor().position(),
+            self.log_view.document().blockCount(),
+            scrollbar.value(),
+            scrollbar.maximum(),
+        )
+        self._queue_scroll_to_end()
+
+    def _queue_scroll_to_end(self) -> None:
+        """Queue an EOF scroll after pending UI updates settle."""
+        if not self._follow_log_output:
+            return
+        scrollbar = self.log_view.verticalScrollBar()
+        logger.debug(
+            "REMOTE_LOG queue_scroll value=%d max=%d",
+            scrollbar.value(),
+            scrollbar.maximum(),
+        )
+        QTimer.singleShot(0, self._scroll_to_end)
+
+    def _scroll_to_end(self) -> None:
+        """Force the log viewport to the newest line."""
+        if not self._follow_log_output or self._auto_scrolling:
+            logger.debug(
+                "REMOTE_LOG scroll skipped follow=%s auto=%s",
+                self._follow_log_output,
+                self._auto_scrolling,
+            )
+            return
+        self._auto_scrolling = True
+        cursor = self.log_view.textCursor()
+        scrollbar = self.log_view.verticalScrollBar()
+        before = (scrollbar.value(), scrollbar.maximum())
+        try:
+            cursor.movePosition(QTextCursor.End)
+            self.log_view.setTextCursor(cursor)
+            self.log_view.ensureCursorVisible()
+            scrollbar.setValue(scrollbar.maximum())
+            logger.info(
+                "REMOTE_LOG scroll applied before=(%d,%d) after=(%d,%d) cursor=%d blocks=%d",
+                before[0],
+                before[1],
+                scrollbar.value(),
+                scrollbar.maximum(),
+                self.log_view.textCursor().position(),
+                self.log_view.document().blockCount(),
+            )
+        finally:
+            self._auto_scrolling = False
 
     def mark_failed(self, message: str) -> None:
         """Mark connection failure and keep dialog open until user closes it."""
@@ -535,6 +765,30 @@ class RemoteLoginLogDialog(QDialog):
         self.append_line(message)
         self.close_button.setEnabled(True)
         self.close_button.setFocus()
+
+
+def _show_copyable_error_dialog(parent: QWidget | None, title: str, message: str) -> None:
+    """Show an error dialog with selectable text and an explicit copy action."""
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(title)
+    dialog.resize(760, 280)
+
+    layout = QVBoxLayout(dialog)
+    layout.addWidget(QLabel("Details:"))
+
+    text = QPlainTextEdit()
+    text.setReadOnly(True)
+    text.setPlainText(str(message))
+    text.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+    layout.addWidget(text, 1)
+
+    buttons = QDialogButtonBox(QDialogButtonBox.Close)
+    copy_button = buttons.addButton("Copy", QDialogButtonBox.ActionRole)
+    copy_button.clicked.connect(lambda: QApplication.clipboard().setText(text.toPlainText()))
+    buttons.rejected.connect(dialog.reject)
+    layout.addWidget(buttons)
+
+    dialog.exec()
 
 
 class RemoteFileNavigatorDialog(QDialog):
@@ -551,27 +805,58 @@ class RemoteFileNavigatorDialog(QDialog):
         spec: RemoteFilesystemSpec | None = None,
         filesystem: Any | None = None,
         list_callback: Callable[[str], list[RemoteEntry]] | None = None,
+        new_remote_button: bool = False,
+        session_active: bool | None = None,
+        initial_tree_state: tuple[list[str], str] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Remote File Navigator")
         self.resize(820, 560)
 
+        self.new_remote_requested: bool = False
+        self.shutdown_session_requested: bool = False
+
         self._config = config
         self._selected_uri = ""
         self._selected_path = ""
         self._detected_zarr_paths: set[str] = set()
+        self._pending_initial_tree_state = initial_tree_state
         self._spec = spec or build_remote_filesystem_spec(config)
         if list_callback is not None:
             self._filesystem: Any | None = None
             self._list_callback: Callable[[str], list[RemoteEntry]] | None = list_callback
         else:
-            self._filesystem = filesystem or create_filesystem(self._spec)
+            self._filesystem = filesystem or create_filesystem(
+                self._spec,
+                cache=config.get("cache") if isinstance(config, dict) else None,
+            )
             self._list_callback = None
 
         layout = QVBoxLayout(self)
 
+        if session_active is None:
+            session_active = list_callback is not None
+
+        header_row = QWidget()
+        header_layout = QHBoxLayout(header_row)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+
         header = QLabel(f"Browsing {self._spec.display_name}")
-        layout.addWidget(header)
+        header_layout.addWidget(header)
+        header_layout.addStretch(1)
+
+        if session_active:
+            self.session_status_label = QLabel("Session: Connected")
+            self.session_status_label.setStyleSheet(
+                "QLabel { color: #0b6e4f; font-weight: 600; }"
+            )
+        else:
+            self.session_status_label = QLabel("Session: Disconnected")
+            self.session_status_label.setStyleSheet(
+                "QLabel { color: #8a1c1c; font-weight: 600; }"
+            )
+        header_layout.addWidget(self.session_status_label)
+        layout.addWidget(header_row)
 
         filter_row = QWidget()
         filter_layout = QHBoxLayout(filter_row)
@@ -604,7 +889,7 @@ class RemoteFileNavigatorDialog(QDialog):
         footer_layout = QHBoxLayout(footer)
         footer_layout.setContentsMargins(0, 0, 0, 0)
         footer_layout.addWidget(QLabel("Selection:"))
-        self.selection_label = QLabel("No file selected")
+        self.selection_label = QLabel("Loading remote listing...")
         footer_layout.addWidget(self.selection_label, 1)
         layout.addWidget(footer)
 
@@ -612,17 +897,44 @@ class RemoteFileNavigatorDialog(QDialog):
         self.open_button = buttons.addButton("Open", QDialogButtonBox.AcceptRole)
         self.open_button.setEnabled(False)
         self.open_button.clicked.connect(self.accept)
+        if self._spec.protocol == "sftp":
+            shutdown_btn = buttons.addButton("Shutdown Session", QDialogButtonBox.DestructiveRole)
+            shutdown_btn.clicked.connect(self._on_shutdown_session_clicked)
+        if new_remote_button:
+            new_remote_btn = buttons.addButton("New Remote...", QDialogButtonBox.ResetRole)
+            new_remote_btn.clicked.connect(self._on_new_remote_clicked)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+        QTimer.singleShot(0, self._initialize_root_listing)
+
+    def _initialize_root_listing(self) -> None:
+        """Load the initial tree after the dialog has had a chance to appear."""
         self._populate_root()
+        if self._pending_initial_tree_state is not None:
+            self._restore_tree_state(*self._pending_initial_tree_state)
+        elif self.tree.topLevelItemCount() == 0:
+            self.selection_label.setText("No files found")
+        else:
+            self.selection_label.setText("No file selected")
+        self._pending_initial_tree_state = None
+
+    def _on_new_remote_clicked(self) -> None:
+        """Signal that the user wants to open a different remote, then close."""
+        self.new_remote_requested = True
+        self.reject()
+
+    def _on_shutdown_session_clicked(self) -> None:
+        """Signal that the user explicitly wants to close the active remote session."""
+        self.shutdown_session_requested = True
+        self.reject()
 
     def _populate_root(self) -> None:
         """Load the top-level listing for the configured remote filesystem."""
         try:
             entries = self._list_entries(self._spec.root_path)
         except Exception as exc:  # pragma: no cover - UI error path
-            QMessageBox.critical(self, "Remote navigation failed", str(exc))
+            _show_copyable_error_dialog(self, "Remote navigation failed", str(exc))
             return
 
         self.tree.clear()
@@ -771,7 +1083,7 @@ class RemoteFileNavigatorDialog(QDialog):
         try:
             all_entries = self._list_entries_unfiltered(str(data.get("path", "")))
         except Exception as exc:  # pragma: no cover - UI error path
-            QMessageBox.warning(self, "Listing failed", str(exc))
+            _show_copyable_error_dialog(self, "Listing failed", str(exc))
             return
 
         if directory_contains_zarr_metadata(all_entries):
@@ -855,7 +1167,7 @@ class RemoteFileNavigatorDialog(QDialog):
             try:
                 spec = build_remote_filesystem_spec(config)
             except Exception as exc:
-                QMessageBox.critical(parent, "Remote configuration invalid", str(exc))
+                _show_copyable_error_dialog(parent, "Remote configuration invalid", str(exc))
                 return {}, False
 
         log_dialog = RemoteLoginLogDialog(parent, spec.display_name)
@@ -868,7 +1180,11 @@ class RemoteFileNavigatorDialog(QDialog):
         filesystem: Any | None = None
         _log_line("Starting remote login...")
         try:
-            filesystem = create_filesystem(spec, log=_log_line)
+            filesystem = create_filesystem(
+                spec,
+                log=_log_line,
+                cache=config.get("cache") if isinstance(config, dict) else None,
+            )
             _log_line(f"Checking remote root: {spec.root_path or '/'}")
             listing = filesystem.ls(spec.root_path, detail=True)
             if not isinstance(listing, list):

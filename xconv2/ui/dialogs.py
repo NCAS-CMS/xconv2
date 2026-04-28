@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+import shlex
+from typing import Any, Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFileDialog,
     QComboBox,
     QDialog,
@@ -24,6 +27,106 @@ from PySide6.QtWidgets import (
 )
 
 from xconv2.aaa.aaa_config import get_locations
+from xconv2.tooltips import REMOTE_CONFIGURATION
+# p5rem is imported lazily inside _discover_ssh_remote_python to avoid loading
+# paramiko at GUI startup.
+
+
+class InfoMessageDialog(QDialog):
+    """Dialog for displaying information with a title and rich-text content."""
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        title: str,
+        content: str,
+    ) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setWindowTitle(title)
+
+        layout = QVBoxLayout(self)
+
+        # Under-construction logo
+        _logo_h = 0
+        logo_path = Path(__file__).parent.parent / "assets" / "under-construction.svg"
+        if logo_path.exists():
+            logo_pixmap = QPixmap(str(logo_path))
+            if not logo_pixmap.isNull():
+                logo_pixmap = logo_pixmap.scaledToWidth(80, Qt.SmoothTransformation)
+                logo_label = QLabel()
+                logo_label.setPixmap(logo_pixmap)
+                logo_label.setAlignment(Qt.AlignCenter)
+                layout.addWidget(logo_label)
+                _logo_h = logo_pixmap.height() + layout.spacing()
+
+        content_label = QLabel(content)
+        content_label.setTextFormat(Qt.RichText)
+        content_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        content_label.setOpenExternalLinks(True)
+        content_label.setWordWrap(True)
+        layout.addWidget(content_label)
+
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        layout.addWidget(close_button)
+
+        # Size to fit content: fix width first so word-wrap height is correct
+        content_label.setFixedWidth(380)
+        content_label.adjustSize()
+        line_height = content_label.fontMetrics().lineSpacing()
+        needed_height = _logo_h + content_label.sizeHint().height() + close_button.sizeHint().height() + layout.contentsMargins().top() + layout.contentsMargins().bottom() + layout.spacing() * 2 + line_height
+        self.resize(400, min(max(needed_height, 150), 700))
+
+    @classmethod
+    def show_info(
+        cls,
+        parent: QWidget | None,
+        title: str,
+        content: str,
+    ) -> None:
+        """Show the info dialog."""
+        dialog = cls(parent, title, content)
+        dialog.show()
+
+
+def create_info_button(
+    parent: QWidget | None,
+    title: str,
+    content: str,
+    icon_size: int = 16,
+) -> QPushButton:
+    """Create a small icon button that opens an info dialog when clicked.
+    
+    Args:
+        parent: Parent widget
+        title: Dialog title
+        content: Dialog content (can include HTML/RichText)
+        icon_size: Size of the icon in pixels
+        
+    Returns:
+        A QPushButton configured as an info button
+    """
+    button = QPushButton()
+    button.setMaximumWidth(icon_size + 8)
+    button.setMaximumHeight(icon_size + 8)
+    button.setToolTip("Click for more information")
+    
+    # Load the tooltip icon
+    icon_path = Path(__file__).parent.parent / "assets" / "tooltip.svg"
+    if icon_path.exists():
+        pixmap = QPixmap(str(icon_path))
+        if not pixmap.isNull():
+            pixmap = pixmap.scaledToWidth(icon_size, Qt.SmoothTransformation)
+            button.setIcon(QIcon(pixmap))
+            button.setIconSize(pixmap.size())
+    
+    # Connect to show the info dialog
+    button.clicked.connect(
+        lambda: InfoMessageDialog.show_info(parent, title, content)
+    )
+    
+    return button
 
 
 class InputDialogCustom(QDialog):
@@ -40,14 +143,34 @@ class InputDialogCustom(QDialog):
         flags: Qt.WindowType,
         input_method_hints: Qt.InputMethodHint,
         doc_text: str,
+        info_button_title: str = "",
+        info_button_content: str = "",
     ) -> None:
         super().__init__(parent, flags)
         self.setWindowTitle(title)
 
         layout = QVBoxLayout(self)
 
+        # Add label with optional info button
+        label_row = QHBoxLayout()
+        label_row.setContentsMargins(0, 0, 0, 0)
+        label_row.setSpacing(4)
         prompt = QLabel(label)
-        layout.addWidget(prompt)
+        label_row.addWidget(prompt)
+        
+        if info_button_title and info_button_content:
+            info_button = create_info_button(
+                parent,
+                info_button_title,
+                info_button_content,
+                icon_size=14
+            )
+            label_row.addStretch(1)
+            label_row.addWidget(info_button)
+        
+        label_widget = QWidget()
+        label_widget.setLayout(label_row)
+        layout.addWidget(label_widget)
 
         self.item_combo = QComboBox()
         self.item_combo.addItems(items)
@@ -82,8 +205,10 @@ class InputDialogCustom(QDialog):
         flags: Qt.WindowType = Qt.WindowType.Widget,
         inputMethodHints: Qt.InputMethodHint = Qt.InputMethodHint.ImhNone,
         doc_text: str = "",
+        info_button_title: str = "",
+        info_button_content: str = "",
     ) -> tuple[str, bool]:
-        """Mirror QInputDialog.getItem with extra ``doc_text`` rich-text content."""
+        """Mirror QInputDialog.getItem with extra ``doc_text`` rich-text content and optional info button."""
         dialog = cls(
             parent,
             title,
@@ -94,6 +219,8 @@ class InputDialogCustom(QDialog):
             flags,
             inputMethodHints,
             doc_text,
+            info_button_title,
+            info_button_content,
         )
         if dialog.exec() != QDialog.Accepted:
             return "", False
@@ -214,7 +341,6 @@ class RemoteConfigurationDialog(QDialog):
     _S3_MODES = ["Select from existing", "Add new"]
     _HTTPS_MODES = ["Select from existing", "Add new"]
     _SSH_MODES = ["Select from existing", "Add new"]
-    _CACHE_STRATEGIES = ["None", "Block", "Readahead", "Whole-File"]
     _DISK_CACHE_MODES = ["Disabled", "Blocks", "Files"]
     _EXPIRY_OPTIONS = ["Never", "1 day", "7 days", "30 days"]
     _RESULT_SAVED_ONLY = 2
@@ -226,14 +352,27 @@ class RemoteConfigurationDialog(QDialog):
         self.setWindowTitle("Remote Configuration")
         self.resize(760, 620)
 
-        self._s3_locations = self._load_s3_locations()
-        self._ssh_hosts = self._load_ssh_hosts()
+        self._s3_locations = self._load_s3_locations(state)
+        self._ssh_runtime_preferences = self._extract_ssh_runtime_preferences(state)
+        self._ssh_hosts = self._apply_ssh_runtime_preferences(
+            self._load_ssh_hosts(),
+            self._ssh_runtime_preferences,
+        )
         self._http_locations = self._load_http_locations(state)
+        self._ssh_add_new_remote_python_options: dict[str, str] = {"python3": "python3"}
 
         layout = QVBoxLayout(self)
 
-        intro = QLabel("Select remote configuration type")
-        layout.addWidget(intro)
+        intro_row = QHBoxLayout()
+        remote_info_button = create_info_button(
+            self,
+            *REMOTE_CONFIGURATION,
+            icon_size=18
+        )
+        intro_row.addWidget(remote_info_button)
+        intro_row.addWidget(QLabel("Select remote configuration type"))
+        intro_row.addStretch(1)
+        layout.addLayout(intro_row)
 
         self.protocol_tabs = QTabWidget()
         self.protocol_tabs.addTab(self._build_s3_tab(), "S3")
@@ -265,17 +404,51 @@ class RemoteConfigurationDialog(QDialog):
         self._update_s3_config_details()
         self._update_ssh_mode()
         self._update_ssh_selected_details()
-        self._update_memory_cache_summary()
         self._restore_state(state)
 
     @staticmethod
-    def _load_s3_locations() -> dict[str, dict[str, Any]]:
-        """Load S3 location definitions from AAA config when available."""
+    def _load_s3_locations(state: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
+        """Load S3 location definitions and merge persisted UI-only attributes."""
         options = get_locations()
         if options is None:
-            return {}
-        locations, _ = options
+            locations: dict[str, dict[str, Any]] = {}
+        else:
+            loaded_locations, _ = options
+            locations = {
+                str(alias): dict(details)
+                for alias, details in loaded_locations.items()
+                if isinstance(alias, str) and isinstance(details, dict)
+            }
+
+        if isinstance(state, dict):
+            reductionist_map = RemoteConfigurationDialog._normalize_s3_reductionist_locations(
+                state.get("s3_reductionist_locations")
+            )
+            for alias, reductionist_url in reductionist_map.items():
+                if alias in locations:
+                    details = dict(locations.get(alias, {}))
+                    details["reductionist_url"] = reductionist_url
+                    locations[alias] = details
+
         return dict(sorted(locations.items()))
+
+    @staticmethod
+    def _normalize_s3_reductionist_locations(raw: object) -> dict[str, str]:
+        """Normalize persisted alias->reductionist_url mapping for S3 hosts."""
+        if not isinstance(raw, dict):
+            return {}
+
+        cleaned: dict[str, str] = {}
+        for alias, value in raw.items():
+            if not isinstance(alias, str):
+                continue
+            alias_text = alias.strip()
+            if not alias_text:
+                continue
+            url_text = str(value).strip() if value is not None else ""
+            if url_text:
+                cleaned[alias_text] = url_text
+        return dict(sorted(cleaned.items()))
 
     @staticmethod
     def _load_http_locations(state: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
@@ -299,7 +472,22 @@ class RemoteConfigurationDialog(QDialog):
                 continue
             url = details.get("url") or details.get("base_url")
             if isinstance(url, str) and url.strip():
-                cleaned[alias] = {"url": url.strip()}
+                normalized = {"url": url.strip()}
+                reductionist_url = details.get("reductionist_url")
+                if isinstance(reductionist_url, str) and reductionist_url.strip():
+                    normalized["reductionist_url"] = reductionist_url.strip()
+                cleaned[alias] = normalized
+        return dict(sorted(cleaned.items()))
+
+    def _current_s3_reductionist_locations(self) -> dict[str, str]:
+        """Collect non-empty S3 reductionist URLs keyed by alias."""
+        cleaned: dict[str, str] = {}
+        for alias, details in self._s3_locations.items():
+            if not isinstance(alias, str) or not alias.strip() or not isinstance(details, dict):
+                continue
+            reductionist_url = details.get("reductionist_url")
+            if isinstance(reductionist_url, str) and reductionist_url.strip():
+                cleaned[alias.strip()] = reductionist_url.strip()
         return dict(sorted(cleaned.items()))
 
     @staticmethod
@@ -404,6 +592,60 @@ class RemoteConfigurationDialog(QDialog):
         return cls._parse_ssh_config(Path.home() / ".ssh/config")
 
     @staticmethod
+    def _extract_ssh_runtime_preferences(state: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+        """Extract persisted per-alias SSH runtime preferences from dialog state."""
+        if not isinstance(state, dict):
+            return {}
+        raw = state.get("ssh_runtime_preferences")
+        if not isinstance(raw, dict):
+            return {}
+
+        cleaned: dict[str, dict[str, Any]] = {}
+        for alias, prefs in raw.items():
+            if not isinstance(alias, str) or not alias.strip() or not isinstance(prefs, dict):
+                continue
+            entry: dict[str, Any] = {}
+            remote_python = prefs.get("remote_python")
+            if isinstance(remote_python, str) and remote_python.strip():
+                entry["remote_python"] = remote_python.strip()
+            options = prefs.get("remote_python_options")
+            if isinstance(options, dict):
+                option_map = {
+                    str(key): str(value)
+                    for key, value in options.items()
+                    if str(key).strip() and str(value).strip()
+                }
+                if option_map:
+                    entry["remote_python_options"] = option_map
+            login_shell = prefs.get("login_shell")
+            if isinstance(login_shell, bool):
+                entry["login_shell"] = login_shell
+            elif isinstance(login_shell, str):
+                entry["login_shell"] = login_shell.strip().lower() in {"1", "true", "yes", "on"}
+            if entry:
+                cleaned[alias.strip()] = entry
+        return cleaned
+
+    @staticmethod
+    def _apply_ssh_runtime_preferences(
+        hosts: dict[str, dict[str, Any]],
+        runtime_prefs: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        """Merge persisted runtime SSH preferences into loaded SSH host entries."""
+        merged: dict[str, dict[str, Any]] = {
+            alias: dict(details)
+            for alias, details in hosts.items()
+            if isinstance(details, dict)
+        }
+        for alias, prefs in runtime_prefs.items():
+            if not isinstance(alias, str) or not alias.strip() or not isinstance(prefs, dict):
+                continue
+            details = dict(merged.get(alias, {}))
+            details.update(prefs)
+            merged[alias] = details
+        return dict(sorted(merged.items()))
+
+    @staticmethod
     def _render_ssh_host_block(
         alias: str,
         hostname: str,
@@ -493,13 +735,6 @@ class RemoteConfigurationDialog(QDialog):
         target_path.write_text(updated_text, encoding="utf-8")
         return target_path
 
-    @staticmethod
-    def _calculate_max_blocks(blocksize_mb: int, ram_buffer_mb: int) -> int:
-        """Derive the maximum number of cached memory blocks from limits."""
-        if blocksize_mb <= 0 or ram_buffer_mb <= 0:
-            return 0
-        return max(1, ram_buffer_mb // blocksize_mb)
-
     def _set_combo_items(self, combo: QComboBox, items: list[str], empty_label: str) -> None:
         """Populate a combo box with items or a disabled empty-state entry."""
         combo.clear()
@@ -541,9 +776,13 @@ class RemoteConfigurationDialog(QDialog):
         self._set_line_edit_character_width(self.s3_existing_url)
         self.s3_existing_api = QLineEdit("")
         self.s3_existing_api.setReadOnly(True)
+        self.s3_existing_reductionist_url = QLineEdit("")
+        self.s3_existing_reductionist_url.setReadOnly(True)
+        self._set_line_edit_character_width(self.s3_existing_reductionist_url)
         existing_layout.addRow("Host alias:", self.s3_existing_combo)
         existing_layout.addRow("URL:", self.s3_existing_url)
         existing_layout.addRow("API:", self.s3_existing_api)
+        existing_layout.addRow("(Optional) Reductionist URL:", self.s3_existing_reductionist_url)
         layout.addWidget(self.s3_existing_group)
 
         self.s3_config_group = QGroupBox("Use config file")
@@ -556,9 +795,13 @@ class RemoteConfigurationDialog(QDialog):
         self._set_line_edit_character_width(self.s3_config_url)
         self.s3_config_api = QLineEdit("")
         self.s3_config_api.setReadOnly(True)
+        self.s3_config_reductionist_url = QLineEdit("")
+        self.s3_config_reductionist_url.setReadOnly(True)
+        self._set_line_edit_character_width(self.s3_config_reductionist_url)
         config_layout.addRow("Config entry:", self.s3_config_combo)
         config_layout.addRow("URL:", self.s3_config_url)
         config_layout.addRow("API:", self.s3_config_api)
+        config_layout.addRow("(Optional) Reductionist URL:", self.s3_config_reductionist_url)
         layout.addWidget(self.s3_config_group)
 
         self.s3_new_group = QGroupBox("Add new")
@@ -569,6 +812,8 @@ class RemoteConfigurationDialog(QDialog):
         self.s3_access_key_edit = QLineEdit("")
         self.s3_secret_key_edit = QLineEdit("")
         self.s3_secret_key_edit.setEchoMode(QLineEdit.Password)
+        self.s3_reductionist_url_edit = QLineEdit("")
+        self._set_line_edit_character_width(self.s3_reductionist_url_edit)
         self.s3_api_combo = QComboBox()
         self.s3_api_combo.addItems(["S3v4"])
         self.s3_api_combo.setEnabled(False)
@@ -579,6 +824,7 @@ class RemoteConfigurationDialog(QDialog):
         new_layout.addRow("URL:", self.s3_url_edit)
         new_layout.addRow("Access Key:", self.s3_access_key_edit)
         new_layout.addRow("Secret Key:", self.s3_secret_key_edit)
+        new_layout.addRow("(Optional) Reductionist URL:", self.s3_reductionist_url_edit)
         new_layout.addRow("API:", self.s3_api_combo)
         new_layout.addRow("Config target:", self.s3_config_target_combo)
         layout.addWidget(self.s3_new_group)
@@ -592,6 +838,7 @@ class RemoteConfigurationDialog(QDialog):
         details = self._s3_locations.get(alias, {})
         self.s3_existing_url.setText(str(details.get("url", "")))
         self.s3_existing_api.setText(str(details.get("api", "")))
+        self.s3_existing_reductionist_url.setText(str(details.get("reductionist_url", "")))
 
     def _update_s3_config_details(self) -> None:
         """Refresh preview fields for a config-file-backed S3 configuration."""
@@ -599,6 +846,7 @@ class RemoteConfigurationDialog(QDialog):
         details = self._s3_locations.get(alias, {})
         self.s3_config_url.setText(str(details.get("url", "")))
         self.s3_config_api.setText(str(details.get("api", "")))
+        self.s3_config_reductionist_url.setText(str(details.get("reductionist_url", "")))
 
     def _update_s3_mode(self) -> None:
         """Show the relevant S3 subframe for the selected configuration mode."""
@@ -611,6 +859,7 @@ class RemoteConfigurationDialog(QDialog):
             self.s3_url_edit.clear()
             self.s3_access_key_edit.clear()
             self.s3_secret_key_edit.clear()
+            self.s3_reductionist_url_edit.clear()
 
     def _build_http_tab(self) -> QWidget:
         """Build HTTPS configuration controls."""
@@ -635,8 +884,12 @@ class RemoteConfigurationDialog(QDialog):
         self.http_existing_url = QLineEdit("")
         self.http_existing_url.setReadOnly(True)
         self._set_line_edit_character_width(self.http_existing_url)
+        self.http_existing_reductionist_url = QLineEdit("")
+        self.http_existing_reductionist_url.setReadOnly(True)
+        self._set_line_edit_character_width(self.http_existing_reductionist_url)
         existing_layout.addRow("Host alias:", self.http_existing_combo)
         existing_layout.addRow("URL:", self.http_existing_url)
+        existing_layout.addRow("(Optional) Reductionist URL:", self.http_existing_reductionist_url)
         layout.addWidget(self.http_existing_group)
 
         self.http_new_group = QGroupBox("Add new")
@@ -644,8 +897,11 @@ class RemoteConfigurationDialog(QDialog):
         self.http_alias_edit = QLineEdit("")
         self.http_url_edit = QLineEdit("")
         self._set_line_edit_character_width(self.http_url_edit)
+        self.http_reductionist_url_edit = QLineEdit("")
+        self._set_line_edit_character_width(self.http_reductionist_url_edit)
         new_layout.addRow("Host alias:", self.http_alias_edit)
         new_layout.addRow("Remote HTTPS URL:", self.http_url_edit)
+        new_layout.addRow("(Optional) Reductionist URL:", self.http_reductionist_url_edit)
         layout.addWidget(self.http_new_group)
 
         layout.addStretch(1)
@@ -659,14 +915,16 @@ class RemoteConfigurationDialog(QDialog):
         if mode == "Add new":
             self.http_alias_edit.clear()
             self.http_url_edit.clear()
+            self.http_reductionist_url_edit.clear()
 
     def _update_http_selected_details(self) -> None:
         """Refresh preview fields for an existing HTTPS alias."""
         alias = self.http_existing_combo.currentText().strip()
         details = self._http_locations.get(alias, {})
         url = details.get("url") if isinstance(details, dict) else ""
-        if isinstance(url, str):
-            self.http_existing_url.setText(url)
+        reductionist_url = details.get("reductionist_url") if isinstance(details, dict) else ""
+        self.http_existing_url.setText(url if isinstance(url, str) else "")
+        self.http_existing_reductionist_url.setText(reductionist_url if isinstance(reductionist_url, str) else "")
 
     def _select_saved_http_alias(self, alias: str, details: dict[str, str]) -> None:
         """Switch UI state to an existing HTTPS selection after saving a new alias."""
@@ -740,8 +998,191 @@ class RemoteConfigurationDialog(QDialog):
         new_layout.addRow("ProxyJump (optional):", self.ssh_proxy_jump_edit)
         layout.addWidget(self.ssh_new_group)
 
+        # Runtime-only SSH execution options for p5rem bootstrap.
+        self.ssh_runtime_group = QGroupBox("Remote Python (must include 'pyfive' and 'cbor2'; no special reductionist needed)")
+        runtime_layout = QFormLayout(self.ssh_runtime_group)
+        remote_python_row = QHBoxLayout()
+        self.ssh_remote_python_combo = QComboBox()
+        self.ssh_remote_python_combo.setEditable(False)
+        self.ssh_remote_python_combo.addItem("python3", "python3")
+        self.ssh_remote_python_combo.setMinimumWidth(
+            self.ssh_remote_python_combo.fontMetrics().horizontalAdvance("M" * self._WIDE_FIELD_CHARS)
+        )
+        discover_button = QPushButton("Discover Envs...")
+        discover_button.clicked.connect(self._discover_ssh_remote_python)
+        remote_python_row.addWidget(self.ssh_remote_python_combo, 1)
+        remote_python_row.addWidget(discover_button)
+        remote_python_widget = QWidget()
+        remote_python_widget.setLayout(remote_python_row)
+
+        self.ssh_login_shell_check = QCheckBox("Use login shell (bash -lc)")
+        self.ssh_login_shell_check.setChecked(False)
+
+        runtime_layout.addRow("Remote Python:", remote_python_widget)
+        runtime_layout.addRow("", self.ssh_login_shell_check)
+        layout.addWidget(self.ssh_runtime_group)
+
         layout.addStretch(1)
         return tab
+
+    @staticmethod
+    def _coerce_bool(value: object, default: bool = False) -> bool:
+        """Convert loose config values to a strict bool."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes", "on"}:
+                return True
+            if lowered in {"0", "false", "no", "off"}:
+                return False
+        return default
+
+    @staticmethod
+    def _remote_python_options_from_envs(envs: dict[str, str]) -> dict[str, str]:
+        """Build {label: bootstrap_command} options from discovered conda env paths."""
+        options: dict[str, str] = {"python3": "python3"}
+        for env_name, env_path in sorted(envs.items()):
+            label = str(env_name).strip()
+            path = str(env_path).strip()
+            if not label or not path:
+                continue
+            options[label] = f"conda run -p {shlex.quote(path)} --no-capture-output python"
+        return options
+
+    def _current_ssh_remote_python_command(self) -> str:
+        """Return the selected command payload for the remote python combo."""
+        data = self.ssh_remote_python_combo.currentData()
+        if isinstance(data, str) and data.strip():
+            return data.strip()
+        text = self.ssh_remote_python_combo.currentText().strip()
+        return text or "python3"
+
+    def _set_ssh_remote_python_options(self, options: dict[str, str], *, preferred_command: str | None = None) -> None:
+        """Populate remote python combo from {label: command} mapping."""
+        current_command = self._current_ssh_remote_python_command()
+
+        cleaned: dict[str, str] = {}
+        for label, command in options.items():
+            if not isinstance(label, str) or not isinstance(command, str):
+                continue
+            label_text = label.strip()
+            command_text = command.strip()
+            if label_text and command_text:
+                cleaned[label_text] = command_text
+
+        if not cleaned:
+            cleaned = {"python3": "python3"}
+
+        selected_command = (preferred_command or "").strip() or current_command
+        if selected_command and selected_command not in cleaned.values():
+            cleaned[f"custom: {selected_command}"] = selected_command
+
+        self.ssh_remote_python_combo.clear()
+        for label, command in cleaned.items():
+            self.ssh_remote_python_combo.addItem(label, command)
+
+        target = selected_command if selected_command else "python3"
+        matched_index = -1
+        for index in range(self.ssh_remote_python_combo.count()):
+            value = self.ssh_remote_python_combo.itemData(index)
+            if isinstance(value, str) and value == target:
+                matched_index = index
+                break
+        self.ssh_remote_python_combo.setCurrentIndex(matched_index if matched_index >= 0 else 0)
+
+    def _current_ssh_discovery_params(self) -> tuple[str, str, str | None, str | None]:
+        """Return host-or-alias/user/key_filename/password for SSH env discovery."""
+        mode = self.ssh_mode_combo.currentText()
+        if mode == "Add new":
+            host = self.ssh_hostname_edit.text().strip()
+            user = self.ssh_user_edit.text().strip()
+            key = self.ssh_identity_file_edit.text().strip() or None
+            if key:
+                key = str(Path(key).expanduser())
+            return host, user, key, None
+
+        alias = self.ssh_existing_combo.currentText()
+        details = self._ssh_hosts.get(alias, {})
+        # Use alias to let SSH config resolution supply hostname/user/key defaults.
+        host = alias.strip() or str(details.get("hostname", "")).strip()
+        user = str(details.get("user", "")).strip()
+        key = str(details.get("identityfile", "")).strip() or None
+        if key:
+            key = str(Path(key).expanduser())
+        password = str(details.get("password", "")).strip() or None
+        return host, user, key, password
+
+    def _discover_ssh_remote_python(self) -> None:
+        """Populate remote python commands by discovering remote conda environments."""
+        try:
+            from p5rem import discover_remote_conda_envs  # noqa: PLC0415
+        except ImportError:
+            discover_remote_conda_envs = None
+
+        if discover_remote_conda_envs is None:
+            QMessageBox.warning(
+                self,
+                "Discovery unavailable",
+                "p5rem with discover_remote_conda_envs is required for remote environment discovery.",
+            )
+            return
+
+        host, user, key_filename, password = self._current_ssh_discovery_params()
+        if not host or not user:
+            QMessageBox.warning(
+                self,
+                "Missing SSH details",
+                "Hostname and user are required to discover remote Python environments.",
+            )
+            return
+
+        try:
+            envs = discover_remote_conda_envs(
+                host=host,
+                username=user,
+                password=password,
+                key_filename=key_filename,
+                ssh_config_path=str(Path.home() / ".ssh" / "config"),
+                login_shell=True,
+                timeout=10.0,
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Discovery failed",
+                f"Could not discover remote environments on {host}: {exc}",
+            )
+            return
+
+        options_map = self._remote_python_options_from_envs(envs)
+        previous = self._current_ssh_remote_python_command()
+
+        preferred = None
+        if "work26" in envs:
+            preferred = f"conda run -p {shlex.quote(str(envs['work26']))} --no-capture-output python"
+
+        mode = self.ssh_mode_combo.currentText()
+        if mode == "Add new":
+            self._ssh_add_new_remote_python_options = dict(options_map)
+        else:
+            alias = self.ssh_existing_combo.currentText()
+            details = self._ssh_hosts.get(alias)
+            if isinstance(details, dict):
+                details["remote_python_options"] = dict(options_map)
+            prefs = dict(self._ssh_runtime_preferences.get(alias, {}))
+            prefs["remote_python_options"] = dict(options_map)
+            self._ssh_runtime_preferences[alias] = prefs
+
+        selected = preferred if preferred in options_map.values() else previous
+        self._set_ssh_remote_python_options(options_map, preferred_command=selected)
+
+        self.ssh_login_shell_check.setChecked(True)
+        QMessageBox.information(
+            self,
+            "Discovery complete",
+            f"Found {len(envs)} remote conda environment(s). Remote Python options have been updated.",
+        )
 
     def _update_ssh_mode(self) -> None:
         """Show the relevant SSH subframe for the selected configuration mode."""
@@ -754,6 +1195,8 @@ class RemoteConfigurationDialog(QDialog):
             self.ssh_user_edit.clear()
             self.ssh_identity_file_edit.clear()
             self.ssh_proxy_jump_edit.clear()
+            self._set_ssh_remote_python_options(self._ssh_add_new_remote_python_options)
+            self.ssh_login_shell_check.setChecked(False)
 
     def _update_ssh_selected_details(self) -> None:
         """Refresh preview fields for an existing SSH host alias."""
@@ -763,6 +1206,17 @@ class RemoteConfigurationDialog(QDialog):
         self.ssh_existing_user.setText(str(details.get("user", "")))
         self.ssh_existing_identity.setText(str(details.get("identityfile", "")))
         self.ssh_existing_proxyjump.setText(str(details.get("proxyjump", "")))
+        options = details.get("remote_python_options")
+        if isinstance(options, dict):
+            option_map = {str(key): str(value) for key, value in options.items()}
+        elif isinstance(options, list):
+            # Backward compatibility for older state shape.
+            option_map = {str(item): str(item) for item in options if str(item).strip()}
+        else:
+            option_map = {"python3": "python3"}
+        preferred = str(details.get("remote_python", "python3"))
+        self._set_ssh_remote_python_options(option_map, preferred_command=preferred)
+        self.ssh_login_shell_check.setChecked(self._coerce_bool(details.get("login_shell"), default=False))
 
     def _select_saved_s3_alias(self, alias: str, details: dict[str, Any]) -> None:
         """Switch UI state to an existing S3 selection after saving a new alias."""
@@ -776,9 +1230,14 @@ class RemoteConfigurationDialog(QDialog):
         self._update_s3_selected_details()
         self._update_s3_mode()
 
-    def _select_saved_ssh_alias(self, alias: str, details: dict[str, str]) -> None:
+    def _select_saved_ssh_alias(self, alias: str, details: dict[str, Any]) -> None:
         """Switch UI state to an existing SSH selection after saving a new alias."""
         self._ssh_hosts[alias] = details
+        self._ssh_runtime_preferences[alias] = {
+            "remote_python": str(details.get("remote_python", "python3")),
+            "remote_python_options": dict(details.get("remote_python_options", {"python3": "python3"})),
+            "login_shell": bool(details.get("login_shell", False)),
+        }
         aliases = list(self._ssh_hosts.keys())
         self._set_combo_items(self.ssh_existing_combo, aliases, "No ssh hosts found")
         index = self.ssh_existing_combo.findText(alias)
@@ -796,28 +1255,9 @@ class RemoteConfigurationDialog(QDialog):
             self.ssh_identity_file_edit.setText(selected)
 
     def _build_cache_group(self) -> QWidget:
-        """Build shared cache configuration controls."""
+        """Build disk cache configuration controls."""
         group = QGroupBox("Cache Configuration")
         layout = QHBoxLayout(group)
-
-        memory_group = QGroupBox("Memory Cache")
-        memory_layout = QFormLayout(memory_group)
-        self.cache_blocksize_spin = QSpinBox()
-        self.cache_blocksize_spin.setRange(1, 1024)
-        self.cache_blocksize_spin.setValue(2)
-        self.cache_blocksize_spin.valueChanged.connect(self._update_memory_cache_summary)
-        self.cache_ram_buffer_spin = QSpinBox()
-        self.cache_ram_buffer_spin.setRange(1, 262144)
-        self.cache_ram_buffer_spin.setValue(1024)
-        self.cache_ram_buffer_spin.valueChanged.connect(self._update_memory_cache_summary)
-        self.cache_strategy_combo = QComboBox()
-        self.cache_strategy_combo.addItems(self._CACHE_STRATEGIES)
-        self.cache_strategy_combo.setCurrentText("Block")
-        self.cache_max_blocks_label = QLabel("")
-        memory_layout.addRow("Blocksize (MB):", self.cache_blocksize_spin)
-        memory_layout.addRow("RAM Buffer (MB):", self.cache_ram_buffer_spin)
-        memory_layout.addRow("Cache Strategy:", self.cache_strategy_combo)
-        memory_layout.addRow("Max blocks:", self.cache_max_blocks_label)
 
         disk_group = QGroupBox("Disk Cache")
         disk_layout = QFormLayout(disk_group)
@@ -838,17 +1278,8 @@ class RemoteConfigurationDialog(QDialog):
         disk_layout.addRow("Limit (GB):", self.disk_limit_spin)
         disk_layout.addRow("Expiry:", self.disk_expiry_combo)
 
-        layout.addWidget(memory_group, 1)
         layout.addWidget(disk_group, 1)
         return group
-
-    def _update_memory_cache_summary(self) -> None:
-        """Update the derived max-blocks label from current cache limits."""
-        max_blocks = self._calculate_max_blocks(
-            int(self.cache_blocksize_spin.value()),
-            int(self.cache_ram_buffer_spin.value()),
-        )
-        self.cache_max_blocks_label.setText(str(max_blocks))
 
     def configuration(self) -> dict[str, Any]:
         """Return the currently selected remote and cache configuration."""
@@ -856,13 +1287,6 @@ class RemoteConfigurationDialog(QDialog):
         config: dict[str, Any] = {
             "protocol": protocol,
             "cache": {
-                "blocksize_mb": int(self.cache_blocksize_spin.value()),
-                "ram_buffer_mb": int(self.cache_ram_buffer_spin.value()),
-                "cache_strategy": self.cache_strategy_combo.currentText(),
-                "max_blocks": self._calculate_max_blocks(
-                    int(self.cache_blocksize_spin.value()),
-                    int(self.cache_ram_buffer_spin.value()),
-                ),
                 "disk_mode": self.disk_mode_combo.currentText(),
                 "disk_location": self.disk_location_edit.text().strip(),
                 "disk_limit_gb": int(self.disk_limit_spin.value()),
@@ -879,6 +1303,7 @@ class RemoteConfigurationDialog(QDialog):
                     "url": self.s3_url_edit.text().strip(),
                     "access_key": self.s3_access_key_edit.text().strip(),
                     "secret_key": self.s3_secret_key_edit.text(),
+                    "reductionist_url": self.s3_reductionist_url_edit.text().strip(),
                     "api": self.s3_api_combo.currentText(),
                     "config_target": self.s3_config_target_combo.currentText(),
                 }
@@ -899,13 +1324,25 @@ class RemoteConfigurationDialog(QDialog):
                     "user": self.ssh_user_edit.text().strip(),
                     "identity_file": self.ssh_identity_file_edit.text().strip(),
                     "proxyjump": self.ssh_proxy_jump_edit.text().strip(),
+                    "remote_python": self._current_ssh_remote_python_command(),
+                    "remote_python_options": dict(self._ssh_add_new_remote_python_options),
+                    "login_shell": bool(self.ssh_login_shell_check.isChecked()),
                 }
             else:
                 alias = self.ssh_existing_combo.currentText()
+                details = dict(self._ssh_hosts.get(alias, {}))
+                details["remote_python"] = self._current_ssh_remote_python_command()
+                options = details.get("remote_python_options")
+                if not isinstance(options, dict):
+                    if isinstance(options, list):
+                        details["remote_python_options"] = {str(item): str(item) for item in options if str(item).strip()}
+                    else:
+                        details["remote_python_options"] = {"python3": "python3"}
+                details["login_shell"] = bool(self.ssh_login_shell_check.isChecked())
                 config["remote"] = {
                     "mode": mode,
                     "alias": alias,
-                    "details": self._ssh_hosts.get(alias, {}),
+                    "details": details,
                 }
         elif protocol == "HTTPS":
             mode = self.http_mode_combo.currentText()
@@ -914,6 +1351,7 @@ class RemoteConfigurationDialog(QDialog):
                     "mode": mode,
                     "alias": self.http_alias_edit.text().strip(),
                     "url": self.http_url_edit.text().strip(),
+                    "reductionist_url": self.http_reductionist_url_edit.text().strip(),
                 }
             else:
                 alias = self.http_existing_combo.currentText().strip()
@@ -935,6 +1373,14 @@ class RemoteConfigurationDialog(QDialog):
 
     def state(self) -> dict[str, Any]:
         """Return dialog state for session persistence."""
+        selected_alias = self.ssh_existing_combo.currentText().strip()
+        if selected_alias:
+            self._ssh_runtime_preferences[selected_alias] = {
+                "remote_python": self._current_ssh_remote_python_command(),
+                "remote_python_options": dict(self._ssh_hosts.get(selected_alias, {}).get("remote_python_options", {"python3": "python3"})),
+                "login_shell": bool(self.ssh_login_shell_check.isChecked()),
+            }
+
         return {
             "protocol_index": self.protocol_tabs.currentIndex(),
             "s3_mode": self.s3_mode_combo.currentText(),
@@ -943,6 +1389,8 @@ class RemoteConfigurationDialog(QDialog):
             "s3_url": self.s3_url_edit.text().strip(),
             "s3_access_key": self.s3_access_key_edit.text().strip(),
             "s3_secret_key": self.s3_secret_key_edit.text(),
+            "s3_reductionist_url": self.s3_reductionist_url_edit.text().strip(),
+            "s3_reductionist_locations": self._current_s3_reductionist_locations(),
             "s3_config_target": self.s3_config_target_combo.currentText(),
             "ssh_mode": self.ssh_mode_combo.currentText(),
             "ssh_existing_alias": self.ssh_existing_combo.currentText(),
@@ -951,14 +1399,16 @@ class RemoteConfigurationDialog(QDialog):
             "ssh_user": self.ssh_user_edit.text().strip(),
             "ssh_identity_file": self.ssh_identity_file_edit.text().strip(),
             "ssh_proxy_jump": self.ssh_proxy_jump_edit.text().strip(),
+            "ssh_remote_python": self._current_ssh_remote_python_command(),
+            "ssh_remote_python_options": dict(self._ssh_add_new_remote_python_options),
+            "ssh_login_shell": bool(self.ssh_login_shell_check.isChecked()),
+            "ssh_runtime_preferences": dict(self._ssh_runtime_preferences),
             "https_mode": self.http_mode_combo.currentText(),
             "https_existing_alias": self.http_existing_combo.currentText().strip(),
             "https_alias": self.http_alias_edit.text().strip(),
             "https_url": self.http_url_edit.text().strip(),
+            "https_reductionist_url": self.http_reductionist_url_edit.text().strip(),
             "https_locations": dict(self._http_locations),
-            "cache_blocksize_mb": int(self.cache_blocksize_spin.value()),
-            "cache_ram_buffer_mb": int(self.cache_ram_buffer_spin.value()),
-            "cache_strategy": self.cache_strategy_combo.currentText(),
             "disk_mode": self.disk_mode_combo.currentText(),
             "disk_location": self.disk_location_edit.text().strip(),
             "disk_limit_gb": int(self.disk_limit_spin.value()),
@@ -994,6 +1444,8 @@ class RemoteConfigurationDialog(QDialog):
             self.s3_access_key_edit.setText(str(state["s3_access_key"]))
         if isinstance(state.get("s3_secret_key"), str):
             self.s3_secret_key_edit.setText(str(state["s3_secret_key"]))
+        if isinstance(state.get("s3_reductionist_url"), str):
+            self.s3_reductionist_url_edit.setText(str(state["s3_reductionist_url"]))
         s3_config_target = state.get("s3_config_target")
         if isinstance(s3_config_target, str):
             index = self.s3_config_target_combo.findText(s3_config_target)
@@ -1022,6 +1474,26 @@ class RemoteConfigurationDialog(QDialog):
             self.ssh_identity_file_edit.setText(str(state["ssh_identity_file"]))
         if isinstance(state.get("ssh_proxy_jump"), str):
             self.ssh_proxy_jump_edit.setText(str(state["ssh_proxy_jump"]))
+        options = state.get("ssh_remote_python_options")
+        if isinstance(options, dict):
+            self._ssh_add_new_remote_python_options = {
+                str(key): str(value)
+                for key, value in options.items()
+                if str(key).strip() and str(value).strip()
+            }
+            if not self._ssh_add_new_remote_python_options:
+                self._ssh_add_new_remote_python_options = {"python3": "python3"}
+        elif isinstance(options, list):
+            # Backward compatibility for older saved state shape.
+            converted = {str(item): str(item) for item in options if str(item).strip()}
+            self._ssh_add_new_remote_python_options = converted or {"python3": "python3"}
+        if isinstance(state.get("ssh_remote_python"), str):
+            self._set_ssh_remote_python_options(
+                self._ssh_add_new_remote_python_options,
+                preferred_command=str(state["ssh_remote_python"]),
+            )
+        if "ssh_login_shell" in state:
+            self.ssh_login_shell_check.setChecked(self._coerce_bool(state.get("ssh_login_shell"), default=False))
 
         https_mode = state.get("https_mode")
         if isinstance(https_mode, str):
@@ -1047,18 +1519,9 @@ class RemoteConfigurationDialog(QDialog):
         if isinstance(https_url, str):
             self.http_url_edit.setText(https_url)
 
-        blocksize = state.get("cache_blocksize_mb")
-        if isinstance(blocksize, int):
-            self.cache_blocksize_spin.setValue(blocksize)
-        ram_buffer = state.get("cache_ram_buffer_mb")
-        if isinstance(ram_buffer, int):
-            self.cache_ram_buffer_spin.setValue(ram_buffer)
-
-        cache_strategy = state.get("cache_strategy")
-        if isinstance(cache_strategy, str):
-            index = self.cache_strategy_combo.findText(cache_strategy)
-            if index >= 0:
-                self.cache_strategy_combo.setCurrentIndex(index)
+        https_reductionist_url = state.get("https_reductionist_url")
+        if isinstance(https_reductionist_url, str):
+            self.http_reductionist_url_edit.setText(https_reductionist_url)
 
         disk_mode = state.get("disk_mode")
         if isinstance(disk_mode, str):
@@ -1085,7 +1548,6 @@ class RemoteConfigurationDialog(QDialog):
         self._update_ssh_selected_details()
         self._update_http_mode()
         self._update_http_selected_details()
-        self._update_memory_cache_summary()
 
     def _validate_new_s3(self) -> bool:
         """Validate required fields for a new S3 configuration."""
@@ -1138,6 +1600,9 @@ class RemoteConfigurationDialog(QDialog):
                 "api": self.s3_api_combo.currentText(),
                 "path": "auto",
             }
+            reductionist_url = self.s3_reductionist_url_edit.text().strip()
+            if reductionist_url:
+                details["reductionist_url"] = reductionist_url
             self._save_s3_location(
                 alias,
                 str(details["url"]),
@@ -1157,6 +1622,9 @@ class RemoteConfigurationDialog(QDialog):
                 "user": self.ssh_user_edit.text().strip(),
                 "identityfile": self.ssh_identity_file_edit.text().strip(),
                 "proxyjump": self.ssh_proxy_jump_edit.text().strip(),
+                "remote_python": self._current_ssh_remote_python_command(),
+                "remote_python_options": dict(self._ssh_add_new_remote_python_options),
+                "login_shell": bool(self.ssh_login_shell_check.isChecked()),
             }
             self._save_ssh_host(
                 alias,
@@ -1173,7 +1641,11 @@ class RemoteConfigurationDialog(QDialog):
             if self.http_mode_combo.currentText() == "Add new":
                 alias = self.http_alias_edit.text().strip()
                 url = self.http_url_edit.text().strip()
-                self._select_saved_http_alias(alias, {"url": url})
+                details: dict[str, str] = {"url": url}
+                reductionist_url = self.http_reductionist_url_edit.text().strip()
+                if reductionist_url:
+                    details["reductionist_url"] = reductionist_url
+                self._select_saved_http_alias(alias, details)
 
         return True
 
@@ -1202,6 +1674,32 @@ class RemoteConfigurationDialog(QDialog):
             return None, False, dialog.state()
         return dialog.configuration(), True, dialog.state()
 
+    @classmethod
+    def show_non_modal(
+        cls,
+        parent: QWidget | None,
+        state: dict[str, Any] | None = None,
+        on_finished: Callable[[dict[str, Any] | None, bool, dict[str, Any]], None] | None = None,
+    ) -> "RemoteConfigurationDialog":
+        """Show the dialog non-modally and call on_finished(config, ok, next_state) when done."""
+        dialog = cls(parent, state=state)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        dialog.setWindowModality(Qt.NonModal)
+
+        def _on_finished(result: int) -> None:
+            if on_finished is None:
+                return
+            next_state = dialog.state()
+            if result != QDialog.Accepted:
+                on_finished(None, False, next_state)
+                return
+            config = dialog.configuration()
+            on_finished(config, config is not None, next_state)
+
+        dialog.finished.connect(_on_finished)
+        dialog.show()
+        return dialog
+
 
 class RemoteOpenDialog(QDialog):
     """Open an existing remote configuration by short name."""
@@ -1213,8 +1711,12 @@ class RemoteOpenDialog(QDialog):
         self.setWindowTitle("Open Remote")
         self.resize(560, 260)
 
-        self._s3_locations = RemoteConfigurationDialog._load_s3_locations()
-        self._ssh_hosts = RemoteConfigurationDialog._load_ssh_hosts()
+        self._s3_locations = RemoteConfigurationDialog._load_s3_locations(state)
+        self._ssh_runtime_preferences = RemoteConfigurationDialog._extract_ssh_runtime_preferences(state)
+        self._ssh_hosts = RemoteConfigurationDialog._apply_ssh_runtime_preferences(
+            RemoteConfigurationDialog._load_ssh_hosts(),
+            self._ssh_runtime_preferences,
+        )
         self._http_locations = self._load_http_locations(state)
 
         layout = QVBoxLayout(self)
@@ -1342,6 +1844,14 @@ class RemoteOpenDialog(QDialog):
             "s3_alias": self.s3_open_combo.currentText(),
             "https_alias": self.http_open_combo.currentText(),
             "ssh_alias": self.ssh_open_combo.currentText(),
+            "ssh_runtime_preferences": dict(self._ssh_runtime_preferences),
+            "s3_reductionist_locations": RemoteConfigurationDialog._normalize_s3_reductionist_locations(
+                {
+                    alias: details.get("reductionist_url")
+                    for alias, details in self._s3_locations.items()
+                    if isinstance(details, dict)
+                }
+            ),
             "https_locations": dict(self._http_locations),
         }
 
@@ -1396,7 +1906,7 @@ class RemoteOpenDialog(QDialog):
         parent: QWidget | None,
         state: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any] | None, bool, dict[str, Any]]:
-        """Show the remote-open dialog and return selected configuration."""
+        """Show the remote-open dialog and return selected configuration (blocking)."""
         dialog = cls(parent, state=state)
         result = dialog.exec()
         next_state = dialog.state()

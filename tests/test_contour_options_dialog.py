@@ -85,7 +85,7 @@ def test_enter_in_contour_title_does_not_open_annotation_chooser(monkeypatch: py
     host = _FakeHost()
     controller = ContourOptionsController(host)
 
-    def _fake_exec(self: QDialog) -> int:
+    def _fake_show(self: QDialog) -> None:
         edits = self.findChildren(QLineEdit)
         assert edits
         title_edit = edits[0]
@@ -96,9 +96,8 @@ def test_enter_in_contour_title_does_not_open_annotation_chooser(monkeypatch: py
         app.processEvents()
 
         self.reject()
-        return QDialog.Rejected
 
-    monkeypatch.setattr(QDialog, "exec", _fake_exec)
+    monkeypatch.setattr(QDialog, "show", _fake_show)
 
     controller.show_contour_options_dialog(range_min=0.0, range_max=1.0, suggested_title="s")
 

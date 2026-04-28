@@ -20,11 +20,11 @@ xconv2 provides (or will provide) a graphical interface to local and remote weat
 We intend to release this as a standalone executable for linux and macos, but for the moment you should use a Python 3.12 (or later) environment with
 udunits2 and cartopy installed (from conda-forge), then you can pip install from the source using one of these:
 
-#### Alpha
+### Alpha
 
 We intend to release this as a standalone application (an "app") eventually, but meanwhile, you will likely need a dedicated (or up-to-date) mamba environment with a Python 3.12 (or later) environment with `cartopy` and `udunits2` installed, then you can pip install from PyPI. Here's an example:
 
-```
+```bash
 conda create -n xconv2
 conda activate xconv2
 mamba install -c conda-forge pip cartopy udunits2
@@ -54,6 +54,7 @@ limited to the following:
 - `docs/uml/core_window_gui_worker_signals.puml`
 - `docs/uml/core_window_options_sequence.puml`
 - `docs/uml/remote_worker_warmup_sequence.puml`
+- `docs/uml/remote_access_module.puml`
 
 #### Architecture Notes
 

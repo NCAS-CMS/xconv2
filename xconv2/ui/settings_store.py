@@ -31,6 +31,7 @@ class SettingsStore:
             "version": self.settings_version,
             "recent_files": [],
             "recent_uri_aliases": {},
+            "remote_s3_reductionist_locations": {},
             "max_recent_files": self.default_max_recent_files,
             "last_remote_configuration": {
                 "protocol_index": 0,
@@ -40,6 +41,8 @@ class SettingsStore:
                 "s3_url": "",
                 "s3_access_key": "",
                 "s3_secret_key": "",
+                "s3_reductionist_url": "",
+                "s3_reductionist_locations": {},
                 "s3_config_target": "MinIO",
                 "ssh_mode": "Select from existing",
                 "ssh_existing_alias": "",
@@ -48,9 +51,7 @@ class SettingsStore:
                 "ssh_user": "",
                 "ssh_identity_file": "",
                 "ssh_proxy_jump": "",
-                "cache_blocksize_mb": 2,
-                "cache_ram_buffer_mb": 1024,
-                "cache_strategy": "Block",
+                "https_reductionist_url": "",
                 "disk_mode": "Disabled",
                 "disk_location": str(Path.home() / ".cache/xconv2"),
                 "disk_limit_gb": 10,
@@ -165,6 +166,16 @@ class SettingsStore:
         recent_uri_aliases = settings.get("recent_uri_aliases")
         if not isinstance(recent_uri_aliases, dict):
             settings["recent_uri_aliases"] = {}
+
+        remote_s3_reductionist_locations = settings.get("remote_s3_reductionist_locations")
+        if isinstance(remote_s3_reductionist_locations, dict):
+            settings["remote_s3_reductionist_locations"] = {
+                str(alias).strip(): str(url).strip()
+                for alias, url in remote_s3_reductionist_locations.items()
+                if str(alias).strip() and str(url).strip()
+            }
+        else:
+            settings["remote_s3_reductionist_locations"] = {}
 
         self._migrate_https_settings(settings)
 

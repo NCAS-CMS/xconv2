@@ -8,12 +8,10 @@ import warnings
 import inspect
 import json
 import re
-import shutil
 import textwrap
 import time
 from io import BytesIO
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import Any, NamedTuple
 
 import matplotlib
@@ -32,11 +30,12 @@ from . import xconv_cf_interface
 from . import lineplot as xconv_lineplot
 from . import cell_method_handler as xconv_cell_method_handler
 from . import __version__
-from .ui.remote_file_navigator import (
+from .logging_utils import apply_scoped_runtime_logging, configure_logging
+from .remote_access import (
+    RemoteAccessSession,
     create_filesystem,
     descriptor_to_spec,
-    normalize_remote_entries,
-    resolve_link_entries,
+    normalize_remote_datasets_for_cf_read as _normalize_remote_datasets_for_cf_read_shared,
 )
 
 # cf-plot may still call show(); in Agg mode this is non-interactive and noisy.
@@ -94,12 +93,14 @@ class RemoteSessionEntry:
         descriptor_hash: str,
         descriptor: dict[str, Any],
         filesystem: Any,
+        session: RemoteAccessSession | None = None,
     ) -> None:
         now = time.monotonic()
         self.session_id = session_id
         self.descriptor_hash = descriptor_hash
         self.descriptor = descriptor
         self.filesystem = filesystem
+        self.session = session or RemoteAccessSession(filesystem)
         self.created_at = now
         self.last_used = now
 
@@ -196,30 +197,12 @@ def _extract_task_headers(code: str) -> TaskHeaders:
     )
 
 
-def _cf_read_supports_filesystem() -> bool:
-    """Return True when the installed cf.read accepts a filesystem keyword."""
-    try:
-        return "filesystem" in inspect.signature(cf.read).parameters
-    except Exception:
-        return False
-
-
 def _close_remote_session_entry(entry: RemoteSessionEntry) -> None:
     """Best-effort cleanup for cached remote session resources."""
-    filesystem = entry.filesystem
-    close = getattr(filesystem, "close", None)
-    if callable(close):
-        try:
-            close()
-        except Exception:
-            logger.exception("Failed to close remote filesystem for %s", entry.descriptor_hash)
-
-    jump_client = getattr(filesystem, "_xconv_jump_client", None)
-    if jump_client is not None:
-        try:
-            jump_client.close()
-        except Exception:
-            logger.exception("Failed to close jump client for %s", entry.descriptor_hash)
+    try:
+        entry.session.close()
+    except Exception:
+        logger.exception("Failed to close remote session for %s", entry.descriptor_hash)
 
 
 def _send_remote_status(
@@ -274,6 +257,13 @@ def _prepare_remote_session(
 
     entry = remote_session_pool.get(descriptor_hash)
     if entry is not None:
+        logger.info(
+            "REMOTE_SESSION reuse descriptor_hash=%s session_id=%s protocol=%s cache=%r",
+            descriptor_hash,
+            session_id,
+            descriptor.get("protocol"),
+            descriptor.get("cache"),
+        )
         entry.session_id = session_id
         entry.descriptor = descriptor
         entry.last_used = time.monotonic()
@@ -285,6 +275,14 @@ def _prepare_remote_session(
         )
         return entry
 
+    logger.info(
+        "REMOTE_SESSION create descriptor_hash=%s session_id=%s protocol=%s cache=%r",
+        descriptor_hash,
+        session_id,
+        descriptor.get("protocol"),
+        descriptor.get("cache"),
+    )
+    started = time.monotonic()
     _send_remote_status(
         "preparing",
         session_id=session_id,
@@ -300,6 +298,7 @@ def _prepare_remote_session(
             descriptor_hash=descriptor_hash,
             message=message,
         ),
+        cache=descriptor.get("cache") if isinstance(descriptor.get("cache"), dict) else None,
     )
     entry = RemoteSessionEntry(
         session_id=session_id,
@@ -309,11 +308,12 @@ def _prepare_remote_session(
     )
     remote_session_pool[descriptor_hash] = entry
     _cleanup_remote_session_pool()
+    elapsed = max(0.0, time.monotonic() - started)
     _send_remote_status(
         "ready",
         session_id=session_id,
         descriptor_hash=descriptor_hash,
-        message="Remote worker session ready.",
+        message=f"Remote worker session ready in {elapsed:.2f}s.",
     )
     return entry
 
@@ -344,41 +344,56 @@ def _read_remote_fields(
     *,
     entry: RemoteSessionEntry,
     descriptor: dict[str, Any],
-    uri: str,
-    path: str,
+    datasets: str | list[str],
 ):
-    """Read remote fields using warmed sessions when possible, else protocol fallbacks."""
-    filesystem = entry.filesystem
-    protocol = str(descriptor.get("protocol", "")).lower()
+    """Read remote fields using the warmed filesystem and dataset path(s)."""
+    session = entry.session
+    normalized_datasets = _normalize_remote_datasets_for_cf_read(
+        descriptor=descriptor,
+        datasets=datasets,
+    )
 
-    if _cf_read_supports_filesystem():
-        return cf.read(path, filesystem=filesystem)
+    return session.read_fields(
+        descriptor=descriptor,
+        datasets=normalized_datasets,
+        reader=cf.read,
+    )
 
-    if protocol == "s3":
-        storage_options = descriptor.get("storage_options")
-        # cfdm's s3 path handling reads u.path[1:] and ignores URI authority,
-        # so use s3:///bucket/key form to keep bucket in the path component.
-        cfdm_s3_uri = f"s3:///{path.lstrip('/')}"
-        if isinstance(storage_options, dict):
-            return cf.read(cfdm_s3_uri, storage_options=storage_options)
-        return cf.read(cfdm_s3_uri)
 
-    if protocol == "http":
-        return cf.read(uri)
+def _normalize_remote_datasets_for_cf_read(
+    *,
+    descriptor: dict[str, Any],
+    datasets: str | list[str],
+) -> str | list[str]:
+    """Normalize remote dataset paths to forms cf.read can open with a filesystem."""
+    normalized = _normalize_remote_datasets_for_cf_read_shared(
+        descriptor=descriptor,
+        datasets=datasets,
+    )
 
-    suffix = Path(path).suffix or ".nc"
-    with filesystem.open(path, "rb") as remote_file:
-        with NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp_path = tmp.name
-            shutil.copyfileobj(remote_file, tmp)
+    logger.info(
+        "REMOTE_OPEN normalized HTTP datasets from %r to %r",
+        datasets,
+        normalized,
+    )
+    return normalized
 
-    try:
-        return cf.read(tmp_path)
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            logger.exception("Failed to remove staged remote file %s", tmp_path)
+
+def _apply_worker_logging_configuration(
+    *,
+    scope_levels: dict[str, int | str] | None = None,
+) -> None:
+    """Apply runtime logging settings for the worker and shared remote access."""
+    if scope_levels is None:
+        scope_levels = RemoteAccessSession.logging_configuration().scope_levels
+
+    applied = apply_scoped_runtime_logging(scope_levels)
+    config = RemoteAccessSession.configure_logging(scope_levels=applied)
+
+    logger.info(
+        "Logging configuration updated scopes=%s",
+        config.scope_levels,
+    )
 
 
 def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) -> None:
@@ -404,10 +419,24 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
         _release_remote_session(session_id=session_id, descriptor_hash=descriptor_hash)
         return
 
+    if task_kind == "LOGGING_CONFIGURE":
+        _apply_worker_logging_configuration(
+            scope_levels=payload.get("scope_levels") if isinstance(payload.get("scope_levels"), dict) else None,
+        )
+        send_to_gui("STATUS:Logging configuration updated")
+        return
+
     if task_kind == "REMOTE_LIST":
         if not isinstance(descriptor, dict) or not session_id or not descriptor_hash:
             raise ValueError("REMOTE_LIST requires session_id, descriptor_hash, and descriptor")
         path = str(payload.get("path", ""))
+        list_started = time.monotonic()
+        _send_remote_status(
+            "preparing",
+            session_id=session_id,
+            descriptor_hash=descriptor_hash,
+            message=f"Listing remote path: {path or '/'}",
+        )
         # Reuse an already-warm session without sending redundant REMOTE_STATUS messages.
         entry = remote_session_pool.get(descriptor_hash)
         if entry is None:
@@ -419,17 +448,27 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
         else:
             entry.last_used = time.monotonic()
         try:
-            raw = entry.filesystem.ls(path, detail=True)
-            if not isinstance(raw, list):
-                raw = []
-            entries = normalize_remote_entries(raw)
-            entries = resolve_link_entries(entries, entry.filesystem)
+            entries = entry.session.list_entries(path)
+            elapsed = max(0.0, time.monotonic() - list_started)
+            _send_remote_status(
+                "preparing",
+                session_id=session_id,
+                descriptor_hash=descriptor_hash,
+                message=f"Listed {len(entries)} entries from {path or '/'} in {elapsed:.2f}s",
+            )
             send_to_gui("REMOTE_LIST_RESULT", {
                 "path": path,
                 "entries": entries,
                 "error": None,
             })
         except Exception as exc:
+            elapsed = max(0.0, time.monotonic() - list_started)
+            _send_remote_status(
+                "failed",
+                session_id=session_id,
+                descriptor_hash=descriptor_hash,
+                message=f"Listing failed for {path or '/'} after {elapsed:.2f}s: {exc}",
+            )
             send_to_gui("REMOTE_LIST_RESULT", {
                 "path": path,
                 "entries": [],
@@ -442,9 +481,24 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
             raise ValueError("REMOTE_OPEN requires session_id, descriptor_hash, and descriptor")
 
         uri = str(payload.get("uri", ""))
-        path = str(payload.get("path", ""))
-        if not uri or not path:
-            raise ValueError("REMOTE_OPEN requires uri and path")
+        raw_paths = payload.get("paths")
+        if isinstance(raw_paths, list):
+            paths = [str(item) for item in raw_paths if str(item)]
+        else:
+            path = str(payload.get("path", ""))
+            paths = [path] if path else []
+        if not uri or not paths:
+            raise ValueError("REMOTE_OPEN requires uri and at least one path")
+        datasets: str | list[str] = paths[0] if len(paths) == 1 else paths
+
+        logger.info(
+            "REMOTE_OPEN request session_id=%s descriptor_hash=%s uri=%s datasets=%r cache=%r",
+            session_id,
+            descriptor_hash,
+            uri,
+            datasets,
+            descriptor.get("cache") if isinstance(descriptor, dict) else None,
+        )
 
         _send_remote_status(
             "preparing",
@@ -461,8 +515,7 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
         fields = _read_remote_fields(
             entry=entry,
             descriptor=descriptor,
-            uri=uri,
-            path=path,
+            datasets=datasets,
         )
 
         worker_globals["_cfview_file_path"] = uri
@@ -654,13 +707,40 @@ def _emit_latest_plot_image() -> None:
 
 def main():
     """Entry point for the cf-worker command."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        force=True,
+    log_file = configure_logging()
+    _apply_worker_logging_configuration(
+        scope_levels={
+            "all": "INFO",
+            "xconv2": "INFO",
+        }
     )
 
     logger.info("Worker starting")
+    logger.info("Log file: %s", log_file)
+    try:
+        logger.info(
+            "MATPLOTLIB_PATHS cache=%s config=%s env[MPLCONFIGDIR]=%s env[XDG_CACHE_HOME]=%s env[HOME]=%s",
+            matplotlib.get_cachedir(),
+            matplotlib.get_configdir(),
+            os.environ.get("MPLCONFIGDIR"),
+            os.environ.get("XDG_CACHE_HOME"),
+            os.environ.get("HOME"),
+        )
+    except Exception:
+        logger.exception("Failed to log matplotlib cache/config paths")
+    try:
+        import cfdm
+
+        logger.info(
+            "Worker runtime python=%s cf=%s (%s) cfdm=%s (%s)",
+            sys.executable,
+            getattr(cf, "__version__", "unknown"),
+            getattr(cf, "__file__", "unknown"),
+            getattr(cfdm, "__version__", "unknown"),
+            getattr(cfdm, "__file__", "unknown"),
+        )
+    except Exception:
+        logger.exception("Failed to log worker cf/cfdm runtime details")
     logger.info(
         "PLOT_DIAG worker_runtime version=%s module_dir=%s backend=%s",
         __version__,
@@ -670,7 +750,11 @@ def main():
 
     # Expose helper in the exec namespace so GUI-issued tasks can emit messages.
     worker_globals['send_to_gui'] = send_to_gui
+    # Signal that all heavy imports (cf, cfplot, scipy, …) have completed and
+    # the worker is ready to accept tasks.  The GUI shows "Initialising worker…"
+    # until this line is received.
     send_to_gui("STATUS:Worker Initialized (Pure-Python/pyfive)")
+    print("READY", flush=True)
 
     current_block = []
 
@@ -690,6 +774,9 @@ def main():
                 headers.task_payload,
                 headers.code,
             )
+            # Some dependency paths can adjust logger levels at runtime.
+            # Re-assert the runtime logging policy before each task.
+            _apply_worker_logging_configuration()
             logger.info("Executing task block (%d lines, %d chars)", len(current_block), len(exec_code))
 
             if task_kind is not None:
@@ -724,7 +811,6 @@ def main():
                             message=error_line,
                         )
                     send_to_gui(f"STATUS:Error - {error_line}")
-                    print(err, file=sys.stderr)
                     logger.exception("Control task failed: %s", task_kind)
                 current_block = []
                 continue
@@ -758,7 +844,6 @@ def main():
                 # Send the full error back to the GUI for debugging
                 err = traceback.format_exc()
                 send_to_gui(f"STATUS:Error - {err.splitlines()[-1]}")
-                print(err, file=sys.stderr)
                 logger.exception("Task failed")
 
             current_block = []

@@ -19,3 +19,6 @@ venv/
 .DS_Store
 .vscode/
 
+# temp stuff
+tools/
+

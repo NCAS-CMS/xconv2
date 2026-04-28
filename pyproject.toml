@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xconv2"
-version = "0.2.0a1"
+version = "0.2.0b2"
 description = "High-performance data viewer and simple data converter"
 requires-python = ">=3.12"
 dependencies = [
     "PySide6",
     "superqt",
-    "cf-python",
+    "cfdm @ git+https://github.com/ncas-cms/cfdm.git@main",
+    "cf-python @ git+https://github.com/ncas-cms/cf-python.git@main",
     "cf-plot",
     "fsspec",
     "s3fs",

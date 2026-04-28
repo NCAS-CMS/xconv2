@@ -8,6 +8,9 @@ import tomllib
 
 def _project_version() -> str:
 	"""Read package version from pyproject.toml with a safe fallback."""
+	# In a frozen bundle, pyproject.toml is not present beside the package.
+	# Try the source tree location first, then fall back to importlib.metadata
+	# which reads from the installed dist-info (present in both dev and frozen).
 	pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
 	try:
 		data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
@@ -17,6 +20,11 @@ def _project_version() -> str:
 	except OSError:
 		pass
 	except tomllib.TOMLDecodeError:
+		pass
+	try:
+		from importlib.metadata import version
+		return version("xconv2")
+	except Exception:
 		pass
 	return "0.0.0"
 

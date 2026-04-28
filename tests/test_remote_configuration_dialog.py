@@ -50,12 +50,6 @@ Host beta gamma
     assert "*" not in hosts
 
 
-def test_calculate_max_blocks_uses_blocksize_and_buffer() -> None:
-    assert RemoteConfigurationDialog._calculate_max_blocks(2, 1024) == 512
-    assert RemoteConfigurationDialog._calculate_max_blocks(256, 1) == 1
-    assert RemoteConfigurationDialog._calculate_max_blocks(0, 1024) == 0
-
-
 def test_s3_config_path_from_choice_maps_targets() -> None:
     assert RemoteConfigurationDialog._s3_config_path_from_choice("MinIO") == Path.home() / ".mc/config.json"
     assert RemoteConfigurationDialog._s3_config_path_from_choice("xconv") == Path.home() / ".config/cfview/config.json"
@@ -136,7 +130,10 @@ def test_save_ssh_host_writes_config_file(tmp_path: Path) -> None:
 def test_load_https_locations_prefers_https_key() -> None:
     state = {
         "https_locations": {
-            "prod": {"url": "https://example.org/data"},
+            "prod": {
+                "url": "https://example.org/data",
+                "reductionist_url": "https://reductionist.example.org/prod",
+            },
         },
         "http_locations": {
             "legacy": {"url": "http://legacy.example.org"},
@@ -145,7 +142,12 @@ def test_load_https_locations_prefers_https_key() -> None:
 
     locations = RemoteConfigurationDialog._load_http_locations(state)
 
-    assert locations == {"prod": {"url": "https://example.org/data"}}
+    assert locations == {
+        "prod": {
+            "url": "https://example.org/data",
+            "reductionist_url": "https://reductionist.example.org/prod",
+        }
+    }
 
 
 def test_load_https_locations_falls_back_to_legacy_http_key() -> None:
@@ -163,7 +165,10 @@ def test_load_https_locations_falls_back_to_legacy_http_key() -> None:
 def test_open_dialog_uses_https_locations() -> None:
     state = {
         "https_locations": {
-            "alpha": {"url": "https://alpha.example.org"},
+            "alpha": {
+                "url": "https://alpha.example.org",
+                "reductionist_url": "https://reductionist.example.org/alpha",
+            },
             "beta": {"base_url": "https://beta.example.org"},
         },
     }
@@ -171,6 +176,114 @@ def test_open_dialog_uses_https_locations() -> None:
     locations = RemoteOpenDialog._load_http_locations(state)
 
     assert locations == {
-        "alpha": {"url": "https://alpha.example.org"},
+        "alpha": {
+            "url": "https://alpha.example.org",
+            "reductionist_url": "https://reductionist.example.org/alpha",
+        },
         "beta": {"url": "https://beta.example.org"},
     }
+
+
+def test_load_s3_locations_merges_reductionist_from_state(monkeypatch) -> None:
+    def _fake_get_locations():
+        return (
+            {
+                "cedadev": {"url": "https://example.invalid", "api": "S3v4"},
+                "noextra": {"url": "https://noextra.invalid", "api": "S3v4"},
+            },
+            {"example.invalid": "cedadev", "noextra.invalid": "noextra"},
+        )
+
+    monkeypatch.setattr("xconv2.ui.dialogs.get_locations", _fake_get_locations)
+
+    locations = RemoteConfigurationDialog._load_s3_locations(
+        {
+            "s3_reductionist_locations": {
+                "cedadev": "https://reductionist.example.org/ceda",
+                "unknown": "https://reductionist.example.org/unknown",
+            }
+        }
+    )
+
+    assert locations["cedadev"]["reductionist_url"] == "https://reductionist.example.org/ceda"
+    assert "reductionist_url" not in locations["noextra"]
+
+
+def test_normalize_s3_reductionist_locations_filters_empty_values() -> None:
+    cleaned = RemoteConfigurationDialog._normalize_s3_reductionist_locations(
+        {
+            "alpha": "https://reductionist.example.org/alpha",
+            "  ": "https://reductionist.example.org/blank-alias",
+            "beta": "   ",
+            "gamma": None,
+        }
+    )
+
+    assert cleaned == {"alpha": "https://reductionist.example.org/alpha"}
+
+
+def test_remote_python_options_from_discovered_envs() -> None:
+    options = RemoteConfigurationDialog._remote_python_options_from_envs(
+        {
+            "base": "/opt/miniforge3",
+            "work26": "/opt/miniforge3/envs/work26",
+        }
+    )
+
+    assert options["python3"] == "python3"
+    assert options["base"] == "conda run -p /opt/miniforge3 --no-capture-output python"
+    assert options["work26"] == "conda run -p /opt/miniforge3/envs/work26 --no-capture-output python"
+
+
+def test_coerce_bool_handles_common_string_values() -> None:
+    assert RemoteConfigurationDialog._coerce_bool(True) is True
+    assert RemoteConfigurationDialog._coerce_bool(False) is False
+    assert RemoteConfigurationDialog._coerce_bool("true") is True
+    assert RemoteConfigurationDialog._coerce_bool("yes") is True
+    assert RemoteConfigurationDialog._coerce_bool("1") is True
+    assert RemoteConfigurationDialog._coerce_bool("false") is False
+    assert RemoteConfigurationDialog._coerce_bool("no") is False
+    assert RemoteConfigurationDialog._coerce_bool("0") is False
+    assert RemoteConfigurationDialog._coerce_bool("", default=True) is True
+
+
+def test_extract_ssh_runtime_preferences_normalizes_mapping() -> None:
+    prefs = RemoteConfigurationDialog._extract_ssh_runtime_preferences(
+        {
+            "ssh_runtime_preferences": {
+                "alpha": {
+                    "remote_python": "conda run -n work26 python",
+                    "remote_python_options": {"python3": "python3", "work26": "conda run -n work26 python"},
+                    "login_shell": "true",
+                },
+                "": {"remote_python": "ignored"},
+            }
+        }
+    )
+
+    assert "alpha" in prefs
+    assert prefs["alpha"]["remote_python"] == "conda run -n work26 python"
+    assert prefs["alpha"]["remote_python_options"]["work26"] == "conda run -n work26 python"
+    assert prefs["alpha"]["login_shell"] is True
+    assert "" not in prefs
+
+
+def test_apply_ssh_runtime_preferences_overrides_host_details() -> None:
+    merged = RemoteConfigurationDialog._apply_ssh_runtime_preferences(
+        {
+            "alpha": {
+                "hostname": "alpha.example.org",
+                "user": "alice",
+            }
+        },
+        {
+            "alpha": {
+                "remote_python": "conda run -n work26 python",
+                "login_shell": True,
+            }
+        },
+    )
+
+    assert merged["alpha"]["hostname"] == "alpha.example.org"
+    assert merged["alpha"]["remote_python"] == "conda run -n work26 python"
+    assert merged["alpha"]["login_shell"] is True

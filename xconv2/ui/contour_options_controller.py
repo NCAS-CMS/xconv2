@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
@@ -39,6 +40,7 @@ class ContourOptionsController:
 
     def __init__(self, host: "CFVCore") -> None:
         self.host = host
+        self._options_dialog: QDialog | None = None
 
     @staticmethod
     def _normalize_property_cell_text(value: object) -> str:
@@ -53,11 +55,19 @@ class ContourOptionsController:
         suggested_title: str | None = None,
     ) -> None:
         """Show contour options dialog and persist selected options."""
+        if self._options_dialog is not None and self._options_dialog.isVisible():
+            self._options_dialog.raise_()
+            self._options_dialog.activateWindow()
+            return
+
         existing = self.host.plot_options_by_kind.get("contour", {})
 
         dialog = QDialog(self.host)
+        self._options_dialog = dialog
         dialog.setWindowTitle("Contour Options")
+        dialog.setWindowModality(Qt.NonModal)
         dialog.resize(540, 360)
+        dialog.finished.connect(lambda _result: setattr(self, "_options_dialog", None))
 
         layout = QVBoxLayout(dialog)
         common = build_common_options_sections(
@@ -310,6 +320,24 @@ class ContourOptionsController:
         proj_layout.setContentsMargins(9, 4, 9, 4)
         proj_layout.setSpacing(4)
 
+        # Under-construction notice
+        uc_notice_row = QHBoxLayout()
+        uc_notice_row.setSpacing(6)
+        uc_icon_label = QLabel()
+        _uc_icon_path = Path(__file__).resolve().parent.parent / "assets" / "under-construction.svg"
+        _uc_pixmap = QPixmap(str(_uc_icon_path))
+        if not _uc_pixmap.isNull():
+            uc_icon_label.setPixmap(_uc_pixmap.scaledToHeight(16, Qt.SmoothTransformation))
+        uc_notice_label = QLabel(
+            "Some map projections and associated selections may not work properly "
+            "in this version of xconv2, we will fix these in a future version."
+        )
+        uc_notice_label.setWordWrap(True)
+        uc_notice_label.setStyleSheet("color: #888888; font-style: italic;")
+        uc_notice_row.addWidget(uc_icon_label, 0, Qt.AlignTop)
+        uc_notice_row.addWidget(uc_notice_label, 1)
+        proj_layout.addLayout(uc_notice_row)
+
         proj_row = QHBoxLayout()
         proj_combo_label = QLabel("Projection")
         proj_combo = QComboBox()
@@ -553,7 +581,9 @@ class ContourOptionsController:
         ok_button.clicked.connect(lambda: dialog.accept() if _apply_options() else None)
         plot_button.clicked.connect(_apply_options)
 
-        dialog.exec()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def show_annotation_properties_chooser(
         self,

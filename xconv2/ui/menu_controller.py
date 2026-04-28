@@ -43,6 +43,30 @@ class MenuController:
             "}"
         )
 
+        xconv_menu = menu_bar.addMenu("Xconv")
+        settings_action = QAction("Settings...", self.host)
+        settings_action.triggered.connect(self.host._show_settings_dialog)
+        xconv_menu.addAction(settings_action)
+
+        configure_remote_action = QAction("Configure Remote...", self.host)
+        configure_remote_action.triggered.connect(self.host._configure_remote)
+        xconv_menu.addAction(configure_remote_action)
+
+        cache_manager_action = QAction("Manage Cache...", self.host)
+        cache_manager_action.triggered.connect(self.host._show_cache_manager)
+        xconv_menu.addAction(cache_manager_action)
+
+        view_logs_action = QAction("View Logs", self.host)
+        view_logs_action.triggered.connect(self.host._view_logs)
+        xconv_menu.addAction(view_logs_action)
+
+        xconv_menu.addSeparator()
+
+        quit_action = QAction("Quit", self.host)
+        quit_action.setShortcut(QKeySequence.StandardKey.Quit)
+        quit_action.triggered.connect(self.host._quit_application)
+        xconv_menu.addAction(quit_action)
+
         file_menu = menu_bar.addMenu("&File")
 
 
@@ -60,12 +84,8 @@ class MenuController:
         open_glob_action.triggered.connect(self.host._choose_glob)
         file_menu.addAction(open_glob_action)
 
-        configure_remote_action = QAction("Configure Remote...", self.host)
-        configure_remote_action.triggered.connect(self.host._configure_remote)
-        file_menu.addAction(configure_remote_action)
-
-        open_remote_action = QAction("Open Remote...", self.host)
-        open_remote_action.triggered.connect(self.host._choose_remote)
+        open_remote_action = QAction("Browse Remote...", self.host)
+        open_remote_action.triggered.connect(self.host._browse_remote)
         file_menu.addAction(open_remote_action)
 
         open_uris_action = QAction("Open URIs...", self.host)
@@ -76,17 +96,6 @@ class MenuController:
         self.refresh_recent_menu()
 
         file_menu.addSeparator()
-
-        settings_action = QAction("Settings...", self.host)
-        settings_action.triggered.connect(self.host._show_settings_dialog)
-        file_menu.addAction(settings_action)
-
-        file_menu.addSeparator()
-
-        quit_action = QAction("Quit", self.host)
-        quit_action.setShortcut(QKeySequence.StandardKey.Quit)
-        quit_action.triggered.connect(self.host._quit_application)
-        file_menu.addAction(quit_action)
 
         self._setup_help_menu(menu_bar, menu_font_size_px, menu_font_weight)
 

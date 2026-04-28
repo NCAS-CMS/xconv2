@@ -18,17 +18,22 @@ import logging
 from typing import Sequence
 from urllib.parse import urlparse
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import QProcess, QTimer, Qt, QUrl
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
+    QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -37,12 +42,15 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QPlainTextEdit,
     QScrollArea,
     QSizePolicy,
     QStatusBar,
     QSpinBox,
     QStyle,
     QSystemTrayIcon,
+    QTableWidget,
+    QTableWidgetItem,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -55,9 +63,22 @@ from .ui.lineplot_options_controller import LineplotOptionsController
 from .ui.menu_controller import MenuController
 from .ui.plot_view_controller import PlotViewController
 from .ui.selection_controller import SelectionController
-from .ui.dialogs import OpenGlobDialog, OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog
-from .ui.remote_file_navigator import RemoteFileNavigatorDialog
+from .ui.dialogs import OpenGlobDialog, OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog, create_info_button
+from .tooltips import CACHE_MANAGEMENT, SELECTION_HELP
+# RemoteFileNavigatorDialog is imported lazily (inside the methods that open it)
+# to avoid loading p5rem/paramiko at GUI startup.
 from .ui.settings_store import SettingsStore
+from .cache_utils import disk_cache_usage, parse_disk_expiry_seconds, prune_disk_cache
+from .logging_utils import (
+    LOG_LEVEL_OPTIONS,
+    LOG_SCOPE_DISPLAY_NAMES,
+    LOG_SCOPE_ORDER,
+    apply_scoped_runtime_logging,
+    get_log_file_path,
+    summarize_scope_levels,
+)
+# RemoteAccessSession is imported lazily to avoid loading p5rem/paramiko at GUI startup.
+# Any method that needs it should do: from .remote_access import RemoteAccessSession
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -66,6 +87,362 @@ DEFAULT_MAX_RECENT_FILES = 10
 SETTINGS_VERSION = 1
 STATUSBAR_NORMAL_STYLE = ""
 STATUSBAR_ERROR_STYLE = "QStatusBar { color: #c62828; font-weight: 600; }"
+
+
+
+class LogViewerDialog(QDialog):
+    """Tail and display the shared application log file."""
+
+    _SCOPE_ORDER = LOG_SCOPE_ORDER
+
+    def __init__(self, parent: QWidget | None, log_path: Path) -> None:
+        super().__init__(parent)
+        # --- Filter controls and log line buffer: must be set before any timer/event ---
+        from PySide6.QtWidgets import QLineEdit, QPushButton, QHBoxLayout
+        self._log_lines = []  # Store all log lines for filtering
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("Filter log (substring, case-insensitive)")
+        self.filter_btn = QPushButton("Apply Filter")
+        self.filter_btn.clicked.connect(self._apply_filter)
+
+        self._log_path = log_path
+        self._read_pos = 0
+
+        self.setWindowTitle("xconv2 Logs")
+        self.resize(900, 520)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(str(log_path)))
+
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(self.filter_edit)
+        filter_layout.addWidget(self.filter_btn)
+        layout.addLayout(filter_layout)
+
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setLineWrapMode(QPlainTextEdit.NoWrap)
+        layout.addWidget(self.log_view, 1)
+
+        controls_layout = QHBoxLayout()
+        self.log_status_label = QLabel()
+        self.log_status_label.setWordWrap(True)
+        controls_layout.addWidget(self.log_status_label, 1)
+        self.configure_logging_button = QPushButton("Configure Logging")
+        self.configure_logging_button.clicked.connect(self._open_logging_configuration)
+        controls_layout.addWidget(self.configure_logging_button)
+        layout.addLayout(controls_layout)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        flush_button = buttons.addButton("Flush Log", QDialogButtonBox.ActionRole)
+        flush_button.clicked.connect(self._flush_log)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(300)
+        self._timer.timeout.connect(self._refresh_from_file)
+        self._refresh_logging_status_label()
+
+    def _open_logging_configuration(self) -> None:
+        current = self._current_logging_configuration()
+        dialog = ScopedLoggingConfigDialog(
+            self,
+            scope_levels=current.scope_levels,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        selected_scope_levels = dialog.selected_scope_levels()
+        host = self.parent()
+        if host is not None and hasattr(host, "_apply_logging_configuration_from_ui"):
+            host._apply_logging_configuration_from_ui(scope_levels=selected_scope_levels)
+        else:
+            applied = apply_scoped_runtime_logging(selected_scope_levels)
+            from .remote_access import RemoteAccessSession  # noqa: PLC0415
+            RemoteAccessSession.configure_logging(scope_levels=applied)
+
+        self._refresh_logging_status_label()
+
+    def _refresh_logging_status_label(self) -> None:
+        config = self._current_logging_configuration()
+        self.log_status_label.setText(f"Logging: {summarize_scope_levels(config.scope_levels)}")
+
+    def _current_logging_configuration(self):
+        """Return the active runtime logging configuration from the parent host."""
+        host = self.parent()
+        if host is not None and hasattr(host, "_current_logging_configuration"):
+            return host._current_logging_configuration()
+        from .remote_access import RemoteAccessSession  # noqa: PLC0415
+        return RemoteAccessSession.logging_configuration()
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._refresh_logging_status_label()
+        self._refresh_from_file()
+        self._timer.start()
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def _refresh_from_file(self) -> None:
+        """Append only new log bytes and keep viewport pinned to the end."""
+        try:
+            size = self._log_path.stat().st_size
+        except OSError:
+            return
+
+        if size < self._read_pos:
+            # File was truncated/rotated; reset view and start from top again.
+            self._read_pos = 0
+            self.log_view.clear()
+            self._log_lines = []
+
+        if size == self._read_pos:
+            return
+
+        try:
+            with self._log_path.open("r", encoding="utf-8", errors="replace") as handle:
+                handle.seek(self._read_pos)
+                chunk = handle.read()
+                self._read_pos = handle.tell()
+        except OSError:
+            return
+
+        if not chunk:
+            return
+
+        # Store new lines for filtering
+        new_lines = chunk.splitlines(keepends=True)
+        self._log_lines.extend(new_lines)
+        self._apply_filter(refresh=True)
+
+    def _apply_filter(self, refresh=False):
+        """Apply filter to log lines and update the view."""
+        filt = self.filter_edit.text().strip().lower()
+        if filt:
+            filtered = [line for line in self._log_lines if filt in line.lower()]
+        else:
+            filtered = self._log_lines
+        self.log_view.setPlainText(''.join(filtered))
+        if not refresh:
+            # If user pressed filter, scroll to end
+            cursor = self.log_view.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            self.log_view.setTextCursor(cursor)
+        self.log_view.ensureCursorVisible()
+        scrollbar = self.log_view.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _flush_log(self) -> None:
+        """Truncate the backing log file and reset the live view state."""
+        self._timer.stop()
+        try:
+            with self._log_path.open("w", encoding="utf-8"):
+                pass
+        except OSError as exc:
+            QMessageBox.warning(self, "Flush Log Failed", str(exc))
+        else:
+            self._read_pos = 0
+            self.log_view.clear()
+        finally:
+            self._timer.start()
+
+
+class ScopedLoggingConfigDialog(QDialog):
+    """Configure per-scope runtime logging levels."""
+
+    def __init__(self, parent: QWidget | None, *, scope_levels: dict[str, int]) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Configure Logging")
+        self.resize(620, 420)
+
+        self._rows: dict[str, dict[str, QCheckBox]] = {}
+        self._groups: dict[str, QButtonGroup] = {}
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Choose logging level per scope (Warn, Info, Debug)."))
+
+        grid_container = QGroupBox("Scopes")
+        grid = QGridLayout(grid_container)
+        grid.addWidget(QLabel("Scope"), 0, 0)
+        grid.addWidget(QLabel("Warn"), 0, 1)
+        grid.addWidget(QLabel("Info"), 0, 2)
+        grid.addWidget(QLabel("Debug"), 0, 3)
+
+        for row_index, scope in enumerate(LOG_SCOPE_ORDER, start=1):
+            label = QLabel(LOG_SCOPE_DISPLAY_NAMES.get(scope, scope))
+            grid.addWidget(label, row_index, 0)
+
+            group = QButtonGroup(self)
+            group.setExclusive(True)
+            self._groups[scope] = group
+
+            level_checks: dict[str, QCheckBox] = {}
+            for col_index, level_name in enumerate(LOG_LEVEL_OPTIONS, start=1):
+                check = QCheckBox()
+                group.addButton(check)
+                grid.addWidget(check, row_index, col_index, alignment=Qt.AlignCenter)
+                level_checks[level_name] = check
+            self._rows[scope] = level_checks
+
+            current_level_name = logging.getLevelName(scope_levels.get(scope, logging.WARNING))
+            if current_level_name not in level_checks:
+                current_level_name = "WARNING"
+            level_checks[current_level_name].setChecked(True)
+
+        layout.addWidget(grid_container, 1)
+
+        self.apply_all_button = QPushButton("Apply 'All' Level To All Scopes")
+        self.apply_all_button.clicked.connect(self._apply_all_level_to_all_scopes)
+        layout.addWidget(self.apply_all_button)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _selected_level_name(self, scope: str) -> str:
+        levels = self._rows.get(scope, {})
+        for candidate in LOG_LEVEL_OPTIONS:
+            check = levels.get(candidate)
+            if check is not None and check.isChecked():
+                return candidate
+        return "WARNING"
+
+    def _apply_all_level_to_all_scopes(self) -> None:
+        all_level_name = self._selected_level_name("all")
+        for scope, levels in self._rows.items():
+            if scope == "all":
+                continue
+            check = levels.get(all_level_name)
+            if check is not None:
+                check.setChecked(True)
+
+    def selected_scope_levels(self) -> dict[str, str]:
+        selected: dict[str, str] = {}
+        for scope in self._rows:
+            selected[scope] = self._selected_level_name(scope)
+        return selected
+
+
+class CacheManagerDialog(QDialog):
+    """Show per-remote cache configuration and allow selective disk cache flushes."""
+
+    def __init__(self, parent: "CFVCore") -> None:
+        super().__init__(parent)
+        self._host = parent
+
+        self.setWindowTitle("xconv2 Cache Manager")
+        self.resize(860, 480)
+
+        layout = QVBoxLayout(self)
+
+        # --- Per-remote table ---
+        remotes_group = QGroupBox("Configured remotes")
+        remotes_layout = QVBoxLayout(remotes_group)
+        self._table = QTableWidget(0, 6)
+        self._table.setHorizontalHeaderLabels(
+            ["Remote", "Protocol", "Mode", "Location", "Usage", ""]
+        )
+        self._table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._table.setSelectionMode(QTableWidget.NoSelection)
+        self._table.horizontalHeader().setStretchLastSection(False)
+        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self._table.verticalHeader().setVisible(False)
+        remotes_layout.addWidget(self._table)
+        self._no_remotes_label = QLabel("No remotes configured.")
+        self._no_remotes_label.setVisible(False)
+        self._no_remotes_label.setAlignment(Qt.AlignCenter)
+        remotes_layout.addWidget(self._no_remotes_label)
+        layout.addWidget(remotes_group, 1)
+
+        # --- Buttons ---
+        cache_button_row = QHBoxLayout()
+        cache_info_button = create_info_button(
+            self,
+            *CACHE_MANAGEMENT,
+            icon_size=18
+        )
+        cache_button_row.addWidget(cache_info_button)
+        cache_button_row.addStretch(1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        self.refresh_button = buttons.addButton("Refresh", QDialogButtonBox.ActionRole)
+        self.prune_button = buttons.addButton("Prune All...", QDialogButtonBox.ActionRole)
+        self.flush_all_button = buttons.addButton("Flush All...", QDialogButtonBox.ActionRole)
+        self.refresh_button.clicked.connect(self.refresh_summary)
+        self.prune_button.clicked.connect(self._prune_cache)
+        self.flush_all_button.clicked.connect(self._flush_cache)
+        buttons.rejected.connect(self.reject)
+        cache_button_row.addWidget(buttons)
+        layout.addLayout(cache_button_row)
+
+        self.refresh_summary()
+
+    def refresh_summary(self) -> None:
+        """Refresh remote table from current host state."""
+        cache = self._host._active_cache_settings()
+
+        remotes = self._host._collect_configured_remotes()
+        self._table.setRowCount(0)
+        if not remotes:
+            self._table.setVisible(False)
+            self._no_remotes_label.setVisible(True)
+        else:
+            self._table.setVisible(True)
+            self._no_remotes_label.setVisible(False)
+            for info in remotes:
+                row = self._table.rowCount()
+                self._table.insertRow(row)
+                self._table.setItem(row, 0, QTableWidgetItem(info["alias"]))
+                self._table.setItem(row, 1, QTableWidgetItem(info["protocol"]))
+                self._table.setItem(row, 2, QTableWidgetItem(info["mode"]))
+                self._table.setItem(row, 3, QTableWidgetItem(str(info["location"])))
+                if info["can_flush"]:
+                    usage_str = (
+                        f"{self._host._format_storage_size(info['disk_bytes'])}"
+                        f" ({info['disk_files']} files)"
+                    )
+                else:
+                    usage_str = "N/A"
+                self._table.setItem(row, 4, QTableWidgetItem(usage_str))
+                flush_btn = QPushButton("Flush")
+                flush_btn.setEnabled(info["can_flush"])
+                flush_btn.clicked.connect(
+                    lambda checked=False, i=info: self._flush_remote(i)
+                )
+                self._table.setCellWidget(row, 5, flush_btn)
+            self._table.resizeColumnsToContents()
+            self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+
+    def _flush_remote(self, info: dict) -> None:
+        """Confirm and flush the disk cache for a single remote."""
+        location = info["location"]
+        alias = info["alias"]
+        response = QMessageBox.question(
+            self,
+            "Flush Cache",
+            f"Delete all cached files for remote '{alias}'?\n\n"
+            f"Location: {location}\n\n"
+            "All remotes sharing this cache location will also be affected.",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if response != QMessageBox.Yes:
+            return
+        if self._host._do_flush_disk_at(location):
+            self.refresh_summary()
+
+    def _flush_cache(self) -> None:
+        """Flush the configured disk cache and refresh the summary."""
+        if self._host._flush_configured_disk_cache():
+            self.refresh_summary()
+
+    def _prune_cache(self) -> None:
+        """Prune the configured disk cache and refresh the summary."""
+        if self._host._prune_configured_disk_cache():
+            self.refresh_summary()
 
 
 class CFVCore(QMainWindow):
@@ -112,16 +489,34 @@ class CFVCore(QMainWindow):
         self.selection_info_toggle_button: QToolButton | None = None
         self._selection_info_visible = True
         self._selection_info_expanded_from_width: int | None = None
+        self._log_viewer_dialog: LogViewerDialog | None = None
+        self._cache_manager_dialog: CacheManagerDialog | None = None
 
         self.setup_ui()
         self._setup_tray_icon()
+
+    def _current_logging_configuration(self):
+        """Return the current GUI-process runtime logging configuration."""
+        from .remote_access import RemoteAccessSession  # noqa: PLC0415
+        return RemoteAccessSession.logging_configuration()
+
+    def _apply_logging_configuration_from_ui(
+        self,
+        *,
+        scope_levels: dict[str, int | str],
+    ) -> None:
+        """Apply GUI-process runtime logging updates from the log viewer."""
+        from .remote_access import RemoteAccessSession  # noqa: PLC0415
+        applied = apply_scoped_runtime_logging(scope_levels)
+        RemoteAccessSession.configure_logging(scope_levels=applied)
+        self._show_status_message(
+            f"Logging updated: {summarize_scope_levels(applied)}"
+        )
 
     def _create_app_icon(self) -> QIcon:
         """Create application icon with a stable fallback chain."""
         assets_dir = Path(__file__).resolve().parent / "assets"
         candidate_paths = [
-            assets_dir / "cf-logo-box.png",
-            assets_dir / "cf-logo-box.svg",
             assets_dir / "cf-logo.png",
             assets_dir / "cf-logo.svg",
         ]
@@ -328,6 +723,202 @@ class CFVCore(QMainWindow):
         if not QDesktopServices.openUrl(roadmap_url):
             self.status.showMessage("Unable to open roadmap URL.")
             logger.warning("Failed to open roadmap URL: %s", roadmap_url.toString())
+
+    def _view_logs(self) -> None:
+        """Show a live in-app view of the shared application log file."""
+        log_path = get_log_file_path()
+        try:
+            log_path.touch(exist_ok=True)
+        except OSError:
+            self._show_status_message(f"Unable to create log file: {log_path}", is_error=True)
+            logger.exception("Failed to ensure log file exists: %s", log_path)
+            return
+
+        if self._log_viewer_dialog is None:
+            self._log_viewer_dialog = LogViewerDialog(self, log_path)
+
+        self._log_viewer_dialog.show()
+        self._log_viewer_dialog.raise_()
+        self._log_viewer_dialog.activateWindow()
+
+    @staticmethod
+    def _format_storage_size(size_bytes: int) -> str:
+        """Format byte counts for cache/log summaries."""
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        value = float(size_bytes)
+        for unit in ("KB", "MB", "GB", "TB"):
+            value /= 1024.0
+            if value < 1024.0 or unit == "TB":
+                text = f"{value:.1f}".rstrip("0").rstrip(".")
+                return f"{text} {unit}"
+        return f"{size_bytes} B"
+
+    def _active_cache_settings(self) -> dict[str, object]:
+        """Return active remote cache settings, preferring current remote session state."""
+        descriptor = getattr(self, "_remote_descriptor", None)
+        if isinstance(descriptor, dict):
+            cache = descriptor.get("cache")
+            if isinstance(cache, dict):
+                return dict(cache)
+
+        raw = self._settings.get("last_remote_configuration", {})
+        if isinstance(raw, dict):
+            return {
+                "disk_mode": str(raw.get("disk_mode", "Disabled")),
+                "disk_location": str(raw.get("disk_location", str(Path.home() / ".cache/xconv2"))),
+                "disk_limit_gb": int(raw.get("disk_limit_gb", 10)),
+                "disk_expiry": str(raw.get("disk_expiry", "1 day")),
+            }
+        return {}
+
+    def _disk_cache_usage(self, location: Path) -> tuple[int, int]:
+        """Return total bytes and file count under the configured disk cache directory."""
+        return disk_cache_usage(location)
+
+    def _collect_configured_remotes(self) -> list[dict]:
+        """Return display info about each configured remote and its disk cache."""
+        raw_config = self._settings.get("last_remote_configuration", {})
+        cache_raw = raw_config if isinstance(raw_config, dict) else {}
+        default_disk_mode = str(cache_raw.get("disk_mode", "Disabled"))
+        default_disk_location = Path(
+            str(cache_raw.get("disk_location", str(Path.home() / ".cache/xconv2")))
+        ).expanduser()
+
+        remotes: list[dict] = []
+
+        # SSH remotes from ~/.ssh/config
+        ssh_hosts = RemoteConfigurationDialog._load_ssh_hosts()
+        for alias in ssh_hosts:
+            # SSH disk caching is currently disabled in remote_fs.py regardless of
+            # the configured mode, so mark these as not flushable for now.
+            remotes.append({
+                "alias": alias,
+                "protocol": "SSH",
+                "mode": "Disabled (SSH)",
+                "location": default_disk_location,
+                "disk_bytes": 0,
+                "disk_files": 0,
+                "can_flush": False,
+            })
+
+        # HTTPS / HTTP remotes from settings
+        https_locations = self._settings.get("remote_https_locations")
+        if not isinstance(https_locations, dict):
+            https_locations = self._settings.get("remote_http_locations")
+        if isinstance(https_locations, dict):
+            for alias in https_locations:
+                disk_bytes, disk_files = disk_cache_usage(default_disk_location)
+                can_flush = default_disk_mode != "Disabled"
+                remotes.append({
+                    "alias": alias,
+                    "protocol": "HTTPS",
+                    "mode": default_disk_mode,
+                    "location": default_disk_location,
+                    "disk_bytes": disk_bytes,
+                    "disk_files": disk_files,
+                    "can_flush": can_flush,
+                })
+
+        return remotes
+
+    def _do_flush_disk_at(self, location: Path) -> bool:
+        """Delete all files under *location* without asking for confirmation."""
+        if not location.exists():
+            self._show_status_message(f"Cache directory does not exist: {location}")
+            return True
+
+        release_remote = getattr(self, "_release_remote_session_if_active", None)
+        if callable(release_remote):
+            release_remote()
+
+        try:
+            import shutil
+            for child in location.iterdir():
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+        except OSError:
+            logger.exception("Failed to flush cache directory: %s", location)
+            self._show_status_message(f"Failed to flush cache: {location}", is_error=True)
+            return False
+
+        self._show_status_message(f"Flushed cache: {location}")
+        return True
+
+    def _cache_summary_text(self) -> str:
+        """Build a human-readable summary of current cache configuration and usage."""
+        cache = self._active_cache_settings()
+        disk_mode = str(cache.get("disk_mode", "Disabled"))
+        disk_location = Path(str(cache.get("disk_location", str(Path.home() / ".cache/xconv2")))).expanduser()
+        disk_limit_gb = int(cache.get("disk_limit_gb", 0) or 0)
+        disk_expiry = str(cache.get("disk_expiry", "Never"))
+        disk_bytes, disk_files = self._disk_cache_usage(disk_location)
+        has_active_remote = bool(getattr(self, "_remote_session_id", None))
+
+        lines = [
+            "Remote Cache Summary",
+            "",
+            f"Active remote session: {'yes' if has_active_remote else 'no'}",
+            "",
+            "Disk cache",
+            f"  Mode: {disk_mode}",
+            f"  Location: {disk_location}",
+            f"  Usage: {self._format_storage_size(disk_bytes)} across {disk_files} files",
+            f"  Limit: {disk_limit_gb} GB",
+            f"  Expiry: {disk_expiry}",
+        ]
+        return "\n".join(lines)
+
+    def _flush_configured_disk_cache(self) -> bool:
+        """Flush configured disk cache contents after user confirmation."""
+        cache = self._active_cache_settings()
+        disk_location = Path(str(cache.get("disk_location", str(Path.home() / ".cache/xconv2")))).expanduser()
+
+        response = QMessageBox.question(
+            self,
+            "Flush Cache",
+            f"Delete all files under cache location?\n\n{disk_location}",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if response != QMessageBox.Yes:
+            return False
+
+        return self._do_flush_disk_at(disk_location)
+
+    def _prune_configured_disk_cache(self) -> bool:
+        """Prune configured disk cache by expiry and size limit."""
+        cache = self._active_cache_settings()
+        disk_location = Path(str(cache.get("disk_location", str(Path.home() / ".cache/xconv2")))).expanduser()
+        disk_limit_gb = int(cache.get("disk_limit_gb", 0) or 0)
+        disk_expiry = parse_disk_expiry_seconds(cache.get("disk_expiry"))
+
+        release_remote = getattr(self, "_release_remote_session_if_active", None)
+        if callable(release_remote):
+            release_remote()
+
+        summary = prune_disk_cache(
+            disk_location,
+            limit_bytes=disk_limit_gb * 1024 * 1024 * 1024,
+            expiry_seconds=disk_expiry,
+        )
+        self._show_status_message(
+            f"Pruned cache: removed {summary['removed_files']} files from {disk_location}"
+        )
+        return True
+
+    def _show_cache_manager(self) -> None:
+        """Open the in-app cache manager dialog."""
+        if self._cache_manager_dialog is None:
+            self._cache_manager_dialog = CacheManagerDialog(self)
+        else:
+            self._cache_manager_dialog.refresh_summary()
+
+        self._cache_manager_dialog.show()
+        self._cache_manager_dialog.raise_()
+        self._cache_manager_dialog.activateWindow()
 
     def _refresh_recent_menu(self) -> None:
         """Refresh the Recent submenu from the persisted log file."""
@@ -807,6 +1398,14 @@ class CFVCore(QMainWindow):
         layout = QVBoxLayout(frame)
 
         controls_row = QHBoxLayout()
+        
+        # Info button for selection help
+        selection_info_button = create_info_button(
+            self,
+            *SELECTION_HELP,
+            icon_size=18
+        )
+        
         properties_button = QPushButton("Properties")
         properties_button.clicked.connect(self._show_selection_properties)
         reset_button = QPushButton("Reset all sliders")
@@ -815,6 +1414,7 @@ class CFVCore(QMainWindow):
         self.selection_info_toggle_button = QToolButton()
         self.selection_info_toggle_button.setAutoRaise(True)
         self.selection_info_toggle_button.clicked.connect(self._toggle_selection_info_panel)
+        controls_row.addWidget(selection_info_button)
         controls_row.addWidget(properties_button)
         controls_row.addWidget(reset_button)
         controls_row.addStretch(1)
@@ -1044,6 +1644,22 @@ class CFVCore(QMainWindow):
         """Update plot summary text and plot button availability."""
         self.selection_controller.refresh_plot_summary()
 
+    def _clear_loaded_data_views(self) -> None:
+        """Clear field, slider, details, and plot UI for a fresh dataset open."""
+        self.current_file_path = None
+        self.setWindowTitle(self.base_window_title)
+        self.current_selection_info_text = "No selection info available."
+        info_widget = getattr(self, "plot_info_output", None)
+        if info_widget is not None:
+            info_widget.setPlainText(self.current_selection_info_text)
+
+        self._set_field_list_hint("Open a file to see fields")
+        self.build_dynamic_sliders({})
+        self._set_selection_info_panel_visible(True)
+        self._update_selection_info_toggle_button()
+        self._set_plot_loading(False)
+        self._clear_plot_canvas("Waiting for data...")
+
     def on_slider_moved(self, name: str, val: object, label: QLabel) -> None:
         """Handle slider movement events."""
         label.setText(f"{name.upper()}: {val}")
@@ -1122,7 +1738,7 @@ class CFVCore(QMainWindow):
         self._show_status_message("Open URI is handled by worker-backed windows.", is_error=True)
 
     def _configure_remote(self) -> None:
-        """Show remote configuration dialog and optionally open with the chosen config."""
+        """Show remote configuration dialog non-modally and optionally open with the chosen config."""
         raw_state = self._settings.get("last_remote_configuration", {})
         state = dict(raw_state) if isinstance(raw_state, dict) else {}
         https_locations = self._settings.get("remote_https_locations")
@@ -1130,22 +1746,36 @@ class CFVCore(QMainWindow):
             https_locations = self._settings.get("remote_http_locations")
         if isinstance(https_locations, dict) and https_locations:
             state["https_locations"] = dict(https_locations)
-        config, ok, next_state = RemoteConfigurationDialog.get_configuration(self, state=state)
-        self._settings["last_remote_configuration"] = next_state
-        if isinstance(next_state, dict):
-            persisted_https = next_state.get("https_locations")
-            if not isinstance(persisted_https, dict):
-                persisted_https = next_state.get("http_locations")
-            if isinstance(persisted_https, dict):
-                self._settings["remote_https_locations"] = dict(persisted_https)
-        self._save_settings()
-        if not ok or config is None:
-            return
-        selected_uri, selected_ok = RemoteFileNavigatorDialog.get_remote_selection(self, config)
-        if not selected_ok:
-            return
-        self._set_window_title_for_file(selected_uri)
-        self._show_status_message(f"Selected remote file: {selected_uri}")
+        s3_reductionist_locations = self._settings.get("remote_s3_reductionist_locations")
+        if isinstance(s3_reductionist_locations, dict) and s3_reductionist_locations:
+            state["s3_reductionist_locations"] = dict(s3_reductionist_locations)
+
+        def _on_finished(config: dict | None, ok: bool, next_state: dict) -> None:
+            self._settings["last_remote_configuration"] = next_state
+            if isinstance(next_state, dict):
+                persisted_https = next_state.get("https_locations")
+                if not isinstance(persisted_https, dict):
+                    persisted_https = next_state.get("http_locations")
+                if isinstance(persisted_https, dict):
+                    self._settings["remote_https_locations"] = dict(persisted_https)
+                persisted_s3_reductionist = next_state.get("s3_reductionist_locations")
+                if isinstance(persisted_s3_reductionist, dict):
+                    self._settings["remote_s3_reductionist_locations"] = {
+                        str(alias).strip(): str(url).strip()
+                        for alias, url in persisted_s3_reductionist.items()
+                        if str(alias).strip() and str(url).strip()
+                    }
+            self._save_settings()
+            if not ok or config is None:
+                return
+            from .ui.remote_file_navigator import RemoteFileNavigatorDialog  # noqa: PLC0415
+            selected_uri, selected_ok = RemoteFileNavigatorDialog.get_remote_selection(self, config)
+            if not selected_ok:
+                return
+            self._set_window_title_for_file(selected_uri)
+            self._show_status_message(f"Selected remote file: {selected_uri}")
+
+        RemoteConfigurationDialog.show_non_modal(self, state=state, on_finished=_on_finished)
 
     def _choose_remote(self) -> None:
         """Show open-remote dialog and open using the selected saved short name."""
@@ -1168,9 +1798,23 @@ class CFVCore(QMainWindow):
             if isinstance(http_locations, dict):
                 merged_http.update(http_locations)
 
-            if merged_http:
+            merged_s3_reductionist: dict[str, str] = {}
+            configured_s3_reductionist = self._settings.get("remote_s3_reductionist_locations")
+            if isinstance(configured_s3_reductionist, dict):
+                merged_s3_reductionist.update(
+                    {
+                        str(alias).strip(): str(url).strip()
+                        for alias, url in configured_s3_reductionist.items()
+                        if str(alias).strip() and str(url).strip()
+                    }
+                )
+
+            if merged_http or merged_s3_reductionist:
                 state = dict(state)
-                state["https_locations"] = dict(merged_http)
+                if merged_http:
+                    state["https_locations"] = dict(merged_http)
+                if merged_s3_reductionist:
+                    state["s3_reductionist_locations"] = dict(merged_s3_reductionist)
 
         config, ok, next_state = RemoteOpenDialog.get_configuration(self, state=state)
         self._settings["last_remote_open"] = next_state
@@ -1180,6 +1824,7 @@ class CFVCore(QMainWindow):
             return
         if not ok or config is None:
             return
+        from .ui.remote_file_navigator import RemoteFileNavigatorDialog  # noqa: PLC0415
         selected_uri, selected_ok = RemoteFileNavigatorDialog.get_remote_selection(self, config)
         if not selected_ok:
             return
@@ -1278,8 +1923,9 @@ class CFVCore(QMainWindow):
             self.close()
             return
 
-        app.closeAllWindows()
-        app.quit()
+        # app.exit() exits all event loops including nested ones from dialog.exec().
+        # Worker cleanup is handled via app.aboutToQuit connected in CFVMain.__init__.
+        app.exit(0)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Ensure tray resources are released when the GUI exits."""

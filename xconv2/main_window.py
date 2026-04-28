@@ -19,8 +19,9 @@ import time
 import uuid
 from pathlib import Path
 from urllib.parse import unquote, urlparse
+import sys
 
-from PySide6.QtCore import QEventLoop, QProcess
+from PySide6.QtCore import QEventLoop, QProcess, QTimer
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QApplication, QDialog, QInputDialog, QLineEdit, QListWidgetItem, QMessageBox
 
@@ -32,18 +33,57 @@ from .cf_templates import (
     save_data_from_selection,
 )
 from .core_window import CFVCore
+# Remote-access helpers are imported lazily (inside the methods that use them)
+# so that p5rem/paramiko are not loaded at GUI startup.
 from .ui.dialogs import OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog
-from .ui.remote_file_navigator import (
-    RemoteEntry,
-    RemoteFileNavigatorDialog,
-    RemoteLoginLogDialog,
-    _XconvHostKeyPolicy,
-    build_remote_filesystem_spec,
-    remote_descriptor_hash,
-    spec_to_descriptor,
-)
 
 logger = logging.getLogger(__name__)
+
+def _get_worker_path() -> str:
+    """Find the worker executable, supporting both dev and frozen (PyInstaller) environments.
+
+    In PyInstaller one-dir builds the worker binary is collected as a BINARY
+    type.  At runtime this ends up at different locations:
+
+    * ``dist/xconv2/_internal/cf-worker`` (one-dir collect output, dev/CI)
+    * ``Contents/Frameworks/cf-worker`` (macOS ``.app`` bundle - PyInstaller 6
+      moves BINARY files from ``_internal/`` to ``Frameworks/`` when assembling
+      the macOS bundle; ``sys._MEIPASS`` therefore points to ``Frameworks/``)
+    * ``Contents/MacOS/cf-worker`` (legacy two-one-file bundles)
+
+    We search all known locations and return the first that exists.
+    """
+    name = "cf-worker"
+    if sys.platform == "win32":
+        name += ".exe"
+
+    if not getattr(sys, "frozen", False):
+        # Development / editable install: worker is a sibling of the GUI launcher.
+        return str(Path(sys.executable).parent / name)
+
+    # Frozen (PyInstaller) – try candidate paths in priority order.
+    candidates: list[Path] = []
+
+    # 1. sys._MEIPASS — set by the bootloader; for one-dir macOS bundles this
+    #    resolves to Contents/Frameworks/, which is where BINARY files land.
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / name)
+
+    exe_dir = Path(sys.executable).parent
+    # 2. Explicit macOS Frameworks directory (one-dir .app layout).
+    if sys.platform == "darwin":
+        candidates.append(exe_dir.parent / "Frameworks" / name)
+    # 3. Same directory as the launcher (legacy two-one-file layout / non-macOS).
+    candidates.append(exe_dir / name)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+
+    # Nothing found – return the most-likely path so the missing-file error
+    # message shows a meaningful location.
+    return str(candidates[-1] if candidates else exe_dir / name)
 
 
 class CFVMain(CFVCore):
@@ -57,6 +97,8 @@ class CFVMain(CFVCore):
         self._remote_session_id: str | None = None
         self._remote_descriptor_hash: str | None = None
         self._remote_descriptor: dict[str, object] | None = None
+        self._last_remote_config: dict[str, object] | None = None
+        self._last_remote_navigator_state: tuple[list[str], str] | None = None
         self._pending_worker_task_starts: deque[float] = deque()
         self._pending_prepare_loop: QEventLoop | None = None
         self._pending_prepare_loop_ok: bool = False
@@ -65,6 +107,7 @@ class CFVMain(CFVCore):
         self._pending_list_loop: QEventLoop | None = None
         self._pending_list_result: dict | None = None
         self._ssh_session_passwords: dict[str, str] = {}
+        self._shutting_down: bool = False
 
         self.worker = QProcess()
         self.worker.readyReadStandardOutput.connect(self.handle_worker_output)
@@ -72,8 +115,29 @@ class CFVMain(CFVCore):
         self.worker.errorOccurred.connect(self.handle_worker_process_error)
         self.worker.finished.connect(self.handle_worker_finished)
 
-        self.worker.start("cf-worker")
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._shutdown_worker)
+
+
+        _worker_bin = _get_worker_path()
+        if not Path(_worker_bin).exists():
+            logger.error("Worker executable not found: %s", _worker_bin)
+            QTimer.singleShot(0, lambda: (
+                QMessageBox.critical(
+                    None,
+                    "Worker not found",
+                    f"The cf-worker executable was not found:\n\n{_worker_bin}\n\n"
+                    "Please reinstall xconv2 or check your PATH.",
+                ),
+                QApplication.instance().exit(1),  # type: ignore[union-attr]
+            ))
+            return
+        self.worker.start(_worker_bin)
         logger.info("Started worker process: %s", self.worker.program())
+        # Show an initialisation indicator immediately after the first paint so
+        # the user knows the worker is loading even before it sends STATUS:.
+        QTimer.singleShot(0, lambda: self._show_status_message("Initialising worker…"))
 
     def on_file_selected(self, file_path: str) -> None:
         """Handle file selection by requesting worker metadata."""
@@ -243,6 +307,11 @@ class CFVMain(CFVCore):
                 else:
                     logger.warning("Unexpected IMG_READY payload type: %s", type(payload).__name__)
 
+            elif line == "READY":
+                # Worker has finished all heavy imports and is ready for tasks.
+                logger.info("Worker ready signal received")
+                self._show_status_message("Ready")
+
             elif line == "IMG_READY":
                 self._show_status_message("Plot Updated.")
                 if self._plot_request_in_flight:
@@ -284,7 +353,7 @@ class CFVMain(CFVCore):
                     logger.warning("Unexpected CONTOUR_RANGE payload type: %s", type(payload).__name__)
 
     def handle_worker_error(self) -> None:
-        """Log worker stderr output with best-effort severity mapping."""
+        """Log any worker stderr output as errors."""
         stderr_output = self.worker.readAllStandardError().data().decode(errors="replace").strip()
         if not stderr_output:
             return
@@ -293,18 +362,12 @@ class CFVMain(CFVCore):
             line = raw_line.strip()
             if not line:
                 continue
-
-            if " ERROR " in line or line.startswith("ERROR") or line.startswith("Traceback"):
-                logger.error("Worker stderr: %s", line)
-            elif " WARNING " in line or line.startswith("WARNING"):
-                logger.warning("Worker stderr: %s", line)
-            elif " INFO " in line or line.startswith("INFO"):
-                logger.info("Worker: %s", line)
-            else:
-                logger.info("Worker stderr: %s", line)
+            logger.error("Worker stderr: %s", line)
 
     def handle_worker_process_error(self, process_error: QProcess.ProcessError) -> None:
         """Capture QProcess-level failures, such as start or crash issues."""
+        if self._shutting_down:
+            return
         logger.error("Worker process error: %s", process_error)
         self._show_status_message(f"Worker process error: {process_error}", is_error=True)
         if self._plot_request_in_flight:
@@ -329,9 +392,7 @@ class CFVMain(CFVCore):
 
     def _load_selected_file(self, file_path: str) -> None:
         """Load selected file in worker and publish field metadata."""
-        release_remote = getattr(self, "_release_remote_session_if_active", None)
-        if callable(release_remote):
-            release_remote()
+        self._clear_loaded_data_views()
         self._show_status_message(f"Loading file: {file_path}")
         logger.info("Loading file in worker: %s", file_path)
 
@@ -350,6 +411,7 @@ class CFVMain(CFVCore):
             self._show_status_message("Remote worker session is not initialized.", is_error=True)
             return
 
+        self._clear_loaded_data_views()
         self._show_status_message(f"Loading remote file: {uri}")
         self._send_worker_control_task(
             "REMOTE_OPEN",
@@ -380,8 +442,14 @@ class CFVMain(CFVCore):
 
     def _open_remote_from_config(self, config: dict[str, object]) -> None:
         """Perform remote login once in the worker, then navigate via IPC using a nested QEventLoop."""
+        from .remote_access import (  # noqa: PLC0415
+            build_remote_filesystem_spec, remote_descriptor_hash, spec_to_descriptor,
+        )
+        from .ui.remote_file_navigator import RemoteFileNavigatorDialog, RemoteLoginLogDialog  # noqa: PLC0415
         if not isinstance(config, dict):
             return
+
+        config = CFVMain._with_cache_defaults(self, config)
 
         prepared_config = self._prepare_ssh_config_for_auth(config)
         if prepared_config is None:
@@ -414,60 +482,82 @@ class CFVMain(CFVCore):
             QMessageBox.critical(self, "Remote configuration invalid", str(exc))
             return
 
-        self._release_remote_session_if_active()
+        self._clear_loaded_data_views()
 
         descriptor = spec_to_descriptor(spec, cache=config.get("cache") if isinstance(config, dict) else None)
-        session_id = uuid.uuid4().hex
         descriptor_hash = remote_descriptor_hash(descriptor)
-        self._remote_session_id = session_id
-        self._remote_descriptor_hash = descriptor_hash
-        self._remote_descriptor = descriptor
+        self._last_remote_config = config
+        self._last_remote_navigator_state = None  # fresh session; discard any prior tree state
 
-        # Show login progress dialog and spin a QEventLoop until the worker signals ready/failed.
-        log_dialog = RemoteLoginLogDialog(self, spec.display_name)
-        self._pending_prepare_log_dialog = log_dialog
-        self._pending_prepare_loop = QEventLoop()
-        self._pending_prepare_loop_ok = False
-        log_dialog.show()
-        QApplication.processEvents()
+        # Reuse an already active matching session instead of preparing again.
+        reuse_active_session = bool(self._remote_session_id) and self._remote_descriptor_hash == descriptor_hash
+        if reuse_active_session:
+            self._remote_descriptor = descriptor
+            self._show_status_message("Reusing active remote session.")
+        else:
+            session_id = uuid.uuid4().hex
+            self._remote_session_id = session_id
+            self._remote_descriptor_hash = descriptor_hash
+            self._remote_descriptor = descriptor
 
-        self._send_worker_control_task(
-            "REMOTE_PREPARE",
-            {
-                "session_id": session_id,
-                "descriptor_hash": descriptor_hash,
-                "descriptor": descriptor,
-            },
-        )
-        self._pending_prepare_failure_message = ""
-        self._pending_prepare_loop.exec()
-        self._pending_prepare_log_dialog = None
+        if not reuse_active_session:
+            # Show login progress dialog and spin a QEventLoop until the worker signals ready/failed.
+            log_dialog = RemoteLoginLogDialog(self, spec.display_name)
+            self._pending_prepare_log_dialog = log_dialog
+            self._pending_prepare_loop = QEventLoop()
+            self._pending_prepare_loop_ok = False
+            log_dialog.show()
+            QApplication.processEvents()
 
-        if not self._pending_prepare_loop_ok:
-            # mark_failed was already called in handle_worker_output; show the dialog modally.
-            log_dialog.exec()
-            failure_message = self._pending_prepare_failure_message
-            if self._maybe_retry_ssh_authentication(config, failure_message):
-                self._release_remote_session_if_active()
-                self._open_remote_from_config(config)
+            self._send_worker_control_task(
+                "REMOTE_PREPARE",
+                {
+                    "session_id": self._remote_session_id,
+                    "descriptor_hash": descriptor_hash,
+                    "descriptor": descriptor,
+                },
+            )
+            self._pending_prepare_failure_message = ""
+            self._pending_prepare_loop.exec()
+            self._pending_prepare_log_dialog = None
+
+            if not self._pending_prepare_loop_ok:
+                # mark_failed was already called in handle_worker_output; show the dialog modally.
+                log_dialog.exec()
+                failure_message = self._pending_prepare_failure_message
+                if self._maybe_retry_ssh_authentication(config, failure_message):
+                    self._open_remote_from_config(config)
+                    return
                 return
-            self._release_remote_session_if_active()
-            return
 
-        log_dialog.close()
+            log_dialog.close()
 
         # Open the navigator backed entirely by worker-side directory listing via IPC.
         list_callback = self._make_worker_list_callback()
-        dialog = RemoteFileNavigatorDialog(self, config, spec=spec, list_callback=list_callback)
-        if dialog.exec() != QDialog.Accepted:
+        dialog = RemoteFileNavigatorDialog(
+            self,
+            config,
+            spec=spec,
+            list_callback=list_callback,
+            new_remote_button=True,
+            session_active=bool(self._remote_session_id),
+        )
+        result = dialog.exec()
+        self._last_remote_navigator_state = dialog._collect_tree_state()
+        if dialog.shutdown_session_requested:
             self._release_remote_session_if_active()
+            self._show_status_message("Remote session shut down.")
+            return
+        if dialog.new_remote_requested:
+            self._choose_remote()
+            return
+        if result != QDialog.Accepted:
             return
 
         selected_uri = dialog.selected_uri()
         selected_path = dialog.selected_path()
         if not selected_uri or not selected_path:
             self._show_status_message("Remote file selection was incomplete.", is_error=True)
-            self._release_remote_session_if_active()
             return
 
         remote = config.get("remote") if isinstance(config, dict) else None
@@ -489,8 +579,14 @@ class CFVMain(CFVCore):
         host_alias: str,
     ) -> None:
         """Open a specific remote URI directly without launching the navigator dialog."""
+        from .remote_access import (  # noqa: PLC0415
+            build_remote_filesystem_spec, remote_descriptor_hash, spec_to_descriptor,
+        )
+        from .ui.remote_file_navigator import RemoteLoginLogDialog  # noqa: PLC0415
         if not isinstance(config, dict):
             return
+
+        config = CFVMain._with_cache_defaults(self, config)
 
         prepared_config = self._prepare_ssh_config_for_auth(config)
         if prepared_config is None:
@@ -519,10 +615,24 @@ class CFVMain(CFVCore):
             QMessageBox.critical(self, "Remote configuration invalid", str(exc))
             return
 
-        self._release_remote_session_if_active()
+        self._clear_loaded_data_views()
         descriptor = spec_to_descriptor(spec, cache=config.get("cache") if isinstance(config, dict) else None)
-        session_id = uuid.uuid4().hex
         descriptor_hash = remote_descriptor_hash(descriptor)
+        self._last_remote_config = config
+        self._last_remote_navigator_state = None
+
+        # If the currently active session already matches this descriptor, skip prepare.
+        reuse_active_session = bool(self._remote_session_id) and self._remote_descriptor_hash == descriptor_hash
+        if reuse_active_session:
+            self._remote_descriptor = descriptor
+            self._show_status_message("Reusing active remote session.")
+            self._set_window_title_for_file(uri)
+            self._show_status_message(f"Selected remote file: {uri}")
+            self._record_recent_uri(uri, host_alias or spec.display_name)
+            self._load_remote_selected_file(uri, remote_path)
+            return
+
+        session_id = uuid.uuid4().hex
         self._remote_session_id = session_id
         self._remote_descriptor_hash = descriptor_hash
         self._remote_descriptor = descriptor
@@ -550,7 +660,6 @@ class CFVMain(CFVCore):
             log_dialog.exec()
             failure_message = self._pending_prepare_failure_message
             if self._maybe_retry_ssh_authentication(config, failure_message):
-                self._release_remote_session_if_active()
                 self._open_remote_uri_direct(
                     uri=uri,
                     remote_path=remote_path,
@@ -558,7 +667,6 @@ class CFVMain(CFVCore):
                     host_alias=host_alias,
                 )
                 return
-            self._release_remote_session_if_active()
             return
 
         log_dialog.close()
@@ -627,8 +735,22 @@ class CFVMain(CFVCore):
         if scheme == "ssh":
             host = (parsed.hostname or parsed.netloc or "").strip()
             user = (parsed.username or "").strip()
-            remote_path = unquote(parsed.path or "/")
+            remote_path = unquote(parsed.path or "").lstrip("/")
+            if not remote_path:
+                remote_path = "."
             hosts = RemoteConfigurationDialog._load_ssh_hosts()
+
+            runtime_preferences: dict[str, object] = {}
+            configured_state = self._settings.get("last_remote_configuration")
+            if isinstance(configured_state, dict):
+                configured_prefs = configured_state.get("ssh_runtime_preferences")
+                if isinstance(configured_prefs, dict):
+                    runtime_preferences.update(configured_prefs)
+            open_state = self._settings.get("last_remote_open")
+            if isinstance(open_state, dict):
+                open_prefs = open_state.get("ssh_runtime_preferences")
+                if isinstance(open_prefs, dict):
+                    runtime_preferences.update(open_prefs)
 
             matched_alias = ""
             matched_details: dict[str, object] | None = None
@@ -643,6 +765,37 @@ class CFVMain(CFVCore):
 
             if user and not matched_details.get("user"):
                 matched_details["user"] = user
+
+            alias_prefs = runtime_preferences.get(matched_alias)
+            if isinstance(alias_prefs, dict):
+                remote_python = alias_prefs.get("remote_python")
+                if isinstance(remote_python, str) and remote_python.strip():
+                    matched_details["remote_python"] = remote_python.strip()
+
+                remote_python_options = alias_prefs.get("remote_python_options")
+                if isinstance(remote_python_options, dict):
+                    cleaned_options = {
+                        str(label): str(command)
+                        for label, command in remote_python_options.items()
+                        if str(label).strip() and str(command).strip()
+                    }
+                    if cleaned_options:
+                        matched_details["remote_python_options"] = cleaned_options
+                elif isinstance(remote_python_options, list):
+                    cleaned_options = {
+                        str(item): str(item)
+                        for item in remote_python_options
+                        if str(item).strip()
+                    }
+                    if cleaned_options:
+                        matched_details["remote_python_options"] = cleaned_options
+
+                if "login_shell" in alias_prefs:
+                    login_shell_value = alias_prefs.get("login_shell")
+                    if isinstance(login_shell_value, str):
+                        matched_details["login_shell"] = login_shell_value.strip().lower() in {"1", "true", "yes", "on"}
+                    else:
+                        matched_details["login_shell"] = bool(login_shell_value)
 
             config = {
                 "protocol": "SSH",
@@ -691,6 +844,25 @@ class CFVMain(CFVCore):
 
         return None, "", "", False
 
+    def _with_cache_defaults(self, config: dict[str, object]) -> dict[str, object]:
+        """Attach persisted cache settings when a remote config omits cache."""
+        merged = dict(config)
+        existing_cache = merged.get("cache")
+        if isinstance(existing_cache, dict):
+            return merged
+
+        raw = self._settings.get("last_remote_configuration", {})
+        if not isinstance(raw, dict):
+            return merged
+
+        merged["cache"] = {
+            "disk_mode": str(raw.get("disk_mode", "Disabled")),
+            "disk_location": str(raw.get("disk_location", str(Path.home() / ".cache/xconv2"))),
+            "disk_limit_gb": int(raw.get("disk_limit_gb", 10)),
+            "disk_expiry": str(raw.get("disk_expiry", "1 day")),
+        }
+        return merged
+
     def _configure_remote_for_uri(self, uri: str) -> None:
         """Open Configure Remote pre-populated for URI-driven add-new workflows."""
         parsed = urlparse(uri)
@@ -700,6 +872,9 @@ class CFVMain(CFVCore):
         https_locations = self._settings.get("remote_https_locations")
         if isinstance(https_locations, dict):
             state["https_locations"] = dict(https_locations)
+        s3_reductionist_locations = self._settings.get("remote_s3_reductionist_locations")
+        if isinstance(s3_reductionist_locations, dict):
+            state["s3_reductionist_locations"] = dict(s3_reductionist_locations)
 
         if scheme in {"http", "https"}:
             state.update(
@@ -721,13 +896,22 @@ class CFVMain(CFVCore):
                 }
             )
 
-        config, _ok, next_state = RemoteConfigurationDialog.get_configuration(self, state=state)
-        self._settings["last_remote_configuration"] = next_state
-        if isinstance(next_state, dict):
-            persisted_https = next_state.get("https_locations")
-            if isinstance(persisted_https, dict):
-                self._settings["remote_https_locations"] = dict(persisted_https)
-        self._save_settings()
+        def _on_finished_uri(config: dict | None, _ok: bool, next_state: dict) -> None:
+            self._settings["last_remote_configuration"] = next_state
+            if isinstance(next_state, dict):
+                persisted_https = next_state.get("https_locations")
+                if isinstance(persisted_https, dict):
+                    self._settings["remote_https_locations"] = dict(persisted_https)
+                persisted_s3_reductionist = next_state.get("s3_reductionist_locations")
+                if isinstance(persisted_s3_reductionist, dict):
+                    self._settings["remote_s3_reductionist_locations"] = {
+                        str(alias).strip(): str(url).strip()
+                        for alias, url in persisted_s3_reductionist.items()
+                        if str(alias).strip() and str(url).strip()
+                    }
+            self._save_settings()
+
+        RemoteConfigurationDialog.show_non_modal(self, state=state, on_finished=_on_finished_uri)
 
     @staticmethod
     def _probe_ssh_auth_methods(
@@ -795,6 +979,7 @@ class CFVMain(CFVCore):
 
         client = paramiko.SSHClient()
         client.load_system_host_keys()
+        from .ui.remote_file_navigator import _XconvHostKeyPolicy  # noqa: PLC0415
         client.set_missing_host_key_policy(_XconvHostKeyPolicy())
         try:
             client.connect(
@@ -1138,7 +1323,7 @@ class CFVMain(CFVCore):
         )
 
     def _configure_remote(self) -> None:
-        """Open the full remote configuration dialog; Open proceeds to worker-backed navigation."""
+        """Open the full remote configuration dialog non-modally; Open proceeds to worker-backed navigation."""
         raw_state = self._settings.get("last_remote_configuration", {})
         state = dict(raw_state) if isinstance(raw_state, dict) else {}
         https_locations = self._settings.get("remote_https_locations")
@@ -1146,18 +1331,31 @@ class CFVMain(CFVCore):
             https_locations = self._settings.get("remote_http_locations")
         if isinstance(https_locations, dict) and https_locations:
             state["https_locations"] = dict(https_locations)
-        config, ok, next_state = RemoteConfigurationDialog.get_configuration(self, state=state)
-        self._settings["last_remote_configuration"] = next_state
-        if isinstance(next_state, dict):
-            persisted_https = next_state.get("https_locations")
-            if not isinstance(persisted_https, dict):
-                persisted_https = next_state.get("http_locations")
-            if isinstance(persisted_https, dict):
-                self._settings["remote_https_locations"] = dict(persisted_https)
-        self._save_settings()
-        if not ok or config is None:
-            return
-        self._open_remote_from_config(config)
+        s3_reductionist_locations = self._settings.get("remote_s3_reductionist_locations")
+        if isinstance(s3_reductionist_locations, dict) and s3_reductionist_locations:
+            state["s3_reductionist_locations"] = dict(s3_reductionist_locations)
+
+        def _on_finished(config: dict | None, ok: bool, next_state: dict) -> None:
+            self._settings["last_remote_configuration"] = next_state
+            if isinstance(next_state, dict):
+                persisted_https = next_state.get("https_locations")
+                if not isinstance(persisted_https, dict):
+                    persisted_https = next_state.get("http_locations")
+                if isinstance(persisted_https, dict):
+                    self._settings["remote_https_locations"] = dict(persisted_https)
+                persisted_s3_reductionist = next_state.get("s3_reductionist_locations")
+                if isinstance(persisted_s3_reductionist, dict):
+                    self._settings["remote_s3_reductionist_locations"] = {
+                        str(alias).strip(): str(url).strip()
+                        for alias, url in persisted_s3_reductionist.items()
+                        if str(alias).strip() and str(url).strip()
+                    }
+            self._save_settings()
+            if not ok or config is None:
+                return
+            self._open_remote_from_config(config)
+
+        RemoteConfigurationDialog.show_non_modal(self, state=state, on_finished=_on_finished)
 
     def _choose_remote(self) -> None:
         """Open using existing short names via a streamlined protocol picker dialog."""
@@ -1165,6 +1363,8 @@ class CFVMain(CFVCore):
         state = raw_state if isinstance(raw_state, dict) else {}
         if isinstance(state, dict):
             merged_http: dict[str, object] = {}
+            merged_ssh_runtime_preferences: dict[str, object] = {}
+            merged_s3_reductionist: dict[str, str] = {}
 
             configured_state = self._settings.get("last_remote_configuration")
             if isinstance(configured_state, dict):
@@ -1173,6 +1373,9 @@ class CFVMain(CFVCore):
                     cfg_http = configured_state.get("http_locations")
                 if isinstance(cfg_http, dict):
                     merged_http.update(cfg_http)
+                cfg_ssh_prefs = configured_state.get("ssh_runtime_preferences")
+                if isinstance(cfg_ssh_prefs, dict):
+                    merged_ssh_runtime_preferences.update(cfg_ssh_prefs)
 
             http_locations = self._settings.get("remote_https_locations")
             if not isinstance(http_locations, dict):
@@ -1180,9 +1383,28 @@ class CFVMain(CFVCore):
             if isinstance(http_locations, dict):
                 merged_http.update(http_locations)
 
-            if merged_http:
+            persisted_s3_reductionist = self._settings.get("remote_s3_reductionist_locations")
+            if isinstance(persisted_s3_reductionist, dict):
+                merged_s3_reductionist.update(
+                    {
+                        str(alias).strip(): str(url).strip()
+                        for alias, url in persisted_s3_reductionist.items()
+                        if str(alias).strip() and str(url).strip()
+                    }
+                )
+
+            open_state_ssh_prefs = state.get("ssh_runtime_preferences") if isinstance(state, dict) else None
+            if isinstance(open_state_ssh_prefs, dict):
+                merged_ssh_runtime_preferences.update(open_state_ssh_prefs)
+
+            if merged_http or merged_ssh_runtime_preferences or merged_s3_reductionist:
                 state = dict(state)
-                state["https_locations"] = dict(merged_http)
+                if merged_http:
+                    state["https_locations"] = dict(merged_http)
+                if merged_ssh_runtime_preferences:
+                    state["ssh_runtime_preferences"] = dict(merged_ssh_runtime_preferences)
+                if merged_s3_reductionist:
+                    state["s3_reductionist_locations"] = dict(merged_s3_reductionist)
 
         config, ok, next_state = RemoteOpenDialog.get_configuration(self, state=state)
         self._settings["last_remote_open"] = next_state
@@ -1192,7 +1414,62 @@ class CFVMain(CFVCore):
             return
         if not ok or config is None:
             return
+        config = CFVMain._with_cache_defaults(self, config)
         self._open_remote_from_config(config)
+
+    def _browse_remote(self) -> None:
+        """Re-browse the active remote session, or prompt for a new one if none is active.
+
+        If a remote session is already live (e.g. after opening a remote file), this skips
+        the expensive REMOTE_PREPARE step and opens the navigator directly, restoring the
+        previous tree state.  A "New Remote..." button in the navigator lets the user
+        switch to a different remote at any time.
+        """
+        if self._remote_session_id and self._last_remote_config:
+            from .remote_access import build_remote_filesystem_spec  # noqa: PLC0415
+            from .ui.remote_file_navigator import RemoteFileNavigatorDialog  # noqa: PLC0415
+            try:
+                spec = build_remote_filesystem_spec(self._last_remote_config)
+            except Exception as exc:
+                QMessageBox.critical(self, "Remote configuration invalid", str(exc))
+                return
+            list_callback = self._make_worker_list_callback()
+            dialog = RemoteFileNavigatorDialog(
+                self,
+                self._last_remote_config,
+                spec=spec,
+                list_callback=list_callback,
+                new_remote_button=True,
+                session_active=bool(self._remote_session_id),
+                initial_tree_state=self._last_remote_navigator_state,
+            )
+            result = dialog.exec()
+            self._last_remote_navigator_state = dialog._collect_tree_state()
+            if dialog.shutdown_session_requested:
+                self._release_remote_session_if_active()
+                self._show_status_message("Remote session shut down.")
+                return
+            if dialog.new_remote_requested:
+                self._choose_remote()
+                return
+            if result != QDialog.Accepted:
+                return
+            selected_uri = dialog.selected_uri()
+            selected_path = dialog.selected_path()
+            if not selected_uri or not selected_path:
+                self._show_status_message("Remote file selection was incomplete.", is_error=True)
+                return
+            remote = self._last_remote_config.get("remote") if isinstance(self._last_remote_config, dict) else None
+            host_alias = str(remote.get("alias", "")).strip() if isinstance(remote, dict) else ""
+            self._set_window_title_for_file(selected_uri)
+            self._show_status_message(f"Selected remote file: {selected_uri}")
+            if host_alias:
+                self._record_recent_uri(selected_uri, host_alias)
+            else:
+                self._record_recent_file(selected_uri)
+            self._load_remote_selected_file(selected_uri, selected_path)
+        else:
+            self._choose_remote()
 
     def _choose_uris(self) -> None:
         """Show URI dialog and open supported URIs directly through the worker."""
@@ -1553,6 +1830,22 @@ class CFVMain(CFVCore):
         logger.debug("Sending worker control task %s", kind)
         self.worker.write(task.encode())
 
+    def _apply_logging_configuration_from_ui(
+        self,
+        *,
+        scope_levels: dict[str, int | str],
+    ) -> None:
+        """Apply GUI logging config locally and forward it to the worker."""
+        super()._apply_logging_configuration_from_ui(
+            scope_levels=scope_levels,
+        )
+        self._send_worker_control_task(
+            "LOGGING_CONFIGURE",
+            {
+                "scope_levels": scope_levels,
+            },
+        )
+
     def _record_pending_worker_task(self) -> None:
         """Store worker task start times so completion statuses can show elapsed time."""
         starts = getattr(self, "_pending_worker_task_starts", None)
@@ -1592,14 +1885,21 @@ class CFVMain(CFVCore):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Ensure worker process is shut down cleanly when GUI exits."""
-        self._release_remote_session_if_active()
-        if self.worker.state() != QProcess.NotRunning:
-            logger.info("Terminating worker process")
-            self.worker.terminate()
-            if not self.worker.waitForFinished(2000):
-                logger.warning("Worker did not terminate in time; killing process")
-                self.worker.kill()
-                self.worker.waitForFinished(1000)
+    def _shutdown_worker(self) -> None:
+        """Shut down the worker process cleanly, suppressing the crash error signal."""
+        if self.worker.state() == QProcess.NotRunning:
+            return
+        self._shutting_down = True
+        logger.info("Shutting down worker process")
+        self.worker.terminate()
+        if not self.worker.waitForFinished(2000):
+            logger.warning("Worker did not terminate in time; killing process")
+            self.worker.kill()
+            self.worker.waitForFinished(1000)
 
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Ensure worker process is shut down cleanly when GUI exits."""
+        self._release_remote_session_if_active()
+        self._shutdown_worker()
         super().closeEvent(event)
 

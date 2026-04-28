@@ -22,6 +22,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .dialogs import create_info_button
+from xconv2.tooltips import PLOTTING_AND_EXPORTING
+
 if TYPE_CHECKING:
     from xconv2.core_window import CFVCore
 
@@ -159,6 +162,15 @@ class PlotViewController:
         plot_stack_container.setLayout(plot_stack)
 
         summary_row = QHBoxLayout()
+        
+        # Info button for plotting/exporting help — hidden until Selection Dimension text is shown
+        self.host.plot_info_button = create_info_button(
+            self.host,
+            *PLOTTING_AND_EXPORTING,
+            icon_size=18
+        )
+        self.host.plot_info_button.hide()
+
         self.host.plot_summary_label = QLabel("Open a field to inspect plot options.")
         self.host.plot_type_combo = QComboBox()
         self.host.plot_type_combo.setMinimumWidth(130)
@@ -221,6 +233,7 @@ class PlotViewController:
         export_controls_layout.addWidget(self.host.save_go_button)
         export_controls_layout.addWidget(self.host.save_target_combo)
 
+        summary_row.addWidget(self.host.plot_info_button, 0, Qt.AlignVCenter)
         summary_row.addWidget(self.host.plot_summary_label, 1, Qt.AlignVCenter)
         summary_row.addWidget(plot_controls_group, 0, Qt.AlignVCenter)
         summary_row.addWidget(export_controls_group, 0, Qt.AlignVCenter)

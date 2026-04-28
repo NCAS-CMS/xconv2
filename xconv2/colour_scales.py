@@ -1,6 +1,32 @@
 from __future__ import annotations
 
+import sys
 from functools import lru_cache
+from pathlib import Path
+
+
+def _cfplot_colourmaps_dir() -> Path | None:
+    """Locate the cfplot colourmaps directory.
+
+    Works in three environments:
+    - Frozen one-dir bundle: data files land in _MEIPASS/cfplot/colourmaps/
+    - Development / normal install: resolve via cfplot package __file__
+    """
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidate = Path(meipass) / "cfplot" / "colourmaps"
+            if candidate.is_dir():
+                return candidate
+    # Non-frozen: locate via the installed package
+    try:
+        import cfplot
+        candidate = Path(cfplot.__file__).parent / "colourmaps"
+        if candidate.is_dir():
+            return candidate
+    except ImportError:
+        pass
+    return None
 
 cscales=['viridis', 'magma', 'inferno', 'plasma', 'parula', 'gray', 'hotcold_18lev', 'hotcolr_19lev',\
          'mch_default', 'perc2_9lev', 'percent_11lev', 'precip2_15lev', 'precip2_17lev', 'precip3_16lev',\
@@ -28,16 +54,25 @@ cscales=['viridis', 'magma', 'inferno', 'plasma', 'parula', 'gray', 'hotcold_18l
 
 @lru_cache(maxsize=512)
 def get_colour_scale_hexes(scale_name: str) -> tuple[str, ...]:
-    """Return a tuple of colour hex values for a cf-plot colour scale."""
+    """Return a tuple of colour hex values for a cf-plot colour scale.
+
+    Reads the scale's .rgb file directly so this works in both the GUI process
+    (where cfplot Python modules are not available in frozen builds) and in
+    development.  The .rgb format is one ``R G B`` line per colour, 0-255.
+    """
+    cmap_dir = _cfplot_colourmaps_dir()
+    if cmap_dir is None:
+        return ()
+    rgb_file = cmap_dir / f"{scale_name}.rgb"
+    if not rgb_file.exists():
+        return ()
     try:
-        import cfplot as cfp
-        import cfplot.cfplot as cfp_module
-
-        cfp.cscale(scale=scale_name)
-        colors = getattr(cfp_module.plotvars, "cs", None)
-        if isinstance(colors, list):
-            return tuple(str(color) for color in colors)
+        hexes = []
+        for line in rgb_file.read_text().splitlines():
+            parts = line.split()
+            if len(parts) >= 3:
+                r, g, b = int(parts[0]), int(parts[1]), int(parts[2])
+                hexes.append(f"#{r:02x}{g:02x}{b:02x}")
+        return tuple(hexes)
     except Exception:
-        return tuple()
-
-    return tuple()
+        return ()

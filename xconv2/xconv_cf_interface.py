@@ -70,43 +70,89 @@ def field_info(fields: object) -> list[dict[str, object]]:
     return rows
 
 
-def coordinate_info(field: object) -> list[tuple[str, list[str]]]:
+def coordinate_info(field: object) -> list[tuple[str, list[str], str]]:
     """
-    Extract plottable 1D dimension-coordinate values.
+    Extract plottable 1D dimension-coordinate values with units.
 
     Reads dimension coordinates from a field and returns only coordinates with
-    more than one value so the GUI can build useful range sliders.
+    more than one value so the GUI can build useful range sliders. Also includes
+    coordinate units in the output.
 
     Args:
-        field: CF field-like object exposing dimension coordinate accessors.
-
+        field: CF field-like object exposing dimension coordinate accessors.    
     Returns:
-        list[tuple[str, list[str]]]: Coordinate identity with serialized values.
+        list[tuple[str, list[str], str]]: Coordinate identity with serialized values and units.
     """
-    coords: list[tuple[str, list[str]]] = []
-    for key, c in field.dimension_coordinates(todict=True).items():
+
+    def _safe_array(construct: object) -> object | None:
         try:
-            arr = getattr(c, "array", None)
+            return getattr(construct, "array", None)
         except Exception as exc:
-            # Some backend combinations (notably newer h5netcdf/h5py stacks)
-            # can fail when materializing coordinate arrays. Skip only the
-            # problematic coordinate so metadata loading can continue.
             logger.warning(
-                "Skipping coordinate in metadata extraction due to backend read error: key=%s identity=%s error=%s",
-                key,
-                c.identity(default="unknown"),
+                "Skipping coordinate in metadata extraction due to backend read error (%s, %s)",
+                construct,
                 exc,
             )
-            continue
+            return None
+
+    def _iter_one_d_constructs() -> object:
+        one_d_coords = field.coordinates(filter_by_naxes=(1,))
+        for construct in one_d_coords.values():
+            arr = _safe_array(construct)
+            if arr is None or len(arr) <= 1:
+                continue
+            yield construct, arr
+
+    def _append_coordinate_values(construct: object, values: object) -> None:
+        name = str(construct.identity(default="unknown"))
+        if name in seen_names:
+            return
+        units = str(getattr(construct, "Units", ""))
+        if units.startswith('degrees'):
+           vals = [f'{v:.2f}' for v in values]
+        else:
+            vals = [str(x) for x in values]
+        coords.append((name, vals, units))
+        seen_names.add(name)
+
+    coords: list[tuple[str, list[str], str]] = []
+    seen_names: set[str] = set()
+
+    for construct, arr in _iter_one_d_constructs():
+        _append_coordinate_values(construct, arr)
+
+    if coords:
+        return coords
+
+    # Fallback for fields that expose only 2D coordinates (for example NEMO
+    # latitude/longitude auxiliary coordinates). Derive global bounds from each
+    # auxiliary coordinate and synthesize slider values from the resulting bbox
+    # limits.
+    two_d_coords = field.coordinates(filter_by_naxes=(2,))
+    for construct in two_d_coords.values():
+        arr = _safe_array(construct)
         if arr is None:
             continue
-        if len(arr) <= 1:
+
+        marr = np.ma.array(arr)
+        if marr.ndim != 2 or marr.size <= 1:
             continue
-        vals = [str(x) for x in arr]
-        coords.append((c.identity(default="unknown"), vals, str(getattr(c, "Units",""))))
+
+        lo = float(np.nanmin(marr.filled(np.nan)))
+        hi = float(np.nanmax(marr.filled(np.nan)))
+        if np.isnan(lo) or np.isnan(hi):
+            continue
+
+        # Use the larger horizontal size so synthesized sliders retain useful
+        # resolution without requiring direction-specific heuristics.
+        count = int(max(marr.shape))
+        if count <= 1:
+            continue
+
+        vals = np.linspace(lo, hi, num=count)
+        _append_coordinate_values(construct, vals)
 
     return coords
-
 
 def contour_data_range(pfld: object) -> tuple[float, float]:
     """Return contour min/max while tolerating backend indexing quirks.
