@@ -21,7 +21,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 import sys
 
-from PySide6.QtCore import QEventLoop, QProcess, QTimer
+from PySide6.QtCore import QEventLoop, QProcess, QTimer, Qt
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QApplication, QDialog, QInputDialog, QLineEdit, QListWidgetItem, QMessageBox
 
@@ -31,6 +31,7 @@ from .cf_templates import (
     field_list,
     plot_from_selection,
     save_data_from_selection,
+    unary_xy_field_operation,
 )
 from .core_window import CFVCore
 from .xconv_cf_interface import parse_coordinate_subspace_commands
@@ -112,6 +113,7 @@ class CFVMain(CFVCore):
         self._loaded_file_paths: list[str] = []
         self._pending_metadata_append: bool = False
         self._pending_metadata_source: str | None = None
+        self._pending_field_op_source: str | None = None
         self._shutting_down: bool = False
 
         self.worker = QProcess()
@@ -407,6 +409,19 @@ class CFVMain(CFVCore):
                     self.build_dynamic_sliders(metadata)
                 else:
                     logger.warning("Unexpected metadata payload type: %s", type(metadata).__name__)
+
+            elif line.startswith("METADATA_APPEND:"):
+                raw_payload = line.split(":", 1)[1]
+                metadata = pickle.loads(base64.b64decode(raw_payload))
+                if isinstance(metadata, list) and all(isinstance(row, dict) for row in metadata):
+                    self.populate_field_list(
+                        metadata,
+                        append=True,
+                        source_file=getattr(self, "_pending_field_op_source", None),
+                    )
+                else:
+                    logger.warning("Unexpected METADATA_APPEND payload type: %s", type(metadata).__name__)
+                self._pending_field_op_source = None
 
             elif line.startswith("IMG_READY:"):
                 logger.info(
@@ -1691,6 +1706,53 @@ class CFVMain(CFVCore):
         if show_status:
             self._show_status_message(f"Loading coordinates for field index {index}...")
         self._send_worker_task(coordinate_list(index))
+
+    def _selected_field_index_for_operation(self, operation: str) -> int | None:
+        """Return a single selected field index suitable for unary field operations."""
+        selected = list(getattr(self, "_selected_field_indices", []))
+
+        if not selected:
+            item = self.field_list_widget.currentItem()
+            if item is not None:
+                idx = self.field_list_widget.row(item)
+                if idx >= 0:
+                    selected = [idx]
+
+        if len(selected) != 1:
+            message = f"{operation} requires exactly one selected field."
+            logger.error(message)
+            self._show_status_message(message, is_error=True)
+            return None
+
+        return selected[0]
+
+    def _run_unary_xy_field_operation(self, operation_name: str, operation_key: str) -> None:
+        """Dispatch unary XY field operation through worker-side template/helper code."""
+        field_index = self._selected_field_index_for_operation(operation_name)
+        if field_index is None:
+            return
+
+        source_file = None
+        selected_item = self.field_list_widget.item(field_index)
+        if selected_item is not None:
+            raw_source = selected_item.data(Qt.UserRole + 2)
+            if isinstance(raw_source, str) and raw_source.strip():
+                source_file = raw_source
+        self._pending_field_op_source = source_file
+
+        self._show_status_message(f"Running {operation_name} on field index {field_index}...")
+        logger.info("Running field op %s on field index %d", operation_name, field_index)
+
+        code = unary_xy_field_operation(field_index, operation_key)
+        self._send_worker_task(code, emit_image=False)
+
+    def _field_ops_maths_grad(self) -> None:
+        """Create and append grad field via cf.Field.grad_xy."""
+        self._run_unary_xy_field_operation("Grad", "grad")
+
+    def _field_ops_maths_laplacian(self) -> None:
+        """Create and append laplacian field via cf.Field.laplacian_xy."""
+        self._run_unary_xy_field_operation("Laplacian", "laplacian")
 
     def _normalize_coordinate_metadata(self, payload: object) -> dict[str, dict[str, object]]:
         """Normalize worker coordinate payload into slider metadata mapping."""

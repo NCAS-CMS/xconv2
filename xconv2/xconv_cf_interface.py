@@ -27,6 +27,7 @@ __all__ = [
     "field_info",
     "coordinate_info",
     "parse_coordinate_subspace_commands",
+    "append_unary_xy_field_operation",
     "get_data_for_plotting",
     "save_selected_field_data",
     "annotation_text",
@@ -40,6 +41,13 @@ __all__ = [
 
 
 logger = logging.getLogger(__name__)
+
+# Default kwargs for unary XY operations. These are applied automatically by
+# worker-side field ops until UI controls for operation parameters are added.
+_UNARY_XY_OPERATION_DEFAULT_KWARGS: dict[str, dict[str, object]] = {
+    "grad": {"radius": "earth"},
+    "laplacian": {"radius": "earth"},
+}
 
 
 
@@ -56,8 +64,21 @@ def field_info(fields: list) -> list[dict[str, object]]:
     Returns:
         list[dict[str, object]]: Structured rows ready for worker-to-GUI payload transfer.
     """
+    def _iter_fields(items: object):
+        if isinstance(items, cf.FieldList):
+            for item in items:
+                yield from _iter_fields(item)
+            return
+
+        if isinstance(items, (list, tuple)):
+            for item in items:
+                yield from _iter_fields(item)
+            return
+
+        yield items
+
     rows: list[dict[str, object]] = []
-    for x in fields:
+    for x in _iter_fields(fields):
         id_ = f"{x.identity().strip()}{x.shape}"
         props = x.properties()
         info = str(x)
@@ -230,6 +251,51 @@ def parse_coordinate_subspace_commands(commands_text: str) -> dict[str, tuple[ob
         selections[coord] = bounds
 
     return selections
+
+
+def append_unary_xy_field_operation(
+    fields: list,
+    field_index: int,
+    operation: str,
+) -> list[dict[str, object]]:
+    """Create derived XY field(s), append them, and return metadata rows."""
+
+    if field_index < 0 or field_index >= len(fields):
+        raise IndexError(f"Field index out of range for operation {operation!r}: {field_index}")
+
+    fld = fields[field_index]
+    has_x = (
+        fld.dimension_coordinate(filter_by_axis=("X",), default=None) is not None
+        or fld.auxiliary_coordinate(filter_by_axis=("X",), axis_mode="exact", default=None) is not None
+    )
+    has_y = (
+        fld.dimension_coordinate(filter_by_axis=("Y",), default=None) is not None
+        or fld.auxiliary_coordinate(filter_by_axis=("Y",), axis_mode="exact", default=None) is not None
+    )
+
+    if not (has_x and has_y):
+        raise ValueError(f"{operation} requires a field with both X and Y axes.")
+
+    normalized = operation.strip().lower()
+    kwargs = dict(_UNARY_XY_OPERATION_DEFAULT_KWARGS.get(normalized, {}))
+    if normalized == "grad":
+        new_result = fld.grad_xy(**kwargs)
+    elif normalized == "laplacian":
+        new_result = fld.laplacian_xy(**kwargs)
+    else:
+        raise ValueError(f"Unsupported unary XY field operation: {operation!r}")
+
+    if isinstance(new_result, cf.FieldList):
+        new_fields = list(new_result)
+    elif isinstance(new_result, (list, tuple)):
+        new_fields = list(new_result)
+    else:
+        new_fields = [new_result]
+
+    for new_field in new_fields:
+        fields.append(new_field)
+
+    return field_info(new_fields)
 
 def contour_data_range(pfld: object) -> tuple[float, float]:
     """Return contour min/max while tolerating backend indexing quirks.

@@ -54,6 +54,28 @@ class _FakeWorkerPipe:
         self.payloads.append(payload.decode())
 
 
+class _DummyFieldItem:
+    def __init__(self, source: str | None = None) -> None:
+        self._source = source
+
+    def data(self, _role: int) -> str | None:
+        return self._source
+
+
+class _DummyFieldListWidgetForOps:
+    def __init__(self, item: _DummyFieldItem | None = None) -> None:
+        self._item = item
+
+    def currentItem(self) -> _DummyFieldItem | None:
+        return self._item
+
+    def row(self, _item: _DummyFieldItem) -> int:
+        return 0
+
+    def item(self, index: int) -> _DummyFieldItem | None:
+        return self._item if index == 0 else None
+
+
 def test_load_selected_file_builds_worker_task() -> None:
     """The GUI should send a worker task when a file is selected."""
     window = _DummyWindow()
@@ -366,6 +388,72 @@ def test_send_worker_control_task_writes_typed_headers() -> None:
     encoded = payload.split("#TASK_PAYLOAD_B64:", 1)[1].split("\n", 1)[0]
     decoded = json.loads(base64.b64decode(encoded.encode("ascii")).decode("utf-8"))
     assert decoded == {"session_id": "abc", "value": 2}
+
+
+def test_field_ops_grad_builds_worker_task_for_selected_field() -> None:
+    class _DummyOpsWindow:
+        def __init__(self) -> None:
+            self._selected_field_indices = [0]
+            self._pending_field_op_source = None
+            self.field_list_widget = _DummyFieldListWidgetForOps(_DummyFieldItem("/tmp/a.nc"))
+            self.sent_tasks: list[tuple[str, bool]] = []
+            self.status_messages: list[str] = []
+
+        def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
+            _ = save_code_path
+            self.sent_tasks.append((code, emit_image))
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            _ = is_error
+            self.status_messages.append(message)
+
+        def _selected_field_index_for_operation(self, operation: str) -> int | None:
+            return CFVMain._selected_field_index_for_operation(self, operation)
+
+        def _run_unary_xy_field_operation(self, operation_name: str, method_name: str) -> None:
+            return CFVMain._run_unary_xy_field_operation(self, operation_name, method_name)
+
+    window = _DummyOpsWindow()
+
+    CFVMain._field_ops_maths_grad(window)
+
+    assert window._pending_field_op_source == "/tmp/a.nc"
+    assert len(window.sent_tasks) == 1
+    code, emit_image = window.sent_tasks[0]
+    assert emit_image is False
+    assert "append_unary_xy_field_operation" in code
+    assert "_cfview_operation = 'grad'" in code
+    assert "send_to_gui('METADATA_APPEND'" in code
+
+
+def test_field_ops_grad_requires_exactly_one_selected_field() -> None:
+    class _DummyOpsWindow:
+        def __init__(self) -> None:
+            self._selected_field_indices: list[int] = []
+            self._pending_field_op_source = None
+            self.field_list_widget = _DummyFieldListWidgetForOps(None)
+            self.sent_tasks: list[tuple[str, bool]] = []
+            self.status_messages: list[tuple[str, bool]] = []
+
+        def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
+            _ = save_code_path
+            self.sent_tasks.append((code, emit_image))
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.status_messages.append((message, is_error))
+
+        def _selected_field_index_for_operation(self, operation: str) -> int | None:
+            return CFVMain._selected_field_index_for_operation(self, operation)
+
+        def _run_unary_xy_field_operation(self, operation_name: str, method_name: str) -> None:
+            return CFVMain._run_unary_xy_field_operation(self, operation_name, method_name)
+
+    window = _DummyOpsWindow()
+
+    CFVMain._field_ops_maths_grad(window)
+
+    assert window.sent_tasks == []
+    assert window.status_messages[-1] == ("Grad requires exactly one selected field.", True)
 
 
 # ---------------------------------------------------------------------------

@@ -97,7 +97,33 @@ class MenuController:
 
         file_menu.addSeparator()
 
-        menu_bar.addMenu("Field Ops")
+        field_ops_menu = menu_bar.addMenu("Field Ops")
+        add_bounds_action = QAction("Add Bounds", self.host)
+        add_bounds_action.triggered.connect(self.host._field_ops_add_bounds)
+        field_ops_menu.addAction(add_bounds_action)
+
+        regrid_action = QAction("Regrid", self.host)
+        regrid_action.triggered.connect(self.host._field_ops_regrid)
+        field_ops_menu.addAction(regrid_action)
+
+        maths_menu = field_ops_menu.addMenu("Maths")
+
+        grad_action = QAction("Grad", self.host)
+        grad_action.triggered.connect(self.host._field_ops_maths_grad)
+        maths_menu.addAction(grad_action)
+
+        laplacian_action = QAction("Laplacian", self.host)
+        laplacian_action.triggered.connect(self.host._field_ops_maths_laplacian)
+        maths_menu.addAction(laplacian_action)
+
+        convolution_action = QAction("Convolution", self.host)
+        convolution_action.triggered.connect(self.host._field_ops_maths_convolution)
+        maths_menu.addAction(convolution_action)
+
+        moving_window_action = QAction("Moving Window", self.host)
+        moving_window_action.triggered.connect(self.host._field_ops_maths_moving_window)
+        maths_menu.addAction(moving_window_action)
+
         menu_bar.addMenu("File Ops")
 
         self._setup_help_menu(menu_bar, menu_font_size_px, menu_font_weight)

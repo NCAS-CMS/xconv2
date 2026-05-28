@@ -72,6 +72,23 @@ def coordinate_list(index: int) -> str:
     ).lstrip()
 
 
+def unary_xy_field_operation(index: int, operation: str) -> str:
+    """Generate worker code for unary XY field operation that appends derived field metadata."""
+    return textwrap.dedent(
+        f"""
+        _cfview_field_index = {index}
+        _cfview_operation = {operation!r}
+        metadata_rows = append_unary_xy_field_operation(f, _cfview_field_index, _cfview_operation)
+        send_to_gui('METADATA_APPEND', metadata_rows) #omit4save
+        _cfview_added_count = len(metadata_rows)
+        _cfview_first_id = metadata_rows[0].get('identity', 'unknown') if metadata_rows else 'unknown'
+        send_to_gui(
+            f"STATUS:Added {{_cfview_added_count}} field(s) via {{_cfview_operation}}; first: {{_cfview_first_id}}"
+        ) #omit4save
+        """
+    ).lstrip()
+
+
 def plot_from_selection(
     selections: dict[str, tuple[object, object]],
     collapse_by_coord: dict[str, str],

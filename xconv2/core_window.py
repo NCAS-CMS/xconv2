@@ -1943,6 +1943,34 @@ class CFVCore(QMainWindow):
             f"{capability} is not implemented yet.",
         )
 
+    def _field_ops_add_bounds(self) -> None:
+        """Placeholder action for Field Ops -> Add Bounds."""
+        self._show_not_implemented_dialog("Field Ops: Add Bounds")
+
+    def _field_ops_regrid(self) -> None:
+        """Placeholder action for Field Ops -> Regrid."""
+        self._show_not_implemented_dialog("Field Ops: Regrid")
+
+    def _field_ops_maths(self) -> None:
+        """Placeholder action for Field Ops -> Maths."""
+        self._show_not_implemented_dialog("Field Ops: Maths")
+
+    def _field_ops_maths_grad(self) -> None:
+        """Placeholder action for Field Ops -> Maths -> Grad."""
+        self._show_not_implemented_dialog("Field Ops: Maths -> Grad")
+
+    def _field_ops_maths_laplacian(self) -> None:
+        """Placeholder action for Field Ops -> Maths -> Laplacian."""
+        self._show_not_implemented_dialog("Field Ops: Maths -> Laplacian")
+
+    def _field_ops_maths_convolution(self) -> None:
+        """Placeholder action for Field Ops -> Maths -> Convolution."""
+        self._show_not_implemented_dialog("Field Ops: Maths -> Convolution")
+
+    def _field_ops_maths_moving_window(self) -> None:
+        """Placeholder action for Field Ops -> Maths -> Moving Window."""
+        self._show_not_implemented_dialog("Field Ops: Maths -> Moving Window")
+
     def _choose_glob(self) -> None:
         """Open files using a user-provided local glob expression."""
         initial_directory = str(Path.home())

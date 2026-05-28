@@ -4,6 +4,7 @@ import pytest
 import xconv2.xconv_cf_interface as cf_interface
 
 from xconv2.xconv_cf_interface import (
+    append_unary_xy_field_operation,
     auto_contour_title,
     coordinate_info,
     field_info,
@@ -126,6 +127,50 @@ class _FakePlotField:
         return self
 
 
+class _FakeXYField:
+    def __init__(self, *, has_x: bool = True, has_y: bool = True) -> None:
+        self._has_x = has_x
+        self._has_y = has_y
+        self.last_grad_kwargs: dict[str, object] | None = None
+        self.last_laplacian_kwargs: dict[str, object] | None = None
+
+    def identity(self, default: str = "unknown") -> str:
+        return "demo" if default else "demo"
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return (2, 2)
+
+    def properties(self) -> dict[str, str]:
+        return {"units": "1"}
+
+    def __str__(self) -> str:
+        return "demo-field"
+
+    def dimension_coordinate(self, filter_by_axis=(), default=None):
+        if filter_by_axis == ("X",):
+            return object() if self._has_x else None
+        if filter_by_axis == ("Y",):
+            return object() if self._has_y else None
+        return default
+
+    def auxiliary_coordinate(self, filter_by_axis=(), axis_mode=None, default=None):
+        _ = axis_mode
+        if filter_by_axis == ("X",):
+            return object() if self._has_x else None
+        if filter_by_axis == ("Y",):
+            return object() if self._has_y else None
+        return default
+
+    def grad_xy(self, **kwargs: object):
+        self.last_grad_kwargs = dict(kwargs)
+        return _FakeXYField()
+
+    def laplacian_xy(self, **kwargs: object):
+        self.last_laplacian_kwargs = dict(kwargs)
+        return _FakeXYField()
+
+
 def test_get_data_for_plotting_builds_subspace_kwargs() -> None:
     fld = _FakePlotField()
 
@@ -147,6 +192,51 @@ def test_get_data_for_plotting_builds_subspace_kwargs() -> None:
     assert fld.collapse_calls == [
         ("time: mean name: max", True),
     ]
+
+
+def test_append_unary_xy_field_operation_appends_grad_row() -> None:
+    field = _FakeXYField()
+    fields = [field]
+
+    rows = append_unary_xy_field_operation(fields, 0, "grad")
+
+    assert len(fields) == 2
+    assert isinstance(rows, list)
+    assert len(rows) == 1
+    assert "identity" in rows[0]
+    assert field.last_grad_kwargs == {"radius": "earth"}
+
+
+def test_append_unary_xy_field_operation_applies_laplacian_defaults() -> None:
+    field = _FakeXYField()
+    fields = [field]
+
+    _ = append_unary_xy_field_operation(fields, 0, "laplacian")
+
+    assert field.last_laplacian_kwargs == {"radius": "earth"}
+
+
+def test_append_unary_xy_field_operation_handles_multiple_results() -> None:
+    class _FakeMultiResultXYField(_FakeXYField):
+        def grad_xy(self, **kwargs: object):
+            self.last_grad_kwargs = dict(kwargs)
+            return [_FakeXYField(), _FakeXYField()]
+
+    field = _FakeMultiResultXYField()
+    fields = [field]
+
+    rows = append_unary_xy_field_operation(fields, 0, "grad")
+
+    assert field.last_grad_kwargs == {"radius": "earth"}
+    assert len(fields) == 3
+    assert len(rows) == 2
+
+
+def test_append_unary_xy_field_operation_requires_xy_axes() -> None:
+    fields = [_FakeXYField(has_x=False, has_y=True)]
+
+    with pytest.raises(ValueError, match="both X and Y axes"):
+        append_unary_xy_field_operation(fields, 0, "laplacian")
 
 
 def test_parse_coordinate_subspace_commands_accepts_multiple_formats() -> None:
