@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 
 
-def field_info(fields: object) -> list[dict[str, object]]:
+def field_info(fields: list) -> list[dict[str, object]]:
     """
     Serialize field metadata for GUI transport.
 
@@ -70,7 +70,7 @@ def field_info(fields: object) -> list[dict[str, object]]:
     return rows
 
 
-def coordinate_info(field: object) -> list[tuple[str, list[str], str]]:
+def coordinate_info(field: cf.Field) -> list[tuple[str, list[str], str]]:
     """
     Extract plottable 1D dimension-coordinate values with units.
 
@@ -84,26 +84,19 @@ def coordinate_info(field: object) -> list[tuple[str, list[str], str]]:
         list[tuple[str, list[str], str]]: Coordinate identity with serialized values and units.
     """
 
-    def _safe_array(construct: object) -> object | None:
-        try:
-            return getattr(construct, "array", None)
-        except Exception as exc:
-            logger.warning(
-                "Skipping coordinate in metadata extraction due to backend read error (%s, %s)",
-                construct,
-                exc,
-            )
-            return None
+    def _iter_one_d_constructs():
+        """ We need to loop over one-d coordinates and find coordinate arrays """
 
-    def _iter_one_d_constructs() -> object:
-        one_d_coords = field.coordinates(filter_by_naxes=(1,))
-        for construct in one_d_coords.values():
-            arr = _safe_array(construct)
+        for axis in field.domain_axes():
+            c = field.dimension_coordinate(filter_by_axis=(axis,), default=None)
+            if c is None:
+                c = field.auxiliary_coordinate(filter_by_axis=(axis,), axis_mode="exact", default=None)
+            arr = getattr(c, "array", None)
             if arr is None or len(arr) <= 1:
                 continue
-            yield construct, arr
+            yield c, arr
 
-    def _append_coordinate_values(construct: object, values: object) -> None:
+    def _append_coordinate_values(construct: object, values: list) -> None:
         name = str(construct.identity(default="unknown"))
         if name in seen_names:
             return
@@ -130,7 +123,7 @@ def coordinate_info(field: object) -> list[tuple[str, list[str], str]]:
     # limits.
     two_d_coords = field.coordinates(filter_by_naxes=(2,))
     for construct in two_d_coords.values():
-        arr = _safe_array(construct)
+        arr = getattr(construct, "array", None)
         if arr is None:
             continue
 
