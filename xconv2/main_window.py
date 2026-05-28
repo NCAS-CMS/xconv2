@@ -21,11 +21,14 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 import sys
 
+import psutil
+
 from PySide6.QtCore import QEventLoop, QProcess, QTimer, Qt
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QApplication, QDialog, QInputDialog, QLineEdit, QListWidgetItem, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QInputDialog, QLineEdit, QListWidgetItem, QMessageBox
 
 from .cf_templates import (
+    add_dimension_coordinate_bounds,
     contour_range_from_selection,
     coordinate_list,
     field_list,
@@ -93,6 +96,11 @@ class CFVMain(CFVCore):
 
     def __init__(self) -> None:
         super().__init__()
+        self._memory_status_label = QLabel("Mem: --")
+        self._memory_status_label.setStyleSheet("font-family: monospace; font-size: 10px;")
+        self._memory_status_timer = QTimer(self)
+        self._memory_status_timer.setInterval(1000)
+        self._memory_status_timer.timeout.connect(self._update_memory_status)
         self._plot_request_in_flight = False
         self._plot_request_expects_image = False
         self._suppress_stale_error_status = False
@@ -113,6 +121,7 @@ class CFVMain(CFVCore):
         self._loaded_file_paths: list[str] = []
         self._pending_metadata_append: bool = False
         self._pending_metadata_source: str | None = None
+        self._pending_reselect_field_index: int | None = None
         self._pending_field_op_source: str | None = None
         self._shutting_down: bool = False
 
@@ -142,6 +151,9 @@ class CFVMain(CFVCore):
             return
         self.worker.start(_worker_bin)
         logger.info("Started worker process: %s", self.worker.program())
+        self.status.addPermanentWidget(self._memory_status_label)
+        self._update_memory_status()
+        self._memory_status_timer.start()
         # Show an initialisation indicator immediately after the first paint so
         # the user knows the worker is loading even before it sends STATUS:.
         QTimer.singleShot(0, lambda: self._show_status_message("Initialising worker…"))
@@ -402,6 +414,11 @@ class CFVMain(CFVCore):
                         append=append,
                         source_file=source_file,
                     )
+                    reselect_index = getattr(self, "_pending_reselect_field_index", None)
+                    if isinstance(reselect_index, int) and reselect_index >= 0:
+                        if reselect_index < self.field_list_widget.count():
+                            self.field_list_widget.setCurrentRow(reselect_index)
+                    self._pending_reselect_field_index = None
                     self._pending_metadata_append = False
                     self._pending_metadata_source = None
                 elif isinstance(metadata, dict):
@@ -1745,6 +1762,60 @@ class CFVMain(CFVCore):
 
         code = unary_xy_field_operation(field_index, operation_key)
         self._send_worker_task(code, emit_image=False)
+
+    def _run_add_bounds_operation(self, operation_name: str) -> None:
+        """Dispatch missing dimension-coordinate bounds creation through the worker."""
+        field_index = self._selected_field_index_for_operation(operation_name)
+        if field_index is None:
+            return
+
+        source_file = None
+        selected_item = self.field_list_widget.item(field_index)
+        if selected_item is not None:
+            raw_source = selected_item.data(Qt.UserRole + 2)
+            if isinstance(raw_source, str) and raw_source.strip():
+                source_file = raw_source
+        self._pending_field_op_source = source_file
+        self._pending_metadata_source = source_file
+        self._pending_metadata_append = False
+        self._pending_reselect_field_index = field_index
+
+        self._show_status_message(f"Adding bounds on field index {field_index}...")
+        logger.info("Adding bounds on field index %d", field_index)
+
+        code = add_dimension_coordinate_bounds(field_index)
+        self._send_worker_task(code, emit_image=False)
+
+    def _process_rss_mib(self, pid: int | None) -> float | None:
+        """Return RSS for a process in MiB, or None if unavailable."""
+        if not isinstance(pid, int) or pid <= 0:
+            return None
+
+        try:
+            process = psutil.Process(pid)
+            return float(process.memory_info().rss) / (1024.0 * 1024.0)
+        except Exception:
+            return None
+
+    def _update_memory_status(self) -> None:
+        """Refresh the status-bar memory readout."""
+        app_rss = self._process_rss_mib(os.getpid())
+        worker_rss = self._process_rss_mib(self.worker.processId())
+
+        if app_rss is None and worker_rss is None:
+            text = "Mem: unavailable"
+        elif worker_rss is None:
+            text = f"Mem app: {app_rss:.0f} MiB | worker: --"
+        elif app_rss is None:
+            text = f"Mem app: -- | worker: {worker_rss:.0f} MiB"
+        else:
+            text = f"Mem app: {app_rss:.0f} MiB | worker: {worker_rss:.0f} MiB"
+
+        self._memory_status_label.setText(text)
+
+    def _field_ops_add_bounds(self) -> None:
+        """Create missing dimension-coordinate bounds on the selected field."""
+        self._run_add_bounds_operation("Add Bounds")
 
     def _field_ops_maths_grad(self) -> None:
         """Create and append grad field via cf.Field.grad_xy."""

@@ -1944,7 +1944,7 @@ class CFVCore(QMainWindow):
         )
 
     def _field_ops_add_bounds(self) -> None:
-        """Placeholder action for Field Ops -> Add Bounds."""
+        """Create missing dimension-coordinate bounds on the selected field."""
         self._show_not_implemented_dialog("Field Ops: Add Bounds")
 
     def _field_ops_regrid(self) -> None:

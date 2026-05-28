@@ -4,6 +4,7 @@ import pytest
 import xconv2.xconv_cf_interface as cf_interface
 
 from xconv2.xconv_cf_interface import (
+    add_dimension_coordinate_bounds,
     append_unary_xy_field_operation,
     auto_contour_title,
     coordinate_info,
@@ -128,9 +129,18 @@ class _FakePlotField:
 
 
 class _FakeXYField:
-    def __init__(self, *, has_x: bool = True, has_y: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        has_x: bool = True,
+        has_y: bool = True,
+        x_coord: object | None = None,
+        x_iscyclic: bool = False,
+    ) -> None:
         self._has_x = has_x
         self._has_y = has_y
+        self._x_coord = x_coord
+        self._x_iscyclic = x_iscyclic
         self.last_grad_kwargs: dict[str, object] | None = None
         self.last_laplacian_kwargs: dict[str, object] | None = None
 
@@ -149,6 +159,8 @@ class _FakeXYField:
 
     def dimension_coordinate(self, filter_by_axis=(), default=None):
         if filter_by_axis == ("X",):
+            if self._x_coord is not None:
+                return self._x_coord
             return object() if self._has_x else None
         if filter_by_axis == ("Y",):
             return object() if self._has_y else None
@@ -169,6 +181,98 @@ class _FakeXYField:
     def laplacian_xy(self, **kwargs: object):
         self.last_laplacian_kwargs = dict(kwargs)
         return _FakeXYField()
+
+    def iscyclic(self, axis: str) -> bool:
+        return axis == "X" and self._x_iscyclic
+
+
+class _FakeDimensionCoordinate:
+    def __init__(
+        self,
+        name: str,
+        *,
+        has_bounds: bool,
+        cellsize: object | None = None,
+    ) -> None:
+        self._name = name
+        self._has_bounds = has_bounds
+        self.cellsize = cellsize
+        self.create_bounds_calls: list[dict[str, object]] = []
+
+    def identity(self, default: str = "unknown") -> str:
+        return self._name or default
+
+    def has_bounds(self) -> bool:
+        return self._has_bounds
+
+    def create_bounds(
+        self,
+        bound: object | None = None,
+        cellsize: object | None = None,
+        flt: float = 0.5,
+        max: object | None = None,
+        min: object | None = None,
+        inplace: bool = False,
+    ) -> object | None:
+        _ = (bound, flt, max, min)
+        self.create_bounds_calls.append({"cellsize": cellsize, "inplace": inplace})
+        if self._name == "height" and cellsize is None:
+            raise ValueError("cellsize is required in this fake")
+        self._has_bounds = True
+        return None if inplace else object()
+
+
+class _FakeXCoordBounds:
+    class _Bounds:
+        def __init__(self, array: object) -> None:
+            self.array = array
+
+    def __init__(self, has_bounds: bool, bounds_array: object | None = None) -> None:
+        self._has_bounds = has_bounds
+        self._bounds_array = bounds_array
+
+    def has_bounds(self) -> bool:
+        return self._has_bounds
+
+    def get_bounds(self, default=None):
+        if not self._has_bounds or self._bounds_array is None:
+            return default
+        return _FakeXCoordBounds._Bounds(self._bounds_array)
+
+
+class _FakeDimensionCoordinates:
+    def __init__(self, coords: list[_FakeDimensionCoordinate]) -> None:
+        self._coords = coords
+
+    def values(self):
+        return list(self._coords)
+
+
+class _FakeBoundsField:
+    def __init__(self) -> None:
+        self.coords = _FakeDimensionCoordinates(
+            [
+                _FakeDimensionCoordinate("time", has_bounds=True),
+                _FakeDimensionCoordinate("latitude", has_bounds=False),
+                _FakeDimensionCoordinate("height", has_bounds=False, cellsize=0.0),
+            ]
+        )
+
+    def identity(self, default: str = "unknown") -> str:
+        return "air_temperature" if default else "air_temperature"
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return (2, 2)
+
+    def properties(self) -> dict[str, str]:
+        return {"units": "K"}
+
+    def __str__(self) -> str:
+        return "fake-bounds-field"
+
+    def dimension_coordinates(self):
+        return self.coords
 
 
 def test_get_data_for_plotting_builds_subspace_kwargs() -> None:
@@ -232,11 +336,52 @@ def test_append_unary_xy_field_operation_handles_multiple_results() -> None:
     assert len(rows) == 2
 
 
+def test_append_unary_xy_field_operation_enables_x_wrap_for_global_x_bounds() -> None:
+    global_bounds = _FakeXCoordBounds(has_bounds=True, bounds_array=[[0.0, 1.0], [359.0, 360.0]])
+    field = _FakeXYField(x_coord=global_bounds, x_iscyclic=True)
+    fields = [field]
+
+    _ = append_unary_xy_field_operation(fields, 0, "grad")
+
+    assert field.last_grad_kwargs == {"radius": "earth", "x_wrap": True}
+
+
+def test_append_unary_xy_field_operation_keeps_x_wrap_off_without_bounds() -> None:
+    x_no_bounds = _FakeXCoordBounds(has_bounds=False)
+    field = _FakeXYField(x_coord=x_no_bounds, x_iscyclic=True)
+    fields = [field]
+
+    _ = append_unary_xy_field_operation(fields, 0, "grad")
+
+    assert field.last_grad_kwargs == {"radius": "earth"}
+
+
 def test_append_unary_xy_field_operation_requires_xy_axes() -> None:
     fields = [_FakeXYField(has_x=False, has_y=True)]
 
     with pytest.raises(ValueError, match="both X and Y axes"):
         append_unary_xy_field_operation(fields, 0, "laplacian")
+
+
+def test_add_dimension_coordinate_bounds_updates_missing_bounds() -> None:
+    field = _FakeBoundsField()
+    fields = [field]
+
+    rows, updated = add_dimension_coordinate_bounds(fields, 0)
+
+    assert len(rows) == 1
+    assert updated == ["latitude", "height"]
+    assert field.coords.values()[0].create_bounds_calls == []
+    assert field.coords.values()[1].create_bounds_calls == [{"cellsize": None, "inplace": True}]
+    assert field.coords.values()[2].create_bounds_calls == [
+        {"cellsize": None, "inplace": True},
+        {"cellsize": 0.0, "inplace": True},
+    ]
+
+
+def test_add_dimension_coordinate_bounds_requires_valid_index() -> None:
+    with pytest.raises(IndexError, match="add_bounds"):
+        add_dimension_coordinate_bounds([], 0)
 
 
 def test_parse_coordinate_subspace_commands_accepts_multiple_formats() -> None:

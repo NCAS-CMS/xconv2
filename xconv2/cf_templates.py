@@ -65,7 +65,7 @@ def coordinate_list(index: int) -> str:
         f"""
         _cfview_field_index = {index}
         fld = f[{index}]
-        fld.squeeze(inplace=True) # make it easier for the GUI to handle coordinates with length 1
+        fld = fld.squeeze() # make it easier for the GUI to handle coordinates with length 1
         coords = coordinate_info(fld)
         send_to_gui('COORD', coords) #omit4save
         """
@@ -85,6 +85,23 @@ def unary_xy_field_operation(index: int, operation: str) -> str:
         send_to_gui(
             f"STATUS:Added {{_cfview_added_count}} field(s) via {{_cfview_operation}}; first: {{_cfview_first_id}}"
         ) #omit4save
+        """
+    ).lstrip()
+
+
+def add_dimension_coordinate_bounds(index: int) -> str:
+    """Generate worker code that adds missing bounds to dimension coordinates."""
+    return textwrap.dedent(
+        f"""
+        _cfview_field_index = {index}
+        metadata_rows, _cfview_updated_coordinate_names = add_dimension_coordinate_bounds(f, _cfview_field_index)
+        send_to_gui('METADATA', metadata_rows) #omit4save
+        if _cfview_updated_coordinate_names:
+            send_to_gui(
+                f"STATUS:Added bounds to {{len(_cfview_updated_coordinate_names)}} dimension coordinate(s): {{', '.join(_cfview_updated_coordinate_names)}}"
+            ) #omit4save
+        else:
+            send_to_gui("STATUS:No missing dimension-coordinate bounds were found.") #omit4save
         """
     ).lstrip()
 

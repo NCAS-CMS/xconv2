@@ -157,10 +157,7 @@ class SelectionController:
         self.host.available_plot_kinds = []
         self.host.selected_plot_kind = None
 
-        for i in reversed(range(self.host.sidebar.count())):
-            widget = self.host.sidebar.itemAt(i).widget()
-            if widget is not None:
-                widget.setParent(None)
+        self._clear_sidebar_layout()
 
         for name, entry in metadata.items():
             if isinstance(entry, dict):
@@ -239,6 +236,40 @@ class SelectionController:
         self.host._set_slider_scroll_visible_rows(len(self.host.controls))
         self.refresh_plot_summary()
         logger.info("Built %d dynamic sliders", len(self.host.controls))
+
+    def _clear_sidebar_layout(self) -> None:
+        """Remove all existing slider widgets from the sidebar layout."""
+        layout = getattr(self.host, "sidebar", None)
+        if layout is None:
+            return
+
+        while layout.count():
+            item = layout.takeAt(0)
+            if item is None:
+                continue
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget is not None:
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
+            elif child_layout is not None:
+                self._clear_nested_layout(child_layout)
+
+    def _clear_nested_layout(self, layout: QVBoxLayout | QHBoxLayout) -> None:
+        """Recursively clear a nested layout and delete its widgets."""
+        while layout.count():
+            item = layout.takeAt(0)
+            if item is None:
+                continue
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget is not None:
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
+            elif child_layout is not None:
+                self._clear_nested_layout(child_layout)
 
     def _focus_adjacent_slider(self, current_name: str, offset: int) -> None:
         """Move keyboard focus to the previous/next slider in display order."""

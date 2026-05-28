@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QMessageBox, QStyle
 from xconv2.cache_utils import prune_disk_cache
 from xconv2.main_window import CFVMain
 from xconv2.core_window import CFVCore
+from xconv2.ui.selection_controller import SelectionController
 from xconv2.ui.plot_view_controller import PlotViewController
 
 
@@ -177,6 +178,49 @@ class _DummyVisibilityPanel:
 
     def isHidden(self) -> bool:
         return not self.visible
+
+
+class _FakeLayoutItem:
+    def __init__(self, widget: object | None = None, layout: object | None = None) -> None:
+        self._widget = widget
+        self._layout = layout
+
+    def widget(self):
+        return self._widget
+
+    def layout(self):
+        return self._layout
+
+
+class _FakeLayout:
+    def __init__(self, items: list[_FakeLayoutItem]) -> None:
+        self._items = list(items)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def takeAt(self, index: int):
+        if not self._items:
+            return None
+        if index != 0:
+            raise AssertionError("test fake expects takeAt(0)")
+        return self._items.pop(0)
+
+
+class _FakeWidget:
+    def __init__(self) -> None:
+        self.deleted = False
+        self.parent = object()
+        self.hidden = False
+
+    def hide(self) -> None:
+        self.hidden = True
+
+    def setParent(self, parent: object | None) -> None:
+        self.parent = parent
+
+    def deleteLater(self) -> None:
+        self.deleted = True
 
 
 @dataclass
@@ -376,6 +420,21 @@ def test_clear_loaded_data_views_resets_field_slider_plot_and_details() -> None:
     assert dummy.loading_calls == [False]
     assert dummy.canvas_messages == ["Waiting for data..."]
     assert dummy.titles == ["xconv2 (test)"]
+
+
+def test_clear_sidebar_layout_drains_items() -> None:
+    fake_widget = _FakeWidget()
+    fake_layout = _FakeLayout([_FakeLayoutItem(widget=fake_widget)])
+    host = types.SimpleNamespace(sidebar=fake_layout)
+    controller = SelectionController.__new__(SelectionController)
+    controller.host = host
+
+    SelectionController._clear_sidebar_layout(controller)
+
+    assert fake_layout.count() == 0
+    assert fake_widget.hidden is True
+    assert fake_widget.parent is None
+    assert fake_widget.deleted is True
 
 
 def test_cache_summary_text_reports_config_and_usage() -> None:

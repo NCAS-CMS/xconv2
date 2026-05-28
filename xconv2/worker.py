@@ -10,6 +10,7 @@ import json
 import re
 import textwrap
 import time
+import resource
 from io import BytesIO
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -132,6 +133,34 @@ def send_to_gui(prefix, data=None):
     else:
         print(prefix, flush=True)
         logger.debug("Sent message to GUI: %s", prefix)
+
+
+def _worker_rss_mb() -> float:
+    """Return current worker RSS in MiB (best effort)."""
+    try:
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    except Exception:
+        return 0.0
+
+    # macOS reports bytes; Linux reports KiB.
+    if sys.platform == "darwin":
+        return float(rss) / (1024.0 * 1024.0)
+    return float(rss) / 1024.0
+
+
+def _log_task_memory(prefix: str, *, started: float, rss_before_mb: float) -> None:
+    """Log task timing and RSS deltas for crash/leak diagnostics."""
+    rss_after_mb = _worker_rss_mb()
+    elapsed = max(0.0, time.monotonic() - started)
+    delta = rss_after_mb - rss_before_mb
+    logger.info(
+        "MEM_DIAG %s elapsed=%.3fs rss_before=%.1fMiB rss_after=%.1fMiB delta=%+.1fMiB",
+        prefix,
+        elapsed,
+        rss_before_mb,
+        rss_after_mb,
+        delta,
+    )
 
 
 def _extract_task_headers(code: str) -> TaskHeaders:
@@ -755,6 +784,7 @@ def main():
     # until this line is received.
     send_to_gui("STATUS:Worker Initialized (Pure-Python/pyfive)")
     print("READY", flush=True)
+    logger.info("MEM_DIAG worker_initialized rss=%.1fMiB", _worker_rss_mb())
 
     current_block = []
 
@@ -781,6 +811,7 @@ def main():
 
             if task_kind is not None:
                 task_start = time.monotonic()
+                rss_before_mb = _worker_rss_mb()
                 try:
                     _handle_control_task(task_kind, task_payload)
                     send_to_gui("STATUS:Task Complete")
@@ -788,6 +819,11 @@ def main():
                         "Control task complete kind=%s elapsed=%.3fs",
                         task_kind,
                         time.monotonic() - task_start,
+                    )
+                    _log_task_memory(
+                        f"control kind={task_kind}",
+                        started=task_start,
+                        rss_before_mb=rss_before_mb,
                     )
                 except Exception:
                     err = traceback.format_exc()
@@ -812,6 +848,11 @@ def main():
                         )
                     send_to_gui(f"STATUS:Error - {error_line}")
                     logger.exception("Control task failed: %s", task_kind)
+                    _log_task_memory(
+                        f"control_failed kind={task_kind}",
+                        started=task_start,
+                        rss_before_mb=rss_before_mb,
+                    )
                 current_block = []
                 continue
 
@@ -828,6 +869,8 @@ def main():
                     send_to_gui(f"STATUS:Error - failed to save plot code: {save_path}")
 
             try:
+                task_start = time.monotonic()
+                rss_before_mb = _worker_rss_mb()
                 # Execute the code block in our persistent global namespace
                 logger.info(
                     "PLOT_DIAG worker_exec_start pid=%s backend=%s emit_image=%s",
@@ -840,11 +883,21 @@ def main():
                     _emit_latest_plot_image()
                 send_to_gui("STATUS:Task Complete")
                 logger.info("Task complete")
+                _log_task_memory(
+                    "exec_task",
+                    started=task_start,
+                    rss_before_mb=rss_before_mb,
+                )
             except Exception:
                 # Send the full error back to the GUI for debugging
                 err = traceback.format_exc()
                 send_to_gui(f"STATUS:Error - {err.splitlines()[-1]}")
                 logger.exception("Task failed")
+                _log_task_memory(
+                    "exec_task_failed",
+                    started=task_start,
+                    rss_before_mb=rss_before_mb,
+                )
 
             current_block = []
         else:

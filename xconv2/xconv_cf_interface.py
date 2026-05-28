@@ -27,6 +27,7 @@ __all__ = [
     "field_info",
     "coordinate_info",
     "parse_coordinate_subspace_commands",
+    "add_dimension_coordinate_bounds",
     "append_unary_xy_field_operation",
     "get_data_for_plotting",
     "save_selected_field_data",
@@ -48,6 +49,48 @@ _UNARY_XY_OPERATION_DEFAULT_KWARGS: dict[str, dict[str, object]] = {
     "grad": {"radius": "earth"},
     "laplacian": {"radius": "earth"},
 }
+
+
+def _has_x_bounds(coord: object) -> bool:
+    """Return True when X coordinate reports explicit bounds."""
+    has_bounds = getattr(coord, "has_bounds", None)
+    if not callable(has_bounds):
+        return False
+
+    try:
+        return bool(has_bounds())
+    except Exception:
+        return False
+
+
+def _should_enable_x_wrap(fld: object) -> bool:
+    """Infer whether x_wrap should be enabled from X bounds + cyclic metadata."""
+    x_coord = None
+    try:
+        x_coord = fld.dimension_coordinate(filter_by_axis=("X",), default=None)
+    except Exception:
+        x_coord = None
+
+    if x_coord is None:
+        try:
+            x_coord = fld.auxiliary_coordinate(filter_by_axis=("X",), axis_mode="exact", default=None)
+        except Exception:
+            x_coord = None
+
+    if x_coord is None:
+        return False
+
+    if not _has_x_bounds(x_coord):
+        return False
+
+    iscyclic = getattr(fld, "iscyclic", None)
+    if not callable(iscyclic):
+        return False
+
+    try:
+        return bool(iscyclic("X"))
+    except Exception:
+        return False
 
 
 
@@ -278,6 +321,8 @@ def append_unary_xy_field_operation(
 
     normalized = operation.strip().lower()
     kwargs = dict(_UNARY_XY_OPERATION_DEFAULT_KWARGS.get(normalized, {}))
+    if normalized in {"grad", "laplacian"} and _should_enable_x_wrap(fld):
+        kwargs["x_wrap"] = True
     if normalized == "grad":
         new_result = fld.grad_xy(**kwargs)
     elif normalized == "laplacian":
@@ -296,6 +341,75 @@ def append_unary_xy_field_operation(
         fields.append(new_field)
 
     return field_info(new_fields)
+
+
+def add_dimension_coordinate_bounds(
+    fields: list,
+    field_index: int,
+) -> tuple[list[dict[str, object]], list[str]]:
+    """Add missing bounds to dimension coordinates on the selected field.
+
+    Existing bounds are left untouched. When a coordinate has only a single
+    cell, its own cellsize is used if available so bounds can still be created.
+    """
+
+    if field_index < 0 or field_index >= len(fields):
+        raise IndexError(f"Field index out of range for add_bounds: {field_index}")
+
+    fld = fields[field_index]
+    updated_coordinate_names: list[str] = []
+
+    dimension_coordinates = getattr(fld, "dimension_coordinates", None)
+    if not callable(dimension_coordinates):
+        logger.warning("Selected field does not expose dimension coordinates")
+        return field_info(fields), updated_coordinate_names
+
+    coords = dimension_coordinates()
+    coord_iterable = coords.values() if hasattr(coords, "values") else coords
+
+    for coord in coord_iterable:
+        has_bounds = getattr(coord, "has_bounds", None)
+        if not callable(has_bounds):
+            continue
+
+        try:
+            if has_bounds():
+                continue
+        except Exception as exc:
+            logger.warning("Could not inspect bounds for coordinate %r: %s", coord, exc)
+            continue
+
+        created = False
+        try:
+            coord.create_bounds(inplace=True)
+            created = True
+        except ValueError:
+            cellsize = getattr(coord, "cellsize", None)
+            if cellsize is not None:
+                try:
+                    coord.create_bounds(cellsize=cellsize, inplace=True)
+                    created = True
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to create bounds for coordinate %r with cellsize %r: %s",
+                        coord,
+                        cellsize,
+                        exc,
+                    )
+            else:
+                logger.warning("Unable to create bounds for coordinate %r: no cellsize available", coord)
+        except Exception as exc:
+            logger.warning("Failed to create bounds for coordinate %r: %s", coord, exc)
+
+        if created:
+            identity = getattr(coord, "identity", None)
+            if callable(identity):
+                name = str(identity(default="unknown")).strip() or "unknown"
+            else:
+                name = "unknown"
+            updated_coordinate_names.append(name)
+
+    return field_info(fields), updated_coordinate_names
 
 def contour_data_range(pfld: object) -> tuple[float, float]:
     """Return contour min/max while tolerating backend indexing quirks.

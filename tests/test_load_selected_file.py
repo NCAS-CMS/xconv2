@@ -76,6 +76,22 @@ class _DummyFieldListWidgetForOps:
         return self._item if index == 0 else None
 
 
+class _DummyMemoryLabel:
+    def __init__(self) -> None:
+        self.text = ""
+
+    def setText(self, text: str) -> None:
+        self.text = text
+
+
+class _DummyWorkerForMemory:
+    def __init__(self, pid: int) -> None:
+        self._pid = pid
+
+    def processId(self) -> int:
+        return self._pid
+
+
 def test_load_selected_file_builds_worker_task() -> None:
     """The GUI should send a worker task when a file is selected."""
     window = _DummyWindow()
@@ -90,6 +106,14 @@ def test_load_selected_file_builds_worker_task() -> None:
     assert f"cf.read({file_path!r})" in code
     assert "fields = field_info(f)" in code
     assert "send_to_gui('METADATA', fields)" in code
+
+
+def test_coordinate_list_builds_non_mutating_squeeze_task() -> None:
+    code = coordinate_list(3)
+
+    assert "fld = f[3]" in code
+    assert "fld = fld.squeeze()" in code
+    assert "inplace=True" not in code
 
 
 def test_load_selected_file_task_executes_with_mock_cf_example_fields() -> None:
@@ -454,6 +478,68 @@ def test_field_ops_grad_requires_exactly_one_selected_field() -> None:
 
     assert window.sent_tasks == []
     assert window.status_messages[-1] == ("Grad requires exactly one selected field.", True)
+
+
+def test_field_ops_add_bounds_builds_worker_task_for_selected_field() -> None:
+    class _DummyOpsWindow:
+        def __init__(self) -> None:
+            self._selected_field_indices = [0]
+            self._pending_field_op_source = None
+            self.field_list_widget = _DummyFieldListWidgetForOps(_DummyFieldItem("/tmp/a.nc"))
+            self.sent_tasks: list[tuple[str, bool]] = []
+            self.status_messages: list[str] = []
+
+        def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
+            _ = save_code_path
+            self.sent_tasks.append((code, emit_image))
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            _ = is_error
+            self.status_messages.append(message)
+
+        def _selected_field_index_for_operation(self, operation: str) -> int | None:
+            return CFVMain._selected_field_index_for_operation(self, operation)
+
+        def _run_add_bounds_operation(self, operation_name: str) -> None:
+            return CFVMain._run_add_bounds_operation(self, operation_name)
+
+    window = _DummyOpsWindow()
+
+    CFVMain._field_ops_add_bounds(window)
+
+    assert window._pending_field_op_source == "/tmp/a.nc"
+    assert len(window.sent_tasks) == 1
+    code, emit_image = window.sent_tasks[0]
+    assert emit_image is False
+    assert "add_dimension_coordinate_bounds(f, _cfview_field_index)" in code
+    assert "send_to_gui('METADATA', metadata_rows)" in code
+
+
+def test_update_memory_status_formats_app_and_worker_rss(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeProcess:
+        def __init__(self, pid: int) -> None:
+            self._pid = pid
+
+        def memory_info(self):
+            class _Info:
+                def __init__(self, rss: int) -> None:
+                    self.rss = rss
+
+            rss_by_pid = {111: 128 * 1024 * 1024, 222: 256 * 1024 * 1024}
+            return _Info(rss_by_pid[self._pid])
+
+    dummy = types.SimpleNamespace(
+        _memory_status_label=_DummyMemoryLabel(),
+        worker=_DummyWorkerForMemory(222),
+    )
+    dummy._process_rss_mib = types.MethodType(main_window.CFVMain._process_rss_mib, dummy)
+
+    monkeypatch.setattr(main_window.os, "getpid", lambda: 111)
+    monkeypatch.setattr(main_window.psutil, "Process", _FakeProcess)
+
+    main_window.CFVMain._update_memory_status(dummy)
+
+    assert dummy._memory_status_label.text == "Mem app: 128 MiB | worker: 256 MiB"
 
 
 # ---------------------------------------------------------------------------
