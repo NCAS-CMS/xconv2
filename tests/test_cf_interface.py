@@ -8,6 +8,7 @@ from xconv2.xconv_cf_interface import (
     coordinate_info,
     field_info,
     get_data_for_plotting,
+    parse_coordinate_subspace_commands,
     run_contour_plot,
     run_line_plot,
     save_selected_field_data,
@@ -146,6 +147,29 @@ def test_get_data_for_plotting_builds_subspace_kwargs() -> None:
     assert fld.collapse_calls == [
         ("time: mean name: max", True),
     ]
+
+
+def test_parse_coordinate_subspace_commands_accepts_multiple_formats() -> None:
+    commands = """
+    time=1:3
+    latitude: -20, 20
+    longitude -5 10
+    level 850
+    """
+
+    parsed = parse_coordinate_subspace_commands(commands)
+
+    assert parsed == {
+        "time": (1, 3),
+        "latitude": (-20, 20),
+        "longitude": (-5, 10),
+        "level": (850, 850),
+    }
+
+
+def test_parse_coordinate_subspace_commands_reports_line_numbers() -> None:
+    with pytest.raises(ValueError, match=r"line 2"):
+        parse_coordinate_subspace_commands("time=1:2\ninvalid line tokenized too much\n")
 
 
 class _FakeCFPlot:

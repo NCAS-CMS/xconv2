@@ -97,6 +97,9 @@ class MenuController:
 
         file_menu.addSeparator()
 
+        menu_bar.addMenu("Field Ops")
+        menu_bar.addMenu("File Ops")
+
         self._setup_help_menu(menu_bar, menu_font_size_px, menu_font_weight)
 
     def _setup_help_menu(self, menu_bar, menu_font_size_px: int, menu_font_weight: int) -> None:

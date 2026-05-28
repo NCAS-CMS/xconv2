@@ -108,6 +108,117 @@ def test_load_selected_file_task_executes_with_mock_cf_example_fields() -> None:
     assert isinstance(first["properties"], dict)
 
 
+def test_load_selected_files_builds_worker_task() -> None:
+    """The GUI should send one worker task when multiple files are selected."""
+    window = _DummyWindow()
+    file_paths = ["/tmp/mock-a.nc", "/tmp/mock-b.nc"]
+
+    CFVMain._load_selected_files(window, file_paths)
+
+    assert window.status.messages[-1] == "Loading 2 files"
+    assert len(window.sent_tasks) == 1
+
+    code = window.sent_tasks[0]
+    assert "cf.read(['/tmp/mock-a.nc', '/tmp/mock-b.nc'])" in code
+    assert "fields = field_info(f)" in code
+    assert "send_to_gui('METADATA', fields)" in code
+
+
+def test_on_file_selected_single_mode_replaces_loaded_paths() -> None:
+    class _DummyLoadHost:
+        def __init__(self) -> None:
+            self.file_open_mode = "single"
+            self._loaded_file_paths: list[str] = ["/tmp/old.nc"]
+            self.base_window_title = "xconv2 (test)"
+            self.single_calls: list[tuple[str, dict[str, object]]] = []
+            self.multi_calls: list[list[str]] = []
+            self.titles: list[str] = []
+
+        def _load_selected_file(self, path: str, **kwargs: object) -> None:
+            self.single_calls.append((path, dict(kwargs)))
+
+        def _load_selected_files(self, paths: list[str]) -> None:
+            self.multi_calls.append(paths)
+
+        def setWindowTitle(self, title: str) -> None:
+            self.titles.append(title)
+
+    host = _DummyLoadHost()
+    CFVMain.on_file_selected(host, "/tmp/new.nc")
+
+    assert host._loaded_file_paths == ["/tmp/new.nc"]
+    assert host.single_calls == [("/tmp/new.nc", {})]
+    assert host.multi_calls == []
+    assert host.titles == []
+
+
+def test_on_file_selected_multi_mode_accumulates_paths() -> None:
+    class _DummyLoadHost:
+        def __init__(self) -> None:
+            self.file_open_mode = "multi"
+            self._loaded_file_paths: list[str] = ["/tmp/old.nc"]
+            self.base_window_title = "xconv2 (test)"
+            self.single_calls: list[tuple[str, dict[str, object]]] = []
+            self.multi_calls: list[list[str]] = []
+            self.titles: list[str] = []
+
+        def _load_selected_file(self, path: str, **kwargs: object) -> None:
+            self.single_calls.append((path, dict(kwargs)))
+
+        def _load_selected_files(self, paths: list[str]) -> None:
+            self.multi_calls.append(paths)
+
+        def setWindowTitle(self, title: str) -> None:
+            self.titles.append(title)
+
+    host = _DummyLoadHost()
+    CFVMain.on_file_selected(host, "/tmp/new.nc")
+
+    assert host._loaded_file_paths == ["/tmp/old.nc", "/tmp/new.nc"]
+    assert host.single_calls == [
+        (
+            "/tmp/new.nc",
+            {
+                "clear_existing": False,
+                "append_metadata": True,
+            },
+        )
+    ]
+    assert host.multi_calls == []
+    assert host.titles[-1] == "xconv2 (test): 2 files"
+
+
+def test_on_file_selected_multi_mode_first_file_clears_placeholder() -> None:
+    class _DummyLoadHost:
+        def __init__(self) -> None:
+            self.file_open_mode = "multi"
+            self._loaded_file_paths: list[str] = []
+            self.base_window_title = "xconv2 (test)"
+            self.single_calls: list[tuple[str, dict[str, object]]] = []
+            self.titles: list[str] = []
+
+        def _load_selected_file(self, path: str, **kwargs: object) -> None:
+            self.single_calls.append((path, dict(kwargs)))
+
+        def setWindowTitle(self, title: str) -> None:
+            self.titles.append(title)
+
+    host = _DummyLoadHost()
+    CFVMain.on_file_selected(host, "/tmp/first.nc")
+
+    assert host._loaded_file_paths == ["/tmp/first.nc"]
+    assert host.single_calls == [
+        (
+            "/tmp/first.nc",
+            {
+                "clear_existing": True,
+                "append_metadata": False,
+            },
+        )
+    ]
+    assert host.titles[-1] == "xconv2 (test): 1 files"
+
+
 def test_load_selected_file_does_not_release_remote_session() -> None:
     class _DummyWindowNoRelease(_DummyWindow):
         def __init__(self) -> None:
@@ -176,6 +287,66 @@ def test_load_remote_selected_file_builds_control_task() -> None:
             },
         )
     ]
+
+
+def test_load_remote_selected_file_multi_mode_appends_without_clearing() -> None:
+    class _DummyRemoteAppendWindow(_DummyWindow):
+        def __init__(self) -> None:
+            super().__init__(
+                _remote_session_id="session-1",
+                _remote_descriptor_hash="hash-1",
+                _remote_descriptor={"protocol": "sftp"},
+            )
+            self.file_open_mode = "multi"
+            self._loaded_file_paths = ["ssh://host/data/first.nc"]
+            self.clear_calls = 0
+
+        def _clear_loaded_data_views(self) -> None:
+            self.clear_calls += 1
+
+    window = _DummyRemoteAppendWindow()
+
+    CFVMain._load_remote_selected_file(window, "ssh://host/data/second.nc", "/data/second.nc")
+
+    assert window.clear_calls == 0
+    assert window._pending_metadata_append is True
+    assert window._pending_metadata_source == "ssh://host/data/second.nc"
+    assert window.sent_control_tasks == [
+        (
+            "REMOTE_OPEN",
+            {
+                "session_id": "session-1",
+                "descriptor_hash": "hash-1",
+                "descriptor": {"protocol": "sftp"},
+                "uri": "ssh://host/data/second.nc",
+                "path": "/data/second.nc",
+            },
+        )
+    ]
+
+
+def test_load_remote_selected_file_multi_mode_skips_duplicate_uri() -> None:
+    class _DummyRemoteAppendWindow(_DummyWindow):
+        def __init__(self) -> None:
+            super().__init__(
+                _remote_session_id="session-1",
+                _remote_descriptor_hash="hash-1",
+                _remote_descriptor={"protocol": "sftp"},
+            )
+            self.file_open_mode = "multi"
+            self._loaded_file_paths = ["ssh://host/data/existing.nc"]
+            self.clear_calls = 0
+
+        def _clear_loaded_data_views(self) -> None:
+            self.clear_calls += 1
+
+    window = _DummyRemoteAppendWindow()
+
+    CFVMain._load_remote_selected_file(window, "ssh://host/data/existing.nc", "/data/existing.nc")
+
+    assert window.clear_calls == 0
+    assert window.sent_control_tasks == []
+    assert window.status.messages[-1] == "Remote file already loaded: ssh://host/data/existing.nc"
 
 
 def test_send_worker_control_task_writes_typed_headers() -> None:

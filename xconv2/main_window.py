@@ -33,6 +33,7 @@ from .cf_templates import (
     save_data_from_selection,
 )
 from .core_window import CFVCore
+from .xconv_cf_interface import parse_coordinate_subspace_commands
 # Remote-access helpers are imported lazily (inside the methods that use them)
 # so that p5rem/paramiko are not loaded at GUI startup.
 from .ui.dialogs import OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog
@@ -107,6 +108,10 @@ class CFVMain(CFVCore):
         self._pending_list_loop: QEventLoop | None = None
         self._pending_list_result: dict | None = None
         self._ssh_session_passwords: dict[str, str] = {}
+        self._selected_field_indices: list[int] = []
+        self._loaded_file_paths: list[str] = []
+        self._pending_metadata_append: bool = False
+        self._pending_metadata_source: str | None = None
         self._shutting_down: bool = False
 
         self.worker = QProcess()
@@ -141,18 +146,110 @@ class CFVMain(CFVCore):
 
     def on_file_selected(self, file_path: str) -> None:
         """Handle file selection by requesting worker metadata."""
-        self._load_selected_file(file_path)
+        normalized_path = str(Path(file_path).expanduser())
+        if getattr(self, "file_open_mode", "single") == "multi":
+            if normalized_path in self._loaded_file_paths:
+                self._show_status_message(f"File already loaded: {normalized_path}")
+                return
+
+            had_loaded_files = bool(self._loaded_file_paths)
+            self._loaded_file_paths.append(normalized_path)
+            refresh_menu = getattr(self, "_refresh_open_files_menu", None)
+            if callable(refresh_menu):
+                refresh_menu()
+            self._load_selected_file(
+                normalized_path,
+                clear_existing=not had_loaded_files,
+                append_metadata=had_loaded_files,
+            )
+            self.setWindowTitle(f"{self.base_window_title}: {len(self._loaded_file_paths)} files")
+            return
+
+        self._loaded_file_paths = [normalized_path]
+        refresh_menu = getattr(self, "_refresh_open_files_menu", None)
+        if callable(refresh_menu):
+            refresh_menu()
+        self._load_selected_file(normalized_path)
+
+    def on_files_selected(self, file_paths: list[str]) -> None:
+        """Handle multi-file selection by requesting combined worker metadata."""
+        normalized = [str(Path(path).expanduser()) for path in file_paths]
+        if not normalized:
+            return
+
+        if getattr(self, "file_open_mode", "single") == "multi":
+            for path in normalized:
+                if path not in self._loaded_file_paths:
+                    self._loaded_file_paths.append(path)
+
+            refresh_menu = getattr(self, "_refresh_open_files_menu", None)
+            if callable(refresh_menu):
+                refresh_menu()
+
+            self._load_selected_files(list(self._loaded_file_paths))
+            self.setWindowTitle(f"{self.base_window_title}: {len(self._loaded_file_paths)} files")
+            return
+
+        first = normalized[0]
+        self._loaded_file_paths = [first]
+        refresh_menu = getattr(self, "_refresh_open_files_menu", None)
+        if callable(refresh_menu):
+            refresh_menu()
+        self._load_selected_file(first)
 
     def on_field_clicked(self, item: QListWidgetItem) -> None:
         """Show selection details and request slider coordinates for the field."""
         super().on_field_clicked(item)
+
+        selected_items: list[QListWidgetItem] = []
+        selected_items_fn = getattr(self.field_list_widget, "selectedItems", None)
+        if callable(selected_items_fn):
+            selected_items = list(selected_items_fn())
+
+        if len(selected_items) > 1:
+            self._set_selection_panel_mode("multi")
+            self._selected_field_indices = [
+                idx for idx in (self.field_list_widget.row(x) for x in selected_items) if idx >= 0
+            ]
+            self.build_dynamic_sliders({})
+            self._show_status_message(
+                f"{len(selected_items)} fields selected. Enter coordinate bounds commands for multi-field operations."
+            )
+            return
+
+        self._set_selection_panel_mode("single")
         self._reset_ui_for_new_field_selection()
 
         field_index = self.field_list_widget.row(item)
         if field_index < 0:
             return
 
+        self._selected_field_indices = [field_index]
         self._request_coordinates_for_field(field_index, show_status=False)
+
+    def on_field_selection_changed(self) -> None:
+        """Track selected field indices to support mode-specific selection behavior."""
+        super().on_field_selection_changed()
+        selected_items = self.field_list_widget.selectedItems()
+        self._selected_field_indices = [
+            idx for idx in (self.field_list_widget.row(item) for item in selected_items) if idx >= 0
+        ]
+        if len(self._selected_field_indices) > 1:
+            self._set_selection_panel_mode("multi")
+
+    def _on_coordinate_bounds_input_changed(self) -> None:
+        """Validate command-based coordinate bounds as the user edits input."""
+        text = self._coordinate_subspace_command_text()
+        if not text:
+            return
+
+        try:
+            parse_coordinate_subspace_commands(text)
+        except ValueError as exc:
+            self._show_status_message(str(exc), is_error=True)
+            return
+
+        self._show_status_message("Coordinate bounds commands parsed successfully.")
 
     def _reset_ui_for_new_field_selection(self) -> None:
         """Clear stale error/loading UI state before handling a fresh field selection."""
@@ -222,7 +319,21 @@ class CFVMain(CFVCore):
                 if payload.get("ok"):
                     uri = str(payload.get("uri", ""))
                     if uri:
-                        self._set_window_title_for_file(uri)
+                        if getattr(self, "file_open_mode", "single") == "multi":
+                            if uri not in self._loaded_file_paths:
+                                self._loaded_file_paths.append(uri)
+                            refresh_menu = getattr(self, "_refresh_open_files_menu", None)
+                            if callable(refresh_menu):
+                                refresh_menu()
+                            self.setWindowTitle(
+                                f"{self.base_window_title}: {len(self._loaded_file_paths)} files"
+                            )
+                        else:
+                            self._loaded_file_paths = [uri]
+                            refresh_menu = getattr(self, "_refresh_open_files_menu", None)
+                            if callable(refresh_menu):
+                                refresh_menu()
+                            self._set_window_title_for_file(uri)
                         self._show_status_message(f"Loaded remote file: {uri}")
                 else:
                     error = str(payload.get("error") or "Remote open failed")
@@ -282,7 +393,15 @@ class CFVMain(CFVCore):
                         )
                         continue
                     logger.info("Received metadata for %d fields", len(metadata))
-                    self.populate_field_list(metadata)
+                    append = bool(getattr(self, "_pending_metadata_append", False))
+                    source_file = getattr(self, "_pending_metadata_source", None)
+                    self.populate_field_list(
+                        metadata,
+                        append=append,
+                        source_file=source_file,
+                    )
+                    self._pending_metadata_append = False
+                    self._pending_metadata_source = None
                 elif isinstance(metadata, dict):
                     logger.info("Received metadata for %d coordinates", len(metadata))
                     self.build_dynamic_sliders(metadata)
@@ -324,10 +443,19 @@ class CFVMain(CFVCore):
                 coords = pickle.loads(base64.b64decode(raw_payload))
                 metadata = self._normalize_coordinate_metadata(coords)
                 if metadata:
+                    set_mode = getattr(self, "_set_selection_panel_mode", None)
+                    if callable(set_mode):
+                        set_mode("single")
                     logger.info("Received coordinate metadata for %d sliders", len(metadata))
                     self.build_dynamic_sliders(metadata)
                 else:
+                    set_mode = getattr(self, "_set_selection_panel_mode", None)
+                    if callable(set_mode):
+                        set_mode("multi")
                     logger.warning("Received empty coordinate metadata payload")
+                    self._show_status_message(
+                        "No slider-friendly coordinates were found. Use coordinate bounds commands."
+                    )
 
             elif line.startswith("CONTOUR_RANGE:"):
                 raw_payload = line.split(":", 1)[1]
@@ -390,9 +518,18 @@ class CFVMain(CFVCore):
             self._set_plot_loading(False)
             self._clear_plot_canvas("Plot failed because the worker stopped.")
 
-    def _load_selected_file(self, file_path: str) -> None:
+    def _load_selected_file(
+        self,
+        file_path: str,
+        *,
+        clear_existing: bool = True,
+        append_metadata: bool = False,
+    ) -> None:
         """Load selected file in worker and publish field metadata."""
-        self._clear_loaded_data_views()
+        if clear_existing:
+            self._clear_loaded_data_views()
+        self._pending_metadata_append = append_metadata
+        self._pending_metadata_source = file_path
         self._show_status_message(f"Loading file: {file_path}")
         logger.info("Loading file in worker: %s", file_path)
 
@@ -405,13 +542,44 @@ class CFVMain(CFVCore):
         )
         self._send_worker_task(code)
 
+    def _load_selected_files(self, file_paths: list[str]) -> None:
+        """Load multiple selected files in worker and publish combined metadata."""
+        if not file_paths:
+            return
+
+        expanded_paths = [str(Path(path).expanduser()) for path in file_paths]
+        self._clear_loaded_data_views()
+        self._pending_metadata_append = False
+        self._pending_metadata_source = None
+        self._show_status_message(f"Loading {len(expanded_paths)} files")
+        logger.info("Loading %d files in worker", len(expanded_paths))
+
+        code = (
+            f"_cfview_file_path = {expanded_paths!r}\n"
+            "_cfview_field_index = None\n"
+            f"f = cf.read({expanded_paths!r})\n"
+            + field_list
+            + "send_to_gui('METADATA', fields)"
+        )
+        self._send_worker_task(code)
+
     def _load_remote_selected_file(self, uri: str, remote_path: str) -> None:
         """Load a selected remote file through the worker remote session pool."""
         if not self._remote_session_id or not self._remote_descriptor_hash or not self._remote_descriptor:
             self._show_status_message("Remote worker session is not initialized.", is_error=True)
             return
 
-        self._clear_loaded_data_views()
+        is_multi_mode = getattr(self, "file_open_mode", "single") == "multi"
+        append_metadata = is_multi_mode and bool(self._loaded_file_paths)
+
+        if is_multi_mode and uri in self._loaded_file_paths:
+            self._show_status_message(f"Remote file already loaded: {uri}")
+            return
+
+        if not append_metadata:
+            self._clear_loaded_data_views()
+        self._pending_metadata_append = append_metadata
+        self._pending_metadata_source = uri
         self._show_status_message(f"Loading remote file: {uri}")
         self._send_worker_control_task(
             "REMOTE_OPEN",
@@ -482,7 +650,8 @@ class CFVMain(CFVCore):
             QMessageBox.critical(self, "Remote configuration invalid", str(exc))
             return
 
-        self._clear_loaded_data_views()
+        if getattr(self, "file_open_mode", "single") != "multi":
+            self._clear_loaded_data_views()
 
         descriptor = spec_to_descriptor(spec, cache=config.get("cache") if isinstance(config, dict) else None)
         descriptor_hash = remote_descriptor_hash(descriptor)
@@ -615,7 +784,8 @@ class CFVMain(CFVCore):
             QMessageBox.critical(self, "Remote configuration invalid", str(exc))
             return
 
-        self._clear_loaded_data_views()
+        if getattr(self, "file_open_mode", "single") != "multi":
+            self._clear_loaded_data_views()
         descriptor = spec_to_descriptor(spec, cache=config.get("cache") if isinstance(config, dict) else None)
         descriptor_hash = remote_descriptor_hash(descriptor)
         self._last_remote_config = config
@@ -1633,6 +1803,38 @@ class CFVMain(CFVCore):
 
     def _build_plot_context(self) -> tuple[dict[str, tuple[object, object]], dict[str, str], str] | None:
         """Collect current selections/collapse state and infer plot type."""
+        if getattr(self, "selection_mode", "single") == "multi":
+            selected_field_indices = list(getattr(self, "_selected_field_indices", []))
+            if len(selected_field_indices) > 1:
+                self._show_status_message(
+                    "Multi-field plotting is not enabled yet. Keep fields selected for upcoming Field Ops.",
+                    is_error=True,
+                )
+                return None
+
+            command_text = self._coordinate_subspace_command_text()
+            if not command_text:
+                self._show_status_message(
+                    "Enter coordinate bounds commands before requesting a plot.",
+                    is_error=True,
+                )
+                return None
+
+            try:
+                selections = parse_coordinate_subspace_commands(command_text)
+            except ValueError as exc:
+                self._show_status_message(str(exc), is_error=True)
+                return None
+
+            if not selections:
+                self._show_status_message(
+                    "No coordinate bounds commands were parsed.",
+                    is_error=True,
+                )
+                return None
+
+            return selections, {}, "contour"
+
         if not self.controls:
             return None
 

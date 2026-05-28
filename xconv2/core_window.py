@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 from PySide6.QtCore import QProcess, QTimer, Qt, QUrl
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QButtonGroup,
     QCheckBox,
@@ -43,9 +44,11 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QStatusBar,
+    QStackedWidget,
     QSpinBox,
     QStyle,
     QSystemTrayIcon,
@@ -54,6 +57,7 @@ from PySide6.QtWidgets import (
     QToolButton,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from . import __version__
@@ -486,6 +490,14 @@ class CFVCore(QMainWindow):
         self._plot_pixmap_original: QPixmap | None = None
         self.current_selection_info_text = "No selection info available."
         self.slider_scroll_area: QScrollArea | None = None
+        self.selection_mode_stack: QStackedWidget | None = None
+        self.selection_mode: str = "single"
+        self.coordinate_bounds_input: QPlainTextEdit | None = None
+        self.file_open_mode: str = "single"
+        self.single_file_mode_radio: QRadioButton | None = None
+        self.multi_file_mode_radio: QRadioButton | None = None
+        self.open_files_button: QPushButton | None = None
+        self.open_files_menu: QMenu | None = None
         self.selection_info_toggle_button: QToolButton | None = None
         self._selection_info_visible = True
         self._selection_info_expanded_from_width: int | None = None
@@ -1381,16 +1393,143 @@ class CFVCore(QMainWindow):
 
     def _create_fields_frame(self) -> QGroupBox:
         """Create framed fields list section."""
-        frame = QGroupBox("Fields")
+        frame = QGroupBox()
         layout = QVBoxLayout(frame)
 
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(8)
+        fields_label = QLabel("Fields")
+        fields_label.setStyleSheet("font-weight: 600;")
+        header_row.addWidget(fields_label)
+        header_row.addStretch(1)
+
+        self.single_file_mode_radio = QRadioButton("single-file")
+        self.multi_file_mode_radio = QRadioButton("multi-file")
+        self.single_file_mode_radio.setChecked(True)
+        self.single_file_mode_radio.toggled.connect(
+            lambda checked: self._on_file_open_mode_changed("single", checked)
+        )
+        self.multi_file_mode_radio.toggled.connect(
+            lambda checked: self._on_file_open_mode_changed("multi", checked)
+        )
+
+        header_row.addWidget(self.single_file_mode_radio)
+        header_row.addWidget(self.multi_file_mode_radio)
+
+        self.open_files_button = self._create_open_files_button()
+        self.open_files_button.setVisible(False)
+        header_row.addWidget(self.open_files_button)
+        layout.addLayout(header_row)
+
         self.field_list_widget = QListWidget()
+        self.field_list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.field_list_widget.itemClicked.connect(self.on_field_clicked)
+        self.field_list_widget.itemSelectionChanged.connect(self.on_field_selection_changed)
         self._set_field_list_visible_rows(self._field_list_rows())
         self._set_field_list_hint("Open a file to see fields")
+        self._refresh_open_files_menu()
 
         layout.addWidget(self.field_list_widget)
         return frame
+
+    def _create_open_files_button(self) -> QPushButton:
+        """Create fixed-width Files dropdown button for currently loaded files."""
+        button = QPushButton()
+        button.setText("Files ")
+        button.setFlat(False)
+        button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+        text_width = button.fontMetrics().horizontalAdvance("Files ")
+        button.setFixedWidth(text_width + 30)
+
+        self.open_files_menu = QMenu(button)
+        button.setMenu(self.open_files_menu)
+        return button
+
+    def _refresh_open_files_menu(self) -> None:
+        """Refresh Files dropdown entries from currently loaded file paths."""
+        menu = getattr(self, "open_files_menu", None)
+        if menu is None:
+            return
+
+        menu.clear()
+
+        loaded = list(getattr(self, "_loaded_file_paths", []))
+        if not loaded:
+            empty_action = menu.addAction("No open files")
+            empty_action.setEnabled(False)
+            return
+
+        source_colors = getattr(self, "_field_source_color_by_path", None)
+        color_map = source_colors if isinstance(source_colors, dict) else {}
+
+        for path in loaded:
+            parsed = urlparse(path)
+            filename = Path(parsed.path).name if parsed.scheme else Path(path).name
+            display = filename or path
+            color = color_map.get(path)
+            menu.addAction(self._build_open_file_menu_entry(menu, display, path, color))
+
+    def _build_open_file_menu_entry(
+        self,
+        menu: QMenu,
+        display: str,
+        full_path: str,
+        color: object,
+    ) -> QWidgetAction:
+        """Create a non-interactive dropdown row for an open file entry."""
+        action = QWidgetAction(menu)
+        row = QWidget(menu)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(0)
+
+        label = QLabel(display)
+        label.setToolTip(full_path)
+        label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        if hasattr(color, "name"):
+            label.setStyleSheet(
+                f"QLabel {{ background-color: {color.name()}; padding: 2px 6px; border-radius: 3px; }}"
+            )
+        else:
+            label.setStyleSheet("QLabel { padding: 2px 6px; }")
+
+        layout.addWidget(label)
+        action.setDefaultWidget(row)
+        return action
+
+    def _on_file_open_mode_changed(self, mode: str, checked: bool) -> None:
+        """Update file-open mode from radio-button toggles."""
+        if not checked:
+            return
+        self.file_open_mode = "multi" if mode == "multi" else "single"
+        self._sync_open_files_button_visibility()
+
+    def _set_file_open_mode(self, mode: str) -> None:
+        """Set file-open mode and synchronize radio-button state."""
+        normalized_mode = "multi" if mode == "multi" else "single"
+        self.file_open_mode = normalized_mode
+
+        single_radio = getattr(self, "single_file_mode_radio", None)
+        multi_radio = getattr(self, "multi_file_mode_radio", None)
+        if single_radio is not None:
+            single_radio.blockSignals(True)
+            single_radio.setChecked(normalized_mode == "single")
+            single_radio.blockSignals(False)
+        if multi_radio is not None:
+            multi_radio.blockSignals(True)
+            multi_radio.setChecked(normalized_mode == "multi")
+            multi_radio.blockSignals(False)
+
+        self._sync_open_files_button_visibility()
+
+    def _sync_open_files_button_visibility(self) -> None:
+        """Show the Files dropdown only when multi-file mode is active."""
+        button = getattr(self, "open_files_button", None)
+        if button is not None:
+            button.setVisible(getattr(self, "file_open_mode", "single") == "multi")
 
     def _create_selection_frame(self) -> QGroupBox:
         """Create framed selection details and slider controls section."""
@@ -1411,6 +1550,7 @@ class CFVCore(QMainWindow):
         reset_button = QPushButton("Reset all sliders")
         reset_button.setToolTip("Reset all range sliders to full coordinate extent")
         reset_button.clicked.connect(self._reset_all_sliders)
+        self.selection_reset_button = reset_button
         self.selection_info_toggle_button = QToolButton()
         self.selection_info_toggle_button.setAutoRaise(True)
         self.selection_info_toggle_button.clicked.connect(self._toggle_selection_info_panel)
@@ -1421,8 +1561,71 @@ class CFVCore(QMainWindow):
         controls_row.addWidget(self.selection_info_toggle_button)
 
         layout.addLayout(controls_row)
-        layout.addWidget(self._create_slider_scroll_area())
+
+        self.selection_mode_stack = QStackedWidget()
+        self.selection_mode_stack.addWidget(self._create_slider_scroll_area())
+        self.selection_mode_stack.addWidget(self._create_multi_field_bounds_panel())
+        layout.addWidget(self.selection_mode_stack)
+        self._set_selection_panel_mode("single")
         return frame
+
+    def _create_multi_field_bounds_panel(self) -> QWidget:
+        """Create text-entry panel for coordinate subspace commands."""
+        panel = QWidget()
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(6, 0, 6, 0)
+        panel_layout.setSpacing(4)
+
+        hint = QLabel(
+            "Enter one coordinate bounds command per line.\n"
+            "Formats: coord=lo:hi, coord: lo,hi, or coord lo hi"
+        )
+        hint.setWordWrap(True)
+
+        self.coordinate_bounds_input = QPlainTextEdit()
+        self.coordinate_bounds_input.setPlaceholderText(
+            "time=2000-01-01:2000-12-31\nlatitude=-20:20\nlongitude=30,120"
+        )
+        self.coordinate_bounds_input.textChanged.connect(self._on_coordinate_bounds_input_changed)
+
+        panel_layout.addWidget(hint)
+        panel_layout.addWidget(self.coordinate_bounds_input)
+        return panel
+
+    def _set_selection_panel_mode(self, mode: str) -> None:
+        """Switch selection panel between slider and bounds-entry modes."""
+        normalized_mode = "multi" if mode == "multi" else "single"
+        self.selection_mode = normalized_mode
+
+        selection_mode_stack = getattr(self, "selection_mode_stack", None)
+        if selection_mode_stack is not None:
+            selection_mode_stack.setCurrentIndex(1 if normalized_mode == "multi" else 0)
+
+        reset_button = getattr(self, "selection_reset_button", None)
+        if reset_button is not None:
+            if normalized_mode == "multi":
+                reset_button.setText("Clear bounds")
+                reset_button.setToolTip("Clear coordinate bounds commands")
+            else:
+                reset_button.setText("Reset all sliders")
+                reset_button.setToolTip("Reset all range sliders to full coordinate extent")
+
+    def _coordinate_subspace_command_text(self) -> str:
+        """Return raw coordinate-bounds command text from the selection panel."""
+        if self.coordinate_bounds_input is None:
+            return ""
+        return self.coordinate_bounds_input.toPlainText().strip()
+
+    def _clear_coordinate_subspace_commands(self) -> None:
+        """Clear coordinate-bounds command text without triggering parser side effects."""
+        if self.coordinate_bounds_input is None:
+            return
+        self.coordinate_bounds_input.blockSignals(True)
+        self.coordinate_bounds_input.clear()
+        self.coordinate_bounds_input.blockSignals(False)
+
+    def _on_coordinate_bounds_input_changed(self) -> None:
+        """Hook for worker-backed windows when coordinate bounds text changes."""
 
     def _create_field_list_area(self) -> QWidget:
         """Backward-compat shim kept for now; use framed builders above."""
@@ -1454,6 +1657,10 @@ class CFVCore(QMainWindow):
 
     def _reset_all_sliders(self) -> None:
         """Reset all slider ranges to full extent and refresh summary state."""
+        if getattr(self, "selection_mode", "single") == "multi":
+            self._clear_coordinate_subspace_commands()
+            self._on_coordinate_bounds_input_changed()
+            return
         self.selection_controller.reset_all_sliders()
 
     def _set_field_list_hint(self, text: str) -> None:
@@ -1616,9 +1823,19 @@ class CFVCore(QMainWindow):
         self.status.setStyleSheet(style)
         self.status.showMessage(message)
 
-    def populate_field_list(self, fields: Sequence[object]) -> None:
+    def populate_field_list(
+        self,
+        fields: Sequence[object],
+        *,
+        append: bool = False,
+        source_file: str | None = None,
+    ) -> None:
         """Populate the field list UI from worker metadata."""
-        self.field_metadata_controller.populate_field_list(fields)
+        self.field_metadata_controller.populate_field_list(
+            fields,
+            append=append,
+            source_file=source_file,
+        )
 
     def on_field_clicked(self, item: QListWidgetItem) -> None:
         """Display selected field details in the output panel."""
@@ -1648,6 +1865,12 @@ class CFVCore(QMainWindow):
         """Clear field, slider, details, and plot UI for a fresh dataset open."""
         self.current_file_path = None
         self.setWindowTitle(self.base_window_title)
+        set_mode = getattr(self, "_set_selection_panel_mode", None)
+        if callable(set_mode):
+            set_mode("single")
+        clear_bounds = getattr(self, "_clear_coordinate_subspace_commands", None)
+        if callable(clear_bounds):
+            clear_bounds()
         self.current_selection_info_text = "No selection info available."
         info_widget = getattr(self, "plot_info_output", None)
         if info_widget is not None:
@@ -1679,6 +1902,24 @@ class CFVCore(QMainWindow):
         logger.info("Selected file: %s", file_path)
         self._record_recent_file(file_path)
         self.on_file_selected(file_path)
+
+    def _choose_files(self) -> None:
+        """Select multiple files and dispatch to worker-backed loaders."""
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Data Files",
+            "",
+            "NetCDF files (*.nc *.nc4 *.cdf);;All files (*)",
+        )
+        if not file_paths:
+            return
+
+        for file_path in file_paths:
+            self._record_recent_file(file_path)
+
+        self.setWindowTitle(f"{self.base_window_title}: {len(file_paths)} files")
+        logger.info("Selected %d files", len(file_paths))
+        self.on_files_selected(file_paths)
 
 
     def _choose_folder(self) -> None:
@@ -1840,6 +2081,21 @@ class CFVCore(QMainWindow):
     def on_file_selected(self, file_path: str) -> None:
         """Hook for worker-backed implementations after file selection."""
         logger.debug("File selected in core UI: %s", file_path)
+
+    def on_files_selected(self, file_paths: Sequence[str]) -> None:
+        """Hook for worker-backed implementations after multi-file selection."""
+        logger.debug("Files selected in core UI: %d", len(file_paths))
+
+    def on_field_selection_changed(self) -> None:
+        """Update detail panel when list selection changes."""
+        selected_items = self.field_list_widget.selectedItems()
+        if len(selected_items) == 1:
+            self.field_metadata_controller.on_field_clicked(selected_items[0])
+        elif len(selected_items) > 1:
+            self.field_metadata_controller.set_selection_info_text(
+                f"{len(selected_items)} fields selected.\n"
+                "Use coordinate bounds mode for multi-field operations."
+            )
 
     def _request_plot_update(self) -> None:
         """Hook for worker-backed implementations."""

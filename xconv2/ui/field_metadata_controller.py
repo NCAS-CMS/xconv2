@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Mapping, Sequence
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QDialog,
     QHeaderView,
@@ -170,9 +171,21 @@ class FieldMetadataController:
         self.host.field_list_widget.setMinimumHeight(height)
         self.host.field_list_widget.setMaximumHeight(height)
 
-    def populate_field_list(self, fields: Sequence[object]) -> None:
+    def populate_field_list(
+        self,
+        fields: Sequence[object],
+        *,
+        append: bool = False,
+        source_file: str | None = None,
+    ) -> None:
         """Populate the field list UI from worker metadata."""
-        self.host.field_list_widget.clear()
+        if not append:
+            self.host.field_list_widget.clear()
+            setattr(self.host, "_field_source_color_by_path", {})
+            setattr(self.host, "_field_source_color_index", 0)
+
+        color = self._source_color(source_file) if source_file else None
+        added_count = 0
 
         for field in fields:
             if not isinstance(field, Mapping):
@@ -190,14 +203,56 @@ class FieldMetadataController:
             item = QListWidgetItem(identity)
             item.setData(Qt.UserRole, detail)
             item.setData(Qt.UserRole + 1, properties)
+            if source_file:
+                item.setData(Qt.UserRole + 2, source_file)
+            if color is not None:
+                item.setBackground(color)
             self.host.field_list_widget.addItem(item)
+            added_count += 1
 
         self.set_field_list_visible_rows(self.host._field_list_rows())
-        self.set_selection_info_text(
-            f"Loaded {self.host.field_list_widget.count()} fields.\n"
-            "Click an entry to show field details."
-        )
+        total_count = self.host.field_list_widget.count()
+        if append:
+            source_note = f" from {Path(source_file).name}" if source_file else ""
+            self.set_selection_info_text(
+                f"Added {added_count} fields{source_note}. Total loaded: {total_count}.\n"
+                "Click an entry to show field details."
+            )
+        else:
+            self.set_selection_info_text(
+                f"Loaded {total_count} fields.\n"
+                "Click an entry to show field details."
+            )
+
+        refresh_menu = getattr(self.host, "_refresh_open_files_menu", None)
+        if callable(refresh_menu):
+            refresh_menu()
         logger.info("Displayed %d fields in list", self.host.field_list_widget.count())
+
+    def _source_color(self, source_file: str) -> QColor:
+        """Return a stable light tint for each source file in multi-file mode."""
+        color_by_path = getattr(self.host, "_field_source_color_by_path", None)
+        if not isinstance(color_by_path, dict):
+            color_by_path = {}
+            setattr(self.host, "_field_source_color_by_path", color_by_path)
+
+        existing = color_by_path.get(source_file)
+        if isinstance(existing, QColor):
+            return existing
+
+        palette = (
+            QColor("#f6f8d7"),
+            QColor("#d9f0ff"),
+            QColor("#ffe7d6"),
+            QColor("#e6defa"),
+            QColor("#d7f6ea"),
+        )
+
+        color_index = int(getattr(self.host, "_field_source_color_index", 0))
+        color = palette[color_index % len(palette)]
+        setattr(self.host, "_field_source_color_index", color_index + 1)
+        color_by_path[source_file] = color
+        return color
 
     def on_field_clicked(self, item: QListWidgetItem) -> None:
         """Display selected field details in the output panel."""
