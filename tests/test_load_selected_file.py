@@ -32,6 +32,9 @@ class _DummyWindow:
     _remote_descriptor_hash: str | None = None
     _remote_descriptor: dict[str, object] | None = None
 
+    def _clear_loaded_data_views(self) -> None:
+        pass
+
     def _show_status_message(self, message: str, is_error: bool = False) -> None:
         _ = is_error
         self.status.showMessage(message)
