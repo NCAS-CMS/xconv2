@@ -68,7 +68,7 @@ from .ui.menu_controller import MenuController
 from .ui.plot_view_controller import PlotViewController
 from .ui.selection_controller import SelectionController
 from .ui.dialogs import OpenGlobDialog, OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog, create_info_button
-from .tooltips import CACHE_MANAGEMENT, SELECTION_HELP
+from .tooltips import CACHE_MANAGEMENT, FIELDS_HELP, SELECTION_HELP
 # RemoteFileNavigatorDialog is imported lazily (inside the methods that open it)
 # to avoid loading p5rem/paramiko at GUI startup.
 from .ui.settings_store import SettingsStore
@@ -1402,6 +1402,12 @@ class CFVCore(QMainWindow):
         fields_label = QLabel("Fields")
         fields_label.setStyleSheet("font-weight: 600;")
         header_row.addWidget(fields_label)
+        fields_info_button = create_info_button(
+            self,
+            *FIELDS_HELP,
+            icon_size=18,
+        )
+        header_row.addWidget(fields_info_button)
         header_row.addStretch(1)
 
         self.single_file_mode_radio = QRadioButton("single-file")
@@ -1426,6 +1432,8 @@ class CFVCore(QMainWindow):
         self.field_list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.field_list_widget.itemClicked.connect(self.on_field_clicked)
         self.field_list_widget.itemSelectionChanged.connect(self.on_field_selection_changed)
+        self.field_list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.field_list_widget.customContextMenuRequested.connect(self._show_field_list_context_menu)
         self._set_field_list_visible_rows(self._field_list_rows())
         self._set_field_list_hint("Open a file to see fields")
         self._refresh_open_files_menu()
@@ -1533,18 +1541,31 @@ class CFVCore(QMainWindow):
 
     def _create_selection_frame(self) -> QGroupBox:
         """Create framed selection details and slider controls section."""
-        frame = QGroupBox("Selection")
+        frame = QGroupBox()
         layout = QVBoxLayout(frame)
+        layout.setContentsMargins(9, 6, 9, 9)
+        layout.setSpacing(4)
 
-        controls_row = QHBoxLayout()
-        
-        # Info button for selection help
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(6)
+        selection_label = QLabel("Selection")
+        selection_label.setStyleSheet("font-weight: 600;")
+        header_row.addWidget(selection_label)
+
         selection_info_button = create_info_button(
             self,
             *SELECTION_HELP,
-            icon_size=18
+            icon_size=18,
         )
-        
+        header_row.addWidget(selection_info_button)
+        header_row.addStretch(1)
+        layout.addLayout(header_row)
+
+        controls_row = QHBoxLayout()
+        controls_row.setContentsMargins(0, 0, 0, 0)
+        controls_row.setSpacing(6)
+
         properties_button = QPushButton("Properties")
         properties_button.clicked.connect(self._show_selection_properties)
         reset_button = QPushButton("Reset all sliders")
@@ -1554,7 +1575,6 @@ class CFVCore(QMainWindow):
         self.selection_info_toggle_button = QToolButton()
         self.selection_info_toggle_button.setAutoRaise(True)
         self.selection_info_toggle_button.clicked.connect(self._toggle_selection_info_panel)
-        controls_row.addWidget(selection_info_button)
         controls_row.addWidget(properties_button)
         controls_row.addWidget(reset_button)
         controls_row.addStretch(1)
@@ -1829,12 +1849,14 @@ class CFVCore(QMainWindow):
         *,
         append: bool = False,
         source_file: str | None = None,
+        generated: bool = False,
     ) -> None:
         """Populate the field list UI from worker metadata."""
         self.field_metadata_controller.populate_field_list(
             fields,
             append=append,
             source_file=source_file,
+            generated=generated,
         )
 
     def on_field_clicked(self, item: QListWidgetItem) -> None:
@@ -1942,6 +1964,31 @@ class CFVCore(QMainWindow):
             "Not implemented",
             f"{capability} is not implemented yet.",
         )
+
+    def _show_field_list_context_menu(self, pos) -> None:
+        """Show context actions for the field list."""
+        if self.field_list_widget is None:
+            return
+
+        item = self.field_list_widget.itemAt(pos)
+        if item is not None and not item.isSelected():
+            self.field_list_widget.clearSelection()
+            item.setSelected(True)
+            self.field_list_widget.setCurrentItem(item)
+
+        selected_items = self.field_list_widget.selectedItems()
+        if not selected_items:
+            return
+
+        menu = QMenu(self.field_list_widget)
+        remove_action = menu.addAction("Remove selected field(s)")
+        chosen = menu.exec(self.field_list_widget.mapToGlobal(pos))
+        if chosen == remove_action:
+            self._remove_selected_fields()
+
+    def _remove_selected_fields(self) -> None:
+        """Remove selected fields from the current list (worker-backed windows override)."""
+        self._show_not_implemented_dialog("Remove selected fields")
 
     def _field_ops_add_bounds(self) -> None:
         """Create missing dimension-coordinate bounds on the selected field."""

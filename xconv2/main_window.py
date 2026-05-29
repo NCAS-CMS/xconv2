@@ -24,7 +24,7 @@ import sys
 import psutil
 
 from PySide6.QtCore import QEventLoop, QProcess, QTimer, Qt
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QFontDatabase
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QInputDialog, QLineEdit, QListWidgetItem, QMessageBox
 
 from .cf_templates import (
@@ -33,6 +33,7 @@ from .cf_templates import (
     coordinate_list,
     field_list,
     plot_from_selection,
+    remove_selected_fields,
     save_data_from_selection,
     unary_xy_field_operation,
 )
@@ -97,7 +98,9 @@ class CFVMain(CFVCore):
     def __init__(self) -> None:
         super().__init__()
         self._memory_status_label = QLabel("Mem: --")
-        self._memory_status_label.setStyleSheet("font-family: monospace; font-size: 10px;")
+        fixed_font = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+        fixed_font.setPointSize(10)
+        self._memory_status_label.setFont(fixed_font)
         self._memory_status_timer = QTimer(self)
         self._memory_status_timer.setInterval(1000)
         self._memory_status_timer.timeout.connect(self._update_memory_status)
@@ -435,6 +438,7 @@ class CFVMain(CFVCore):
                         metadata,
                         append=True,
                         source_file=getattr(self, "_pending_field_op_source", None),
+                        generated=True,
                     )
                 else:
                     logger.warning("Unexpected METADATA_APPEND payload type: %s", type(metadata).__name__)
@@ -1824,6 +1828,45 @@ class CFVMain(CFVCore):
     def _field_ops_maths_laplacian(self) -> None:
         """Create and append laplacian field via cf.Field.laplacian_xy."""
         self._run_unary_xy_field_operation("Laplacian", "laplacian")
+
+    def _remove_selected_fields(self) -> None:
+        """Remove selected fields from both the UI list and worker field list."""
+        selected_items = list(self.field_list_widget.selectedItems())
+        if not selected_items:
+            self._show_status_message("Select one or more fields to remove.", is_error=True)
+            return
+
+        indices = sorted(
+            {
+                idx
+                for idx in (self.field_list_widget.row(item) for item in selected_items)
+                if idx >= 0
+            },
+            reverse=True,
+        )
+        if not indices:
+            return
+
+        self._send_worker_task(remove_selected_fields(list(reversed(indices))), emit_image=False)
+
+        for idx in indices:
+            _ = self.field_list_widget.takeItem(idx)
+
+        self._selected_field_indices = []
+        remaining = self.field_list_widget.count()
+        if remaining <= 0:
+            self._set_field_list_hint("Open a file to see fields")
+            self.build_dynamic_sliders({})
+            self._show_status_message("Removed all fields.")
+            return
+
+        next_index = min(indices[-1], remaining - 1)
+        next_item = self.field_list_widget.item(next_index)
+        if next_item is not None:
+            self.field_list_widget.setCurrentItem(next_item)
+            self.on_field_clicked(next_item)
+
+        self._show_status_message(f"Removed {len(indices)} field(s).")
 
     def _normalize_coordinate_metadata(self, payload: object) -> dict[str, dict[str, object]]:
         """Normalize worker coordinate payload into slider metadata mapping."""

@@ -106,6 +106,17 @@ def add_dimension_coordinate_bounds(index: int) -> str:
     ).lstrip()
 
 
+def remove_selected_fields(indices: list[int]) -> str:
+    """Generate worker code that removes selected fields from the worker list."""
+    return textwrap.dedent(
+        f"""
+        _cfview_remove_indices = {indices!r}
+        _cfview_removed_count = remove_fields_by_index(f, _cfview_remove_indices)
+        send_to_gui(f"STATUS:Removed {{_cfview_removed_count}} field(s).") #omit4save
+        """
+    ).lstrip()
+
+
 def plot_from_selection(
     selections: dict[str, tuple[object, object]],
     collapse_by_coord: dict[str, str],

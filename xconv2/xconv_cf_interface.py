@@ -27,6 +27,7 @@ __all__ = [
     "field_info",
     "coordinate_info",
     "parse_coordinate_subspace_commands",
+    "remove_fields_by_index",
     "add_dimension_coordinate_bounds",
     "append_unary_xy_field_operation",
     "get_data_for_plotting",
@@ -341,6 +342,20 @@ def append_unary_xy_field_operation(
         fields.append(new_field)
 
     return field_info(new_fields)
+
+
+def remove_fields_by_index(fields: list, indices: list[int]) -> int:
+    """Remove selected field indices in-place and return count removed."""
+    if not indices:
+        return 0
+
+    removed = 0
+    for idx in sorted(set(int(i) for i in indices), reverse=True):
+        if 0 <= idx < len(fields):
+            del fields[idx]
+            removed += 1
+
+    return removed
 
 
 def add_dimension_coordinate_bounds(

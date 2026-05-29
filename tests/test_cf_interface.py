@@ -11,6 +11,7 @@ from xconv2.xconv_cf_interface import (
     field_info,
     get_data_for_plotting,
     parse_coordinate_subspace_commands,
+    remove_fields_by_index,
     run_contour_plot,
     run_line_plot,
     save_selected_field_data,
@@ -382,6 +383,24 @@ def test_add_dimension_coordinate_bounds_updates_missing_bounds() -> None:
 def test_add_dimension_coordinate_bounds_requires_valid_index() -> None:
     with pytest.raises(IndexError, match="add_bounds"):
         add_dimension_coordinate_bounds([], 0)
+
+
+def test_remove_fields_by_index_removes_descending() -> None:
+    fields = ["a", "b", "c", "d"]
+
+    removed = remove_fields_by_index(fields, [1, 3])
+
+    assert removed == 2
+    assert fields == ["a", "c"]
+
+
+def test_remove_fields_by_index_ignores_out_of_range() -> None:
+    fields = ["a", "b"]
+
+    removed = remove_fields_by_index(fields, [99, -1, 1])
+
+    assert removed == 1
+    assert fields == ["a"]
 
 
 def test_parse_coordinate_subspace_commands_accepts_multiple_formats() -> None:

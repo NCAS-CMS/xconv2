@@ -515,6 +515,71 @@ def test_field_ops_add_bounds_builds_worker_task_for_selected_field() -> None:
     assert "send_to_gui('METADATA', metadata_rows)" in code
 
 
+def test_remove_selected_fields_updates_ui_and_sends_worker_task() -> None:
+    class _DummyItem:
+        def __init__(self, idx: int) -> None:
+            self.idx = idx
+
+    class _DummyFieldListWidget:
+        def __init__(self) -> None:
+            self.items = [_DummyItem(0), _DummyItem(1), _DummyItem(2)]
+            self.current_item: _DummyItem | None = None
+
+        def selectedItems(self):
+            return [self.items[0], self.items[2]]
+
+        def row(self, item) -> int:
+            return self.items.index(item)
+
+        def takeItem(self, index: int):
+            self.items.pop(index)
+
+        def count(self) -> int:
+            return len(self.items)
+
+        def item(self, index: int):
+            return self.items[index]
+
+        def setCurrentItem(self, item) -> None:
+            self.current_item = item
+
+    class _DummyMain:
+        def __init__(self) -> None:
+            self.field_list_widget = _DummyFieldListWidget()
+            self.sent_tasks: list[tuple[str, bool]] = []
+            self._selected_field_indices = [0, 2]
+            self.status_messages: list[str] = []
+            self.clicked: list[object] = []
+
+        def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
+            _ = save_code_path
+            self.sent_tasks.append((code, emit_image))
+
+        def _set_field_list_hint(self, text: str) -> None:
+            _ = text
+
+        def build_dynamic_sliders(self, metadata: dict[str, object]) -> None:
+            _ = metadata
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            _ = is_error
+            self.status_messages.append(message)
+
+        def on_field_clicked(self, item) -> None:
+            self.clicked.append(item)
+
+    host = _DummyMain()
+
+    CFVMain._remove_selected_fields(host)
+
+    assert len(host.sent_tasks) == 1
+    code, emit_image = host.sent_tasks[0]
+    assert emit_image is False
+    assert "remove_fields_by_index" in code
+    assert host.field_list_widget.count() == 1
+    assert host.status_messages[-1] == "Removed 2 field(s)."
+
+
 def test_update_memory_status_formats_app_and_worker_rss(monkeypatch: pytest.MonkeyPatch) -> None:
     class _FakeProcess:
         def __init__(self, pid: int) -> None:

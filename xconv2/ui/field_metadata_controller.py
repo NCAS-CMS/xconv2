@@ -177,6 +177,7 @@ class FieldMetadataController:
         *,
         append: bool = False,
         source_file: str | None = None,
+        generated: bool = False,
     ) -> None:
         """Populate the field list UI from worker metadata."""
         if not append:
@@ -184,7 +185,7 @@ class FieldMetadataController:
             setattr(self.host, "_field_source_color_by_path", {})
             setattr(self.host, "_field_source_color_index", 0)
 
-        color = self._source_color(source_file) if source_file else None
+        color = QColor("#ffffff") if generated else (self._source_color(source_file) if source_file else None)
         added_count = 0
 
         for field in fields:
@@ -203,7 +204,7 @@ class FieldMetadataController:
             item = QListWidgetItem(identity)
             item.setData(Qt.UserRole, detail)
             item.setData(Qt.UserRole + 1, properties)
-            if source_file:
+            if source_file and not generated:
                 item.setData(Qt.UserRole + 2, source_file)
             if color is not None:
                 item.setBackground(color)
@@ -213,7 +214,7 @@ class FieldMetadataController:
         self.set_field_list_visible_rows(self.host._field_list_rows())
         total_count = self.host.field_list_widget.count()
         if append:
-            source_note = f" from {Path(source_file).name}" if source_file else ""
+            source_note = f" from {Path(source_file).name}" if (source_file and not generated) else ""
             self.set_selection_info_text(
                 f"Added {added_count} fields{source_note}. Total loaded: {total_count}.\n"
                 "Click an entry to show field details."
