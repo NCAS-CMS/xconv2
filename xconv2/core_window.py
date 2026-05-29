@@ -2018,6 +2018,10 @@ class CFVCore(QMainWindow):
         """Placeholder action for Field Ops -> Maths -> Moving Window."""
         self._show_not_implemented_dialog("Field Ops: Maths -> Moving Window")
 
+    def _file_ops_save_selected(self) -> None:
+        """Placeholder action for File Ops -> Save Selected."""
+        self._show_not_implemented_dialog("File Ops: Save Selected")
+
     def _choose_glob(self) -> None:
         """Open files using a user-provided local glob expression."""
         initial_directory = str(Path.home())

@@ -580,6 +580,81 @@ def test_remove_selected_fields_updates_ui_and_sends_worker_task() -> None:
     assert host.status_messages[-1] == "Removed 2 field(s)."
 
 
+def test_file_ops_save_selected_builds_worker_task(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _DummyItem:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def text(self) -> str:
+            return self._text
+
+        def data(self, _role: object):
+            return ""
+
+    class _DummyFieldListWidget:
+        def __init__(self) -> None:
+            self._items = [_DummyItem("a"), _DummyItem("b"), _DummyItem("c")]
+
+        def selectedItems(self):
+            return [self._items[0], self._items[2]]
+
+        def row(self, item) -> int:
+            return self._items.index(item)
+
+    class _AcceptedDialog:
+        def __init__(
+            self,
+            _parent,
+            *,
+            selected_rows: list[dict[str, object]],
+            default_destination: str,
+            default_output_filename: str,
+        ) -> None:
+            assert [str(row["identity"]) for row in selected_rows] == ["a", "c"]
+            self.output_format = "zarr"
+            self.destination_folder = "/tmp"
+            self.output_filename = "custom_name"
+            self.output_chunk_shapes = ["(10, 20)", "(5, 5)"]
+            assert default_destination == "/tmp/default-save"
+            assert default_output_filename == "cfv_plot_selected.nc"
+
+        def exec(self) -> int:
+            return 1
+
+    class _DummyMain:
+        def __init__(self) -> None:
+            self.field_list_widget = _DummyFieldListWidget()
+            self._settings = {"last_save_data_dir": "/tmp/default-save"}
+            self.remembered: list[tuple[str, str]] = []
+            self.sent: list[tuple[str, bool]] = []
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            raise AssertionError(f"unexpected status: {message} error={is_error}")
+
+        def _default_plot_filename(self) -> str:
+            return "cfv_plot"
+
+        def _remember_last_save_dir(self, key: str, path: str) -> None:
+            self.remembered.append((key, path))
+
+        def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
+            _ = save_code_path
+            self.sent.append((code, emit_image))
+
+    monkeypatch.setattr(main_window, "SaveSelectedFieldsDialog", _AcceptedDialog)
+    host = _DummyMain()
+
+    CFVMain._file_ops_save_selected(host)
+
+    assert host.remembered == [("last_save_data_dir", "/tmp/custom_name.zarr")]
+    assert len(host.sent) == 1
+    code, emit_image = host.sent[0]
+    assert emit_image is False
+    assert "save_selected_fields(" in code
+    assert "_cfview_output_format = 'zarr'" in code
+    assert "_cfview_output_chunk_by_index = {0: '(10, 20)', 2: '(5, 5)'}" in code
+
+
 def test_update_memory_status_formats_app_and_worker_rss(monkeypatch: pytest.MonkeyPatch) -> None:
     class _FakeProcess:
         def __init__(self, pid: int) -> None:
@@ -953,7 +1028,7 @@ def test_open_remote_from_config_keeps_existing_session_and_clears_loaded_ui(
             return None
 
         def exec(self) -> int:
-            return QDialog.Rejected
+            return 0
 
     monkeypatch.setattr(_remote_file_nav_mod, "RemoteLoginLogDialog", _FakeLogDialog)
     monkeypatch.setattr(_remote_file_nav_mod, "RemoteFileNavigatorDialog", _FakeNavigator)

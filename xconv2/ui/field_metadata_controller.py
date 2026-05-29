@@ -198,12 +198,14 @@ class FieldMetadataController:
             identity = str(field.get("identity", ""))
             detail = str(field.get("detail", identity))
             properties = field.get("properties", {})
+            chunk_shape = str(field.get("chunk_shape", ""))
             if not isinstance(properties, Mapping):
                 raise TypeError("Field metadata 'properties' must be a mapping")
 
             item = QListWidgetItem(identity)
             item.setData(Qt.UserRole, detail)
             item.setData(Qt.UserRole + 1, properties)
+            item.setData(Qt.UserRole + 3, chunk_shape)
             if source_file and not generated:
                 item.setData(Qt.UserRole + 2, source_file)
             if color is not None:

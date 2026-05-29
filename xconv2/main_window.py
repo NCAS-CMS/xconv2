@@ -35,13 +35,14 @@ from .cf_templates import (
     plot_from_selection,
     remove_selected_fields,
     save_data_from_selection,
+    save_selected_fields_task,
     unary_xy_field_operation,
 )
 from .core_window import CFVCore
 from .xconv_cf_interface import parse_coordinate_subspace_commands
 # Remote-access helpers are imported lazily (inside the methods that use them)
 # so that p5rem/paramiko are not loaded at GUI startup.
-from .ui.dialogs import OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog
+from .ui.dialogs import OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog, SaveSelectedFieldsDialog
 
 logger = logging.getLogger(__name__)
 
@@ -1867,6 +1868,80 @@ class CFVMain(CFVCore):
             self.on_field_clicked(next_item)
 
         self._show_status_message(f"Removed {len(indices)} field(s).")
+
+    def _file_ops_save_selected(self) -> None:
+        """Show save-selected dialog and dispatch worker save task."""
+        selected_items = list(self.field_list_widget.selectedItems())
+        if not selected_items:
+            self._show_status_message("Select one or more fields to save.", is_error=True)
+            return
+
+        selected_indices = sorted(
+            {
+                idx
+                for idx in (self.field_list_widget.row(item) for item in selected_items)
+                if idx >= 0
+            }
+        )
+        if not selected_indices:
+            self._show_status_message("No valid selected fields to save.", is_error=True)
+            return
+
+        item_by_index = {
+            self.field_list_widget.row(item): item
+            for item in selected_items
+            if self.field_list_widget.row(item) >= 0
+        }
+        selected_rows: list[dict[str, object]] = []
+        for idx in selected_indices:
+            item = item_by_index.get(idx)
+            if item is None:
+                continue
+            selected_rows.append(
+                {
+                    "index": idx,
+                    "identity": str(item.text()),
+                    "chunk_shape": str(item.data(Qt.UserRole + 3) or ""),
+                }
+            )
+
+        if not selected_rows:
+            self._show_status_message("No valid selected fields to save.", is_error=True)
+            return
+
+        default_destination = str(self._settings.get("last_save_data_dir", str(Path.home())))
+        default_output_filename = f"{self._default_plot_filename()}_selected.nc"
+        dialog = SaveSelectedFieldsDialog(
+            self,
+            selected_rows=selected_rows,
+            default_destination=default_destination,
+            default_output_filename=default_output_filename,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        output_format = dialog.output_format
+        destination_folder = Path(dialog.destination_folder).expanduser()
+        requested_filename = dialog.output_filename.strip()
+        destination_name = Path(requested_filename).name
+        expected_suffix = ".zarr" if output_format == "zarr" else ".nc"
+        if not destination_name.endswith(expected_suffix):
+            destination_name = f"{Path(destination_name).stem}{expected_suffix}"
+        destination = destination_folder / destination_name
+
+        output_chunk_by_index: dict[int, str] = {}
+        for row_meta, chunk_text in zip(selected_rows, dialog.output_chunk_shapes):
+            idx = int(row_meta["index"])
+            output_chunk_by_index[idx] = str(chunk_text).strip()
+
+        self._remember_last_save_dir("last_save_data_dir", str(destination))
+        code = save_selected_fields_task(
+            selected_indices,
+            str(destination),
+            output_format,
+            output_chunk_by_index,
+        )
+        self._send_worker_task(code, emit_image=False)
 
     def _normalize_coordinate_metadata(self, payload: object) -> dict[str, dict[str, object]]:
         """Normalize worker coordinate payload into slider metadata mapping."""

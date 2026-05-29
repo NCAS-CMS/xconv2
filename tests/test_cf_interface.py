@@ -15,6 +15,7 @@ from xconv2.xconv_cf_interface import (
     run_contour_plot,
     run_line_plot,
     save_selected_field_data,
+    save_selected_fields,
 )
 
 import numpy as np
@@ -50,6 +51,14 @@ class _MockField:
     def cell_measures(self) -> str:
         return _MockCellMeasures()()
 
+    def nc_dataset_chunksizes(self) -> tuple[int, int]:
+        return (2, 3)
+
+
+class _MockFieldWithOpaqueChunkObject(_MockField):
+    def nc_dataset_chunksizes(self) -> object:
+        return object()
+
 
 def test_field_info_returns_serialized_rows() -> None:
     payload = field_info([_MockField()])
@@ -62,6 +71,13 @@ def test_field_info_returns_serialized_rows() -> None:
     assert str(row["identity"]).startswith("air_temperature")
     assert row["detail"] == "mock-field-summary"
     assert row["properties"] == {"units": "K", "standard_name": "air_temperature"}
+    assert row["chunk_shape"] == "(2, 3)"
+
+
+def test_field_info_ignores_non_serializable_chunk_objects() -> None:
+    payload = field_info([_MockFieldWithOpaqueChunkObject()])
+
+    assert payload[0]["chunk_shape"] == ""
 
 
 class _MockCoord:
@@ -186,6 +202,9 @@ class _FakeXYField:
     def iscyclic(self, axis: str) -> bool:
         return axis == "X" and self._x_iscyclic
 
+    def nc_dataset_chunksizes(self):
+        return None
+
 
 class _FakeDimensionCoordinate:
     def __init__(
@@ -274,6 +293,9 @@ class _FakeBoundsField:
 
     def dimension_coordinates(self):
         return self.coords
+
+    def nc_dataset_chunksizes(self):
+        return None
 
 
 def test_get_data_for_plotting_builds_subspace_kwargs() -> None:
@@ -401,6 +423,175 @@ def test_remove_fields_by_index_ignores_out_of_range() -> None:
 
     assert removed == 1
     assert fields == ["a"]
+
+
+def test_save_selected_fields_writes_netcdf(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[object, str, str, dict[str, object]]] = []
+
+    class _FakeData:
+        def rechunk(self, shape: tuple[int, ...], inplace: bool = False):
+            _ = (shape, inplace)
+
+    class _FakeField:
+        def __init__(self, shape: tuple[int, ...], chunks: tuple[int, ...]) -> None:
+            self.shape = shape
+            self._chunks = chunks
+            self.data = _FakeData()
+
+        def nc_dataset_chunksizes(self):
+            return self._chunks
+
+        def nc_set_dataset_chunksizes(self, value: tuple[int, ...]) -> None:
+            self._chunks = value
+
+    def _fake_write(fields, destination, fmt="NETCDF4", **kwargs):
+        calls.append((fields, destination, fmt, kwargs))
+
+    monkeypatch.setattr(cf_interface.cf, "write", _fake_write)
+
+    payload = [
+        _FakeField((10, 10), (5, 5)),
+        _FakeField((4, 4), (2, 2)),
+        _FakeField((10, 10), (5, 5)),
+    ]
+    count = save_selected_fields(payload, [0, 2], "/tmp/out.nc", "nc")
+
+    assert count == 2
+    assert len(calls) == 1
+    written_fields, destination, fmt, kwargs = calls[0]
+    assert written_fields == [payload[0], payload[2]]
+    assert destination == "/tmp/out.nc"
+    assert fmt == "NETCDF4"
+    assert kwargs == {"h5py_options": {"meta_block_size": 2663}}
+
+
+def test_save_selected_fields_writes_zarr(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[object, str, str]] = []
+
+    class _FakeData:
+        def rechunk(self, shape: tuple[int, ...], inplace: bool = False):
+            _ = (shape, inplace)
+
+    class _FakeField:
+        def __init__(self, shape: tuple[int, ...], chunks: tuple[int, ...]) -> None:
+            self.shape = shape
+            self._chunks = chunks
+            self.data = _FakeData()
+
+        def nc_dataset_chunksizes(self):
+            return self._chunks
+
+        def nc_set_dataset_chunksizes(self, value: tuple[int, ...]) -> None:
+            self._chunks = value
+
+    def _fake_write(fields, destination, fmt="NETCDF4", **kwargs):
+        _ = kwargs
+        calls.append((fields, destination, fmt))
+
+    monkeypatch.setattr(cf_interface.cf, "write", _fake_write)
+
+    payload = [_FakeField((10, 10), (5, 5)), _FakeField((10, 10), (5, 5))]
+    count = save_selected_fields(payload, [1], "/tmp/out.zarr", "zarr")
+
+    assert count == 1
+    assert calls == [([payload[1]], "/tmp/out.zarr", "ZARR")]
+
+
+def test_save_selected_fields_passes_chunk_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[object, str, str, dict[str, object]]] = []
+
+    class _FakeData:
+        def __init__(self) -> None:
+            self.rechunk_calls: list[tuple[tuple[int, ...], bool]] = []
+
+        def rechunk(self, shape: tuple[int, ...], inplace: bool = False):
+            self.rechunk_calls.append((shape, inplace))
+
+    class _FakeField:
+        def __init__(self, shape: tuple[int, ...], chunks: tuple[int, ...]) -> None:
+            self.shape = shape
+            self._chunks = chunks
+            self.set_calls: list[tuple[int, ...]] = []
+            self.data = _FakeData()
+
+        def nc_dataset_chunksizes(self):
+            return self._chunks
+
+        def nc_set_dataset_chunksizes(self, value: tuple[int, ...]) -> None:
+            self._chunks = value
+            self.set_calls.append(value)
+
+    def _fake_write(fields, destination, fmt="NETCDF4", **kwargs):
+        calls.append((fields, destination, fmt, kwargs))
+
+    monkeypatch.setattr(cf_interface.cf, "write", _fake_write)
+
+    payload = [
+        _FakeField((20, 20), (1, 1)),
+        _FakeField((8, 8), (8, 8)),
+        _FakeField((30, 21), (2, 2)),
+    ]
+    _ = save_selected_fields(
+        payload,
+        [0, 2],
+        "/tmp/out.nc",
+        "nc",
+        {0: "(4, 5)", 2: "(6, 7)"},
+    )
+
+    assert len(calls) == 1
+    written_fields, destination, fmt, kwargs = calls[0]
+    assert written_fields == [payload[0], payload[2]]
+    assert destination == "/tmp/out.nc"
+    assert fmt == "NETCDF4"
+    assert kwargs == {"h5py_options": {"meta_block_size": 4736}}
+    assert payload[0].set_calls == [(4, 5)]
+    assert payload[2].set_calls == [(6, 7)]
+    assert payload[0].data.rechunk_calls == [((4, 5), True)]
+    assert payload[2].data.rechunk_calls == [((6, 7), True)]
+
+
+def test_save_selected_fields_skips_matching_chunk_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeData:
+        def __init__(self) -> None:
+            self.rechunk_calls: list[tuple[tuple[int, ...], bool]] = []
+
+        def rechunk(self, shape: tuple[int, ...], inplace: bool = False):
+            self.rechunk_calls.append((shape, inplace))
+
+    class _FakeField:
+        def __init__(self, shape: tuple[int, ...], chunks: tuple[int, ...]) -> None:
+            self.shape = shape
+            self._chunks = chunks
+            self.set_calls: list[tuple[int, ...]] = []
+            self.data = _FakeData()
+
+        def nc_dataset_chunksizes(self):
+            return self._chunks
+
+        def nc_set_dataset_chunksizes(self, value: tuple[int, ...]) -> None:
+            self._chunks = value
+            self.set_calls.append(value)
+
+    writes: list[int] = []
+
+    def _fake_write(fields, destination, fmt="NETCDF4", **kwargs):
+        _ = (fields, destination, fmt, kwargs)
+        writes.append(1)
+
+    monkeypatch.setattr(cf_interface.cf, "write", _fake_write)
+
+    field = _FakeField((20, 20), (4, 5))
+    _ = save_selected_fields([field], [0], "/tmp/out.nc", "nc", {0: "(4, 5)"})
+
+    assert writes == [1]
+    assert field.set_calls == []
+    assert field.data.rechunk_calls == []
+
+
+def test_save_selected_fields_rejects_unknown_format() -> None:
+    with pytest.raises(ValueError, match="Unsupported output format"):
+        save_selected_fields(["a"], [0], "/tmp/out.foo", "foo")
 
 
 def test_parse_coordinate_subspace_commands_accepts_multiple_formats() -> None:

@@ -124,7 +124,10 @@ class MenuController:
         moving_window_action.triggered.connect(self.host._field_ops_maths_moving_window)
         maths_menu.addAction(moving_window_action)
 
-        menu_bar.addMenu("File Ops")
+        file_ops_menu = menu_bar.addMenu("File Ops")
+        save_selected_action = QAction("Save Selected", self.host)
+        save_selected_action.triggered.connect(self.host._file_ops_save_selected)
+        file_ops_menu.addAction(save_selected_action)
 
         self._setup_help_menu(menu_bar, menu_font_size_px, menu_font_weight)
 

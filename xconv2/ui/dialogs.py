@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
+    QAbstractItemView,
     QFileDialog,
     QComboBox,
     QDialog,
@@ -16,11 +17,14 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -88,6 +92,145 @@ class InfoMessageDialog(QDialog):
         """Show the info dialog."""
         dialog = cls(parent, title, content)
         dialog.show()
+
+
+class SaveSelectedFieldsDialog(QDialog):
+    """Dialog for saving selected fields to NetCDF or Zarr."""
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        *,
+        selected_rows: list[dict[str, object]],
+        default_destination: str,
+        default_output_filename: str,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Save Selected Fields")
+        self.resize(900, 460)
+
+        self._selected_rows = selected_rows
+
+        layout = QVBoxLayout(self)
+
+        header = QLabel("Save selected fields and output chunk shapes:")
+        header.setStyleSheet("font-weight: 600;")
+        layout.addWidget(header)
+
+        self.selected_table = QTableWidget(len(selected_rows), 2, self)
+        self.selected_table.setHorizontalHeaderLabels(["Identity", "Output chunk shape"])
+        self.selected_table.verticalHeader().setVisible(False)
+        self.selected_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.selected_table.setFocusPolicy(Qt.NoFocus)
+        self.selected_table.setAlternatingRowColors(True)
+        self.selected_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+            | QAbstractItemView.EditTrigger.SelectedClicked
+        )
+
+        for row_idx, row in enumerate(selected_rows):
+            identity_text = str(row.get("identity", ""))
+            chunk_text = str(row.get("chunk_shape", "")).strip()
+
+            identity_item = QTableWidgetItem(identity_text)
+            identity_item.setFlags(identity_item.flags() & ~Qt.ItemIsEditable)
+            self.selected_table.setItem(row_idx, 0, identity_item)
+            self.selected_table.setItem(row_idx, 1, QTableWidgetItem(chunk_text))
+
+        header_view = self.selected_table.horizontalHeader()
+        header_view.setSectionResizeMode(0, QHeaderView.Stretch)
+        header_view.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.selected_table.setMinimumHeight(220)
+        layout.addWidget(self.selected_table)
+
+        chunk_hint = QLabel("Edit chunk shapes using tuple syntax, for example: (64, 64) or (1, 180, 360).")
+        chunk_hint.setWordWrap(True)
+        layout.addWidget(chunk_hint)
+
+        form = QFormLayout()
+
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(["nc", "zarr"])
+        form.addRow("Output format", self.format_combo)
+
+        self.output_filename_edit = QLineEdit(default_output_filename)
+        self.output_filename_edit.setMinimumWidth(420)
+        form.addRow("Output filename", self.output_filename_edit)
+
+        destination_row = QHBoxLayout()
+        destination_row.setContentsMargins(0, 0, 0, 0)
+        self.destination_edit = QLineEdit(default_destination)
+        self.destination_edit.setMinimumWidth(620)
+        browse_button = QPushButton("Browse...")
+        browse_button.clicked.connect(self._browse_destination)
+        destination_row.addWidget(self.destination_edit, 1)
+        destination_row.addWidget(browse_button)
+
+        destination_widget = QWidget()
+        destination_widget.setLayout(destination_row)
+        form.addRow("Destination folder", destination_widget)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._validate_and_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _browse_destination(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Choose destination folder",
+            self.destination_edit.text().strip(),
+        )
+        if folder:
+            self.destination_edit.setText(folder)
+
+    def _validate_and_accept(self) -> None:
+        destination = self.destination_edit.text().strip()
+        if not destination:
+            QMessageBox.warning(self, "Destination required", "Please choose a destination folder.")
+            return
+
+        output_filename = self.output_filename_edit.text().strip()
+        if not output_filename:
+            QMessageBox.warning(self, "Filename required", "Please enter an output filename.")
+            return
+        if Path(output_filename).name != output_filename:
+            QMessageBox.warning(
+                self,
+                "Invalid filename",
+                "Output filename must not include directory separators.",
+            )
+            return
+
+        path = Path(destination).expanduser()
+        if not path.exists() or not path.is_dir():
+            QMessageBox.warning(self, "Invalid destination", "Destination folder does not exist.")
+            return
+
+        self.accept()
+
+    @property
+    def output_format(self) -> str:
+        return self.format_combo.currentText().strip().lower()
+
+    @property
+    def destination_folder(self) -> str:
+        return self.destination_edit.text().strip()
+
+    @property
+    def output_filename(self) -> str:
+        return self.output_filename_edit.text().strip()
+
+    @property
+    def output_chunk_shapes(self) -> list[str]:
+        values: list[str] = []
+        for row_idx in range(self.selected_table.rowCount()):
+            item = self.selected_table.item(row_idx, 1)
+            values.append(item.text().strip() if item is not None else "")
+        return values
 
 
 def create_info_button(

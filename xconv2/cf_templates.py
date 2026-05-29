@@ -117,6 +117,33 @@ def remove_selected_fields(indices: list[int]) -> str:
     ).lstrip()
 
 
+def save_selected_fields_task(
+    indices: list[int],
+    destination: str,
+    output_format: str,
+    output_chunk_by_index: dict[int, str] | None = None,
+) -> str:
+    """Generate worker code that saves selected fields to disk."""
+    return textwrap.dedent(
+        f"""
+        _cfview_save_indices = {indices!r}
+        _cfview_destination = {destination!r}
+        _cfview_output_format = {output_format!r}
+        _cfview_output_chunk_by_index = {output_chunk_by_index or {}!r}
+        _cfview_saved_count = save_selected_fields(
+            f,
+            _cfview_save_indices,
+            _cfview_destination,
+            _cfview_output_format,
+            _cfview_output_chunk_by_index,
+        )
+        send_to_gui(
+            f"STATUS:Saved {{_cfview_saved_count}} selected field(s) to {{_cfview_destination}} ({{_cfview_output_format}})"
+        ) #omit4save
+        """
+    ).lstrip()
+
+
 def plot_from_selection(
     selections: dict[str, tuple[object, object]],
     collapse_by_coord: dict[str, str],

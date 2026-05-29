@@ -14,6 +14,7 @@ import cf
 import cfplot as cfp
 import numpy as np
 from matplotlib import pyplot as plt
+from xconv2.cache_utils import estimate_hdf5_metadata_bytes_for_fields
 from xconv2.cell_method_handler import cell_methods_string_from_field
 from xconv2.lineplot import LinePlot
 from xconv2.plot_layout_helpers import (
@@ -28,6 +29,7 @@ __all__ = [
     "coordinate_info",
     "parse_coordinate_subspace_commands",
     "remove_fields_by_index",
+    "save_selected_fields",
     "add_dimension_coordinate_bounds",
     "append_unary_xy_field_operation",
     "get_data_for_plotting",
@@ -121,16 +123,44 @@ def field_info(fields: list) -> list[dict[str, object]]:
 
         yield items
 
+   
     rows: list[dict[str, object]] = []
     for x in _iter_fields(fields):
         id_ = f"{x.identity().strip()}{x.shape}"
         props = x.properties()
         info = str(x)
+
+        raw_chunk_shape = x.nc_dataset_chunksizes()
+
+        if isinstance(raw_chunk_shape, np.ndarray):
+            raw_chunk_shape = raw_chunk_shape.tolist()
+
+        if isinstance(raw_chunk_shape, (tuple, list)) and all(
+            isinstance(v, (int, np.integer)) for v in raw_chunk_shape
+        ):
+            chunk_shape = str(tuple(int(v) for v in raw_chunk_shape))
+        elif isinstance(raw_chunk_shape, (tuple, list)) and all(
+            isinstance(v, (tuple, list)) and len(v) > 0 for v in raw_chunk_shape
+        ):
+            compact: list[int] = []
+            for axis_chunks in raw_chunk_shape:
+                head = axis_chunks[0]
+                if not isinstance(head, (int, np.integer)):
+                    compact = []
+                    break
+                compact.append(int(head))
+            chunk_shape = str(tuple(compact)) if compact else ""
+        elif isinstance(raw_chunk_shape, (int, np.integer)):
+            chunk_shape = str((int(raw_chunk_shape),))
+        else:
+            chunk_shape = ""
+
         rows.append(
             {
                 "identity": id_,
                 "detail": info,
                 "properties": dict(props) if isinstance(props, dict) else props,
+                "chunk_shape": chunk_shape,
             }
         )
 
@@ -356,6 +386,155 @@ def remove_fields_by_index(fields: list, indices: list[int]) -> int:
             removed += 1
 
     return removed
+
+
+def save_selected_fields(
+    fields: list,
+    indices: list[int],
+    destination: str,
+    output_format: str,
+    output_chunk_by_index: dict[int, str] | None = None,
+) -> int:
+    """Persist selected fields to disk in NetCDF or Zarr format."""
+    selected_indices = [i for i in sorted(set(indices)) if 0 <= i < len(fields)]
+    selected = [fields[i] for i in selected_indices]
+    if not selected:
+        raise ValueError("No valid selected fields to save.")
+
+    output_format = output_format.strip().lower()
+    if output_format not in {"nc", "zarr"}:
+        raise ValueError(f"Unsupported output format: {output_format!r}")
+
+    def _parse_chunk_text(chunk_text: str) -> tuple[int, ...] | None:
+        """ Make sure user has selected a proper chunk option """
+        text = str(chunk_text).strip()
+        if not text:
+            return None
+
+        try:
+            parsed = ast.literal_eval(text)
+        except (ValueError, SyntaxError) as exc:
+            raise ValueError(f"Invalid chunk shape {chunk_text!r}. Use tuple syntax like (64, 64).") from exc
+
+        if isinstance(parsed, int):
+            if parsed <= 0:
+                raise ValueError(f"Chunk size must be positive: {chunk_text!r}")
+            return (int(parsed),)
+
+        if not isinstance(parsed, (tuple, list)):
+            raise ValueError(f"Chunk shape must be an int or tuple of ints: {chunk_text!r}")
+
+        if not parsed:
+            raise ValueError("Chunk shape cannot be empty.")
+
+        out: list[int] = []
+        for dim in parsed:
+            if not isinstance(dim, (int, np.integer)):
+                raise ValueError(f"Chunk shape contains non-integer value: {chunk_text!r}")
+            if int(dim) <= 0:
+                raise ValueError(f"Chunk size must be positive: {chunk_text!r}")
+            out.append(int(dim))
+
+        return tuple(out)
+
+    chunk_map = output_chunk_by_index or {}
+    def _normalize_chunk_shape(value: object) -> tuple[int, ...] | None:
+        if value is None:
+            return None
+
+        if isinstance(value, np.ndarray):
+            value = value.tolist()
+
+        if isinstance(value, (int, np.integer)):
+            return (int(value),)
+
+        if isinstance(value, (tuple, list)):
+            if all(isinstance(v, (int, np.integer)) for v in value):
+                return tuple(int(v) for v in value)
+
+            # Partition-per-axis chunks, choose first chunk size along each axis.
+            if all(isinstance(v, (tuple, list)) and len(v) > 0 for v in value):
+                out: list[int] = []
+                for axis_chunks in value:
+                    head = axis_chunks[0]
+                    if not isinstance(head, (int, np.integer)):
+                        return None
+                    out.append(int(head))
+                return tuple(out)
+
+        return None
+
+    for idx, field in zip(selected_indices, selected):
+        requested_text = str(chunk_map.get(idx, "")).strip()
+        current = field.nc_dataset_chunksizes()
+        before_chunks = _normalize_chunk_shape(current)
+
+        identity = field.identity() 
+
+        if not requested_text:
+            logger.debug(
+                "save_selected_fields field_index=%s identity=%s rechunked=False before=%s after=%s reason=no-requested-chunk",
+                idx,
+                identity,
+                before_chunks,
+                before_chunks,
+            )
+            continue
+
+        requested = _parse_chunk_text(requested_text)
+        if requested is None:
+            logger.debug(
+                "save_selected_fields field_index=%s identity=%s rechunked=False before=%s after=%s reason=invalid-requested-chunk",
+                idx,
+                identity,
+                before_chunks,
+                before_chunks,
+            )
+            continue
+
+        if before_chunks == requested:
+            logger.debug(
+                "save_selected_fields field_index=%s identity=%s rechunked=False before=%s after=%s reason=already-matching",
+                idx,
+                identity,
+                before_chunks,
+                before_chunks,
+            )
+            continue
+
+        field.nc_set_dataset_chunksizes(requested)
+        field.data.rechunk(tuple(requested), inplace=True)
+        logger.debug(
+            "save_selected_fields field_index=%s identity=%s rechunked=True before=%s after=%s",
+            idx,
+            identity,
+            before_chunks,
+            requested,
+        )
+
+    meta_block_size: int | None = None
+    if output_format == "nc":
+        meta_block_size = estimate_hdf5_metadata_bytes_for_fields(
+            selected,
+            btree_entry_size_bytes=64,
+            overhead_factor=1.20,
+            attribute_allowance_bytes=2048,
+        )
+
+        h5py_options = {"meta_block_size": meta_block_size}
+        cf.write(selected, destination, fmt="NETCDF4", h5py_options=h5py_options)
+    elif output_format == 'zarr':
+        cf.write(selected, destination, fmt="ZARR")
+
+    logger.info(
+        "save_selected_fields completed destination=%s format=%s field_count=%d meta_block_size=%s",
+        destination,
+        output_format,
+        len(selected),
+        meta_block_size,
+    )
+
+    return len(selected)
 
 
 def add_dimension_coordinate_bounds(
