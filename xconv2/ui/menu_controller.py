@@ -67,7 +67,7 @@ class MenuController:
         quit_action.triggered.connect(self.host._quit_application)
         xconv_menu.addAction(quit_action)
 
-        file_menu = menu_bar.addMenu("&File")
+        file_menu = menu_bar.addMenu("&Input")
 
 
         open_file_action = QAction("Open File... ", self.host)
@@ -97,7 +97,7 @@ class MenuController:
 
         file_menu.addSeparator()
 
-        field_ops_menu = menu_bar.addMenu("Field Ops")
+        field_ops_menu = menu_bar.addMenu("Operations")
         add_bounds_action = QAction("Add Bounds", self.host)
         add_bounds_action.triggered.connect(self.host._field_ops_add_bounds)
         field_ops_menu.addAction(add_bounds_action)
@@ -124,7 +124,7 @@ class MenuController:
         moving_window_action.triggered.connect(self.host._field_ops_maths_moving_window)
         maths_menu.addAction(moving_window_action)
 
-        file_ops_menu = menu_bar.addMenu("File Ops")
+        file_ops_menu = menu_bar.addMenu("Output")
         save_selected_action = QAction("Save Selected", self.host)
         save_selected_action.triggered.connect(self.host._file_ops_save_selected)
         file_ops_menu.addAction(save_selected_action)
