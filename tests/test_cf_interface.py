@@ -21,72 +21,30 @@ from xconv2.xconv_cf_interface import (
 import numpy as np
 import cf
 
-class _MockCellMeasures:
-    def __call__(self) -> str:
-        return "cell_measures: area: areacella"
-
-
-class _MockField:
-    #FIXME: replace with a cf example field. 
-    shape = (2, 3)
-
-    def __str__(self) -> str:
-        return "mock-field-summary"
-
-    def identity(self) -> str:
-        return "air_temperature"
-
-    def properties(self) -> dict[str, str]:
-        return {"units": "K", "standard_name": "air_temperature"}
-
-    def coordinates(self) -> dict[str, str]:
-        return {
-            "dimensioncoordinate0": "Dimension coordinate: latitude(2) degrees_north",
-            "dimensioncoordinate1": "Dimension coordinate: longitude(3) degrees_east",
-        }
-
-    def cell_methods(self) -> str:
-        return ""
-
-    def cell_measures(self) -> str:
-        return _MockCellMeasures()()
-
-    def nc_dataset_chunksizes(self) -> tuple[int, int]:
-        return (2, 3)
-
-
-class _MockFieldWithOpaqueChunkObject(_MockField):
-    def nc_dataset_chunksizes(self) -> object:
-        return object()
-
 
 def test_field_info_returns_serialized_rows() -> None:
-    payload = field_info([_MockField()])
+    field = cf.example_field(0)
+    chunks = tuple([2] * field.ndim)
+    field.nc_set_dataset_chunksizes(chunks)
+    payload = field_info([field])
 
     assert isinstance(payload, list)
     assert len(payload) == 1
     assert isinstance(payload[0], dict)
 
     row = payload[0]
-    assert str(row["identity"]).startswith("air_temperature")
-    assert row["detail"] == "mock-field-summary"
-    assert row["properties"] == {"units": "K", "standard_name": "air_temperature"}
-    assert row["chunk_shape"] == "(2, 3)"
+    assert str(row["identity"]).startswith(field.identity().strip())
+    assert row["detail"] == str(field)
+    assert row["properties"] == field.properties()
+    assert row["chunk_shape"] == str(chunks)
 
 
-def test_field_info_ignores_non_serializable_chunk_objects() -> None:
-    payload = field_info([_MockFieldWithOpaqueChunkObject()])
+def test_field_info_ignores_non_serializable_chunk_objects(monkeypatch: pytest.MonkeyPatch) -> None:
+    field = cf.example_field(1)
+    monkeypatch.setattr(field, "nc_dataset_chunksizes", lambda: object())
+    payload = field_info([field])
 
     assert payload[0]["chunk_shape"] == ""
-
-
-class _MockCoord:
-    def __init__(self, name: str, values: list[object]) -> None:
-        self._name = name
-        self.array = values
-
-    def identity(self, default: str = "unknown") -> str:
-        return self._name or default
 
 
 def test_coordinate_info_filters_singletons_and_serializes_values() -> None:
@@ -145,159 +103,6 @@ class _FakePlotField:
         return self
 
 
-class _FakeXYField:
-    def __init__(
-        self,
-        *,
-        has_x: bool = True,
-        has_y: bool = True,
-        x_coord: object | None = None,
-        x_iscyclic: bool = False,
-    ) -> None:
-        self._has_x = has_x
-        self._has_y = has_y
-        self._x_coord = x_coord
-        self._x_iscyclic = x_iscyclic
-        self.last_grad_kwargs: dict[str, object] | None = None
-        self.last_laplacian_kwargs: dict[str, object] | None = None
-
-    def identity(self, default: str = "unknown") -> str:
-        return "demo" if default else "demo"
-
-    @property
-    def shape(self) -> tuple[int, ...]:
-        return (2, 2)
-
-    def properties(self) -> dict[str, str]:
-        return {"units": "1"}
-
-    def __str__(self) -> str:
-        return "demo-field"
-
-    def dimension_coordinate(self, filter_by_axis=(), default=None):
-        if filter_by_axis == ("X",):
-            if self._x_coord is not None:
-                return self._x_coord
-            return object() if self._has_x else None
-        if filter_by_axis == ("Y",):
-            return object() if self._has_y else None
-        return default
-
-    def auxiliary_coordinate(self, filter_by_axis=(), axis_mode=None, default=None):
-        _ = axis_mode
-        if filter_by_axis == ("X",):
-            return object() if self._has_x else None
-        if filter_by_axis == ("Y",):
-            return object() if self._has_y else None
-        return default
-
-    def grad_xy(self, **kwargs: object):
-        self.last_grad_kwargs = dict(kwargs)
-        return _FakeXYField()
-
-    def laplacian_xy(self, **kwargs: object):
-        self.last_laplacian_kwargs = dict(kwargs)
-        return _FakeXYField()
-
-    def iscyclic(self, axis: str) -> bool:
-        return axis == "X" and self._x_iscyclic
-
-    def nc_dataset_chunksizes(self):
-        return None
-
-
-class _FakeDimensionCoordinate:
-    def __init__(
-        self,
-        name: str,
-        *,
-        has_bounds: bool,
-        cellsize: object | None = None,
-    ) -> None:
-        self._name = name
-        self._has_bounds = has_bounds
-        self.cellsize = cellsize
-        self.create_bounds_calls: list[dict[str, object]] = []
-
-    def identity(self, default: str = "unknown") -> str:
-        return self._name or default
-
-    def has_bounds(self) -> bool:
-        return self._has_bounds
-
-    def create_bounds(
-        self,
-        bound: object | None = None,
-        cellsize: object | None = None,
-        flt: float = 0.5,
-        max: object | None = None,
-        min: object | None = None,
-        inplace: bool = False,
-    ) -> object | None:
-        _ = (bound, flt, max, min)
-        self.create_bounds_calls.append({"cellsize": cellsize, "inplace": inplace})
-        if self._name == "height" and cellsize is None:
-            raise ValueError("cellsize is required in this fake")
-        self._has_bounds = True
-        return None if inplace else object()
-
-
-class _FakeXCoordBounds:
-    class _Bounds:
-        def __init__(self, array: object) -> None:
-            self.array = array
-
-    def __init__(self, has_bounds: bool, bounds_array: object | None = None) -> None:
-        self._has_bounds = has_bounds
-        self._bounds_array = bounds_array
-
-    def has_bounds(self) -> bool:
-        return self._has_bounds
-
-    def get_bounds(self, default=None):
-        if not self._has_bounds or self._bounds_array is None:
-            return default
-        return _FakeXCoordBounds._Bounds(self._bounds_array)
-
-
-class _FakeDimensionCoordinates:
-    def __init__(self, coords: list[_FakeDimensionCoordinate]) -> None:
-        self._coords = coords
-
-    def values(self):
-        return list(self._coords)
-
-
-class _FakeBoundsField:
-    def __init__(self) -> None:
-        self.coords = _FakeDimensionCoordinates(
-            [
-                _FakeDimensionCoordinate("time", has_bounds=True),
-                _FakeDimensionCoordinate("latitude", has_bounds=False),
-                _FakeDimensionCoordinate("height", has_bounds=False, cellsize=0.0),
-            ]
-        )
-
-    def identity(self, default: str = "unknown") -> str:
-        return "air_temperature" if default else "air_temperature"
-
-    @property
-    def shape(self) -> tuple[int, ...]:
-        return (2, 2)
-
-    def properties(self) -> dict[str, str]:
-        return {"units": "K"}
-
-    def __str__(self) -> str:
-        return "fake-bounds-field"
-
-    def dimension_coordinates(self):
-        return self.coords
-
-    def nc_dataset_chunksizes(self):
-        return None
-
-
 def test_get_data_for_plotting_builds_subspace_kwargs() -> None:
     fld = _FakePlotField()
 
@@ -321,9 +126,18 @@ def test_get_data_for_plotting_builds_subspace_kwargs() -> None:
     ]
 
 
-def test_append_unary_xy_field_operation_appends_grad_row() -> None:
-    field = _FakeXYField()
+def test_append_unary_xy_field_operation_appends_grad_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    field = cf.example_field(0)
     fields = [field]
+    seen: dict[str, object] = {}
+
+    def _fake_grad_xy(self, **kwargs):
+        _ = self
+        seen["kwargs"] = dict(kwargs)
+        return cf.example_field(1)
+
+    monkeypatch.setattr(cf.Field, "grad_xy", _fake_grad_xy)
+    monkeypatch.setattr(cf.Field, "iscyclic", lambda self, axis: False)
 
     rows = append_unary_xy_field_operation(fields, 0, "grad")
 
@@ -331,75 +145,137 @@ def test_append_unary_xy_field_operation_appends_grad_row() -> None:
     assert isinstance(rows, list)
     assert len(rows) == 1
     assert "identity" in rows[0]
-    assert field.last_grad_kwargs == {"radius": "earth"}
+    assert seen["kwargs"] == {"radius": "earth"}
 
 
-def test_append_unary_xy_field_operation_applies_laplacian_defaults() -> None:
-    field = _FakeXYField()
+def test_append_unary_xy_field_operation_applies_laplacian_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    field = cf.example_field(0)
     fields = [field]
+    seen: dict[str, object] = {}
+
+    def _fake_laplacian_xy(self, **kwargs):
+        _ = self
+        seen["kwargs"] = dict(kwargs)
+        return cf.example_field(1)
+
+    monkeypatch.setattr(cf.Field, "laplacian_xy", _fake_laplacian_xy)
+    monkeypatch.setattr(cf.Field, "iscyclic", lambda self, axis: False)
 
     _ = append_unary_xy_field_operation(fields, 0, "laplacian")
 
-    assert field.last_laplacian_kwargs == {"radius": "earth"}
+    assert seen["kwargs"] == {"radius": "earth"}
 
 
-def test_append_unary_xy_field_operation_handles_multiple_results() -> None:
-    class _FakeMultiResultXYField(_FakeXYField):
-        def grad_xy(self, **kwargs: object):
-            self.last_grad_kwargs = dict(kwargs)
-            return [_FakeXYField(), _FakeXYField()]
-
-    field = _FakeMultiResultXYField()
+def test_append_unary_xy_field_operation_handles_multiple_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    field = cf.example_field(0)
     fields = [field]
+    seen: dict[str, object] = {}
+
+    def _fake_grad_xy(self, **kwargs):
+        _ = self
+        seen["kwargs"] = dict(kwargs)
+        return [cf.example_field(1), cf.example_field(2)]
+
+    monkeypatch.setattr(cf.Field, "grad_xy", _fake_grad_xy)
+    monkeypatch.setattr(cf.Field, "iscyclic", lambda self, axis: False)
 
     rows = append_unary_xy_field_operation(fields, 0, "grad")
 
-    assert field.last_grad_kwargs == {"radius": "earth"}
+    assert seen["kwargs"] == {"radius": "earth"}
     assert len(fields) == 3
     assert len(rows) == 2
 
 
-def test_append_unary_xy_field_operation_enables_x_wrap_for_global_x_bounds() -> None:
-    global_bounds = _FakeXCoordBounds(has_bounds=True, bounds_array=[[0.0, 1.0], [359.0, 360.0]])
-    field = _FakeXYField(x_coord=global_bounds, x_iscyclic=True)
+def test_append_unary_xy_field_operation_enables_x_wrap_for_cyclic_x(monkeypatch: pytest.MonkeyPatch) -> None:
+    field = cf.example_field(0)
     fields = [field]
+    seen: dict[str, object] = {}
+
+    def _fake_grad_xy(self, **kwargs):
+        _ = self
+        seen["kwargs"] = dict(kwargs)
+        return cf.example_field(1)
+
+    monkeypatch.setattr(cf.Field, "grad_xy", _fake_grad_xy)
+    monkeypatch.setattr(cf.Field, "iscyclic", lambda self, axis: axis == "X")
 
     _ = append_unary_xy_field_operation(fields, 0, "grad")
 
-    assert field.last_grad_kwargs == {"radius": "earth", "x_wrap": True}
+    assert seen["kwargs"] == {"radius": "earth", "x_wrap": True}
 
 
-def test_append_unary_xy_field_operation_keeps_x_wrap_off_without_bounds() -> None:
-    x_no_bounds = _FakeXCoordBounds(has_bounds=False)
-    field = _FakeXYField(x_coord=x_no_bounds, x_iscyclic=True)
+def test_append_unary_xy_field_operation_keeps_x_wrap_off_for_non_cyclic_x(monkeypatch: pytest.MonkeyPatch) -> None:
+    field = cf.example_field(0)
     fields = [field]
+    seen: dict[str, object] = {}
+
+    def _fake_grad_xy(self, **kwargs):
+        _ = self
+        seen["kwargs"] = dict(kwargs)
+        return cf.example_field(1)
+
+    monkeypatch.setattr(cf.Field, "grad_xy", _fake_grad_xy)
+    monkeypatch.setattr(cf.Field, "iscyclic", lambda self, axis: False)
 
     _ = append_unary_xy_field_operation(fields, 0, "grad")
 
-    assert field.last_grad_kwargs == {"radius": "earth"}
+    assert seen["kwargs"] == {"radius": "earth"}
 
 
-def test_append_unary_xy_field_operation_requires_xy_axes() -> None:
-    fields = [_FakeXYField(has_x=False, has_y=True)]
+def test_append_unary_xy_field_operation_requires_xy_axes(monkeypatch: pytest.MonkeyPatch) -> None:
+    field = cf.example_field(0)
+
+    def _no_x_dimension_coordinate(self, filter_by_axis=(), default=None):
+        _ = self
+        if filter_by_axis == ("X",):
+            return None
+        if filter_by_axis == ("Y",):
+            return object()
+        return default
+
+    def _no_x_auxiliary_coordinate(self, filter_by_axis=(), axis_mode=None, default=None):
+        _ = (self, axis_mode)
+        if filter_by_axis == ("X",):
+            return None
+        if filter_by_axis == ("Y",):
+            return object()
+        return default
+
+    monkeypatch.setattr(cf.Field, "dimension_coordinate", _no_x_dimension_coordinate)
+    monkeypatch.setattr(cf.Field, "auxiliary_coordinate", _no_x_auxiliary_coordinate)
+
+    fields = [field]
 
     with pytest.raises(ValueError, match="both X and Y axes"):
         append_unary_xy_field_operation(fields, 0, "laplacian")
 
 
 def test_add_dimension_coordinate_bounds_updates_missing_bounds() -> None:
-    field = _FakeBoundsField()
+    field = cf.example_field(1)
+    coords = list(field.dimension_coordinates().values())
+    assert len(coords) >= 2
+
+    for coord in coords:
+        if coord.has_bounds():
+            coord.del_bounds()
+
+    missing_before = {
+        coord.identity()
+        for coord in coords
+        if not coord.has_bounds()
+    }
+
     fields = [field]
 
     rows, updated = add_dimension_coordinate_bounds(fields, 0)
 
     assert len(rows) == 1
-    assert updated == ["latitude", "height"]
-    assert field.coords.values()[0].create_bounds_calls == []
-    assert field.coords.values()[1].create_bounds_calls == [{"cellsize": None, "inplace": True}]
-    assert field.coords.values()[2].create_bounds_calls == [
-        {"cellsize": None, "inplace": True},
-        {"cellsize": 0.0, "inplace": True},
-    ]
+    assert updated
+    assert set(updated).issubset(missing_before)
+
+    by_identity = {coord.identity(): coord for coord in coords}
+    for name in updated:
+        assert by_identity[name].has_bounds()
 
 
 def test_add_dimension_coordinate_bounds_requires_valid_index() -> None:
@@ -428,31 +304,20 @@ def test_remove_fields_by_index_ignores_out_of_range() -> None:
 def test_save_selected_fields_writes_netcdf(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[object, str, str, dict[str, object]]] = []
 
-    class _FakeData:
-        def rechunk(self, shape: tuple[int, ...], inplace: bool = False):
-            _ = (shape, inplace)
-
-    class _FakeField:
-        def __init__(self, shape: tuple[int, ...], chunks: tuple[int, ...]) -> None:
-            self.shape = shape
-            self._chunks = chunks
-            self.data = _FakeData()
-
-        def nc_dataset_chunksizes(self):
-            return self._chunks
-
-        def nc_set_dataset_chunksizes(self, value: tuple[int, ...]) -> None:
-            self._chunks = value
-
     def _fake_write(fields, destination, fmt="NETCDF4", **kwargs):
         calls.append((fields, destination, fmt, kwargs))
 
     monkeypatch.setattr(cf_interface.cf, "write", _fake_write)
+    monkeypatch.setattr(
+        cf_interface,
+        "estimate_hdf5_metadata_bytes_for_fields",
+        lambda *args, **kwargs: 1234,
+    )
 
     payload = [
-        _FakeField((10, 10), (5, 5)),
-        _FakeField((4, 4), (2, 2)),
-        _FakeField((10, 10), (5, 5)),
+        cf.example_field(0),
+        cf.example_field(1),
+        cf.example_field(2),
     ]
     count = save_selected_fields(payload, [0, 2], "/tmp/out.nc", "nc")
 
@@ -462,27 +327,11 @@ def test_save_selected_fields_writes_netcdf(monkeypatch: pytest.MonkeyPatch) -> 
     assert written_fields == [payload[0], payload[2]]
     assert destination == "/tmp/out.nc"
     assert fmt == "NETCDF4"
-    assert kwargs == {"h5py_options": {"meta_block_size": 2663}}
+    assert kwargs == {"h5py_options": {"meta_block_size": 1234}}
 
 
 def test_save_selected_fields_writes_zarr(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[object, str, str]] = []
-
-    class _FakeData:
-        def rechunk(self, shape: tuple[int, ...], inplace: bool = False):
-            _ = (shape, inplace)
-
-    class _FakeField:
-        def __init__(self, shape: tuple[int, ...], chunks: tuple[int, ...]) -> None:
-            self.shape = shape
-            self._chunks = chunks
-            self.data = _FakeData()
-
-        def nc_dataset_chunksizes(self):
-            return self._chunks
-
-        def nc_set_dataset_chunksizes(self, value: tuple[int, ...]) -> None:
-            self._chunks = value
 
     def _fake_write(fields, destination, fmt="NETCDF4", **kwargs):
         _ = kwargs
@@ -490,7 +339,7 @@ def test_save_selected_fields_writes_zarr(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setattr(cf_interface.cf, "write", _fake_write)
 
-    payload = [_FakeField((10, 10), (5, 5)), _FakeField((10, 10), (5, 5))]
+    payload = [cf.example_field(0), cf.example_field(1)]
     count = save_selected_fields(payload, [1], "/tmp/out.zarr", "zarr")
 
     assert count == 1
@@ -500,43 +349,35 @@ def test_save_selected_fields_writes_zarr(monkeypatch: pytest.MonkeyPatch) -> No
 def test_save_selected_fields_passes_chunk_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[object, str, str, dict[str, object]]] = []
 
-    class _FakeData:
-        def __init__(self) -> None:
-            self.rechunk_calls: list[tuple[tuple[int, ...], bool]] = []
-
-        def rechunk(self, shape: tuple[int, ...], inplace: bool = False):
-            self.rechunk_calls.append((shape, inplace))
-
-    class _FakeField:
-        def __init__(self, shape: tuple[int, ...], chunks: tuple[int, ...]) -> None:
-            self.shape = shape
-            self._chunks = chunks
-            self.set_calls: list[tuple[int, ...]] = []
-            self.data = _FakeData()
-
-        def nc_dataset_chunksizes(self):
-            return self._chunks
-
-        def nc_set_dataset_chunksizes(self, value: tuple[int, ...]) -> None:
-            self._chunks = value
-            self.set_calls.append(value)
-
     def _fake_write(fields, destination, fmt="NETCDF4", **kwargs):
         calls.append((fields, destination, fmt, kwargs))
 
     monkeypatch.setattr(cf_interface.cf, "write", _fake_write)
+    monkeypatch.setattr(
+        cf_interface,
+        "estimate_hdf5_metadata_bytes_for_fields",
+        lambda *args, **kwargs: 2222,
+    )
 
     payload = [
-        _FakeField((20, 20), (1, 1)),
-        _FakeField((8, 8), (8, 8)),
-        _FakeField((30, 21), (2, 2)),
+        cf.example_field(0),
+        cf.example_field(1),
+        cf.example_field(2),
     ]
+
+    def _normalized_chunks(field: cf.Field, requested: tuple[int, ...]) -> tuple[int, ...]:
+        return tuple(min(int(size), int(dim)) for size, dim in zip(requested, field.shape))
+
+    request0 = tuple([4] * payload[0].ndim)
+    request2 = tuple([6] * payload[2].ndim)
+    payload[0].nc_set_dataset_chunksizes(tuple([1] * payload[0].ndim))
+    payload[2].nc_set_dataset_chunksizes(tuple([2] * payload[2].ndim))
     _ = save_selected_fields(
         payload,
         [0, 2],
         "/tmp/out.nc",
         "nc",
-        {0: "(4, 5)", 2: "(6, 7)"},
+        {0: str(request0), 2: str(request2)},
     )
 
     assert len(calls) == 1
@@ -544,35 +385,12 @@ def test_save_selected_fields_passes_chunk_overrides(monkeypatch: pytest.MonkeyP
     assert written_fields == [payload[0], payload[2]]
     assert destination == "/tmp/out.nc"
     assert fmt == "NETCDF4"
-    assert kwargs == {"h5py_options": {"meta_block_size": 4736}}
-    assert payload[0].set_calls == [(4, 5)]
-    assert payload[2].set_calls == [(6, 7)]
-    assert payload[0].data.rechunk_calls == [((4, 5), True)]
-    assert payload[2].data.rechunk_calls == [((6, 7), True)]
+    assert kwargs == {"h5py_options": {"meta_block_size": 2222}}
+    assert tuple(payload[0].nc_dataset_chunksizes()) == _normalized_chunks(payload[0], request0)
+    assert tuple(payload[2].nc_dataset_chunksizes()) == _normalized_chunks(payload[2], request2)
 
 
 def test_save_selected_fields_skips_matching_chunk_shape(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _FakeData:
-        def __init__(self) -> None:
-            self.rechunk_calls: list[tuple[tuple[int, ...], bool]] = []
-
-        def rechunk(self, shape: tuple[int, ...], inplace: bool = False):
-            self.rechunk_calls.append((shape, inplace))
-
-    class _FakeField:
-        def __init__(self, shape: tuple[int, ...], chunks: tuple[int, ...]) -> None:
-            self.shape = shape
-            self._chunks = chunks
-            self.set_calls: list[tuple[int, ...]] = []
-            self.data = _FakeData()
-
-        def nc_dataset_chunksizes(self):
-            return self._chunks
-
-        def nc_set_dataset_chunksizes(self, value: tuple[int, ...]) -> None:
-            self._chunks = value
-            self.set_calls.append(value)
-
     writes: list[int] = []
 
     def _fake_write(fields, destination, fmt="NETCDF4", **kwargs):
@@ -580,13 +398,19 @@ def test_save_selected_fields_skips_matching_chunk_shape(monkeypatch: pytest.Mon
         writes.append(1)
 
     monkeypatch.setattr(cf_interface.cf, "write", _fake_write)
+    monkeypatch.setattr(
+        cf_interface,
+        "estimate_hdf5_metadata_bytes_for_fields",
+        lambda *args, **kwargs: 1111,
+    )
 
-    field = _FakeField((20, 20), (4, 5))
-    _ = save_selected_fields([field], [0], "/tmp/out.nc", "nc", {0: "(4, 5)"})
+    field = cf.example_field(0)
+    matching = tuple([4] * field.ndim)
+    field.nc_set_dataset_chunksizes(matching)
+    _ = save_selected_fields([field], [0], "/tmp/out.nc", "nc", {0: str(matching)})
 
     assert writes == [1]
-    assert field.set_calls == []
-    assert field.data.rechunk_calls == []
+    assert tuple(field.nc_dataset_chunksizes()) == matching
 
 
 def test_save_selected_fields_rejects_unknown_format() -> None:

@@ -8,6 +8,7 @@ code snippets in ``cf_templates.py`` can call them directly.
 from __future__ import annotations
 
 import ast
+from datetime import datetime, timezone
 import logging
 
 import cf
@@ -52,49 +53,6 @@ _UNARY_XY_OPERATION_DEFAULT_KWARGS: dict[str, dict[str, object]] = {
     "grad": {"radius": "earth"},
     "laplacian": {"radius": "earth"},
 }
-
-
-def _has_x_bounds(coord: object) -> bool:
-    """Return True when X coordinate reports explicit bounds."""
-    has_bounds = getattr(coord, "has_bounds", None)
-    if not callable(has_bounds):
-        return False
-
-    try:
-        return bool(has_bounds())
-    except Exception:
-        return False
-
-
-def _should_enable_x_wrap(fld: object) -> bool:
-    """Infer whether x_wrap should be enabled from X bounds + cyclic metadata."""
-    x_coord = None
-    try:
-        x_coord = fld.dimension_coordinate(filter_by_axis=("X",), default=None)
-    except Exception:
-        x_coord = None
-
-    if x_coord is None:
-        try:
-            x_coord = fld.auxiliary_coordinate(filter_by_axis=("X",), axis_mode="exact", default=None)
-        except Exception:
-            x_coord = None
-
-    if x_coord is None:
-        return False
-
-    if not _has_x_bounds(x_coord):
-        return False
-
-    iscyclic = getattr(fld, "iscyclic", None)
-    if not callable(iscyclic):
-        return False
-
-    try:
-        return bool(iscyclic("X"))
-    except Exception:
-        return False
-
 
 
 def field_info(fields: list) -> list[dict[str, object]]:
@@ -352,7 +310,8 @@ def append_unary_xy_field_operation(
 
     normalized = operation.strip().lower()
     kwargs = dict(_UNARY_XY_OPERATION_DEFAULT_KWARGS.get(normalized, {}))
-    if normalized in {"grad", "laplacian"} and _should_enable_x_wrap(fld):
+    if normalized in {"grad", "laplacian"} and fld.iscyclic("X"):
+        logger.debug("Enabling x_wrap for %s operation on cyclic X coordinate", operation)
         kwargs["x_wrap"] = True
     if normalized == "grad":
         new_result = fld.grad_xy(**kwargs)
@@ -369,6 +328,13 @@ def append_unary_xy_field_operation(
         new_fields = [new_result]
 
     for new_field in new_fields:
+        today = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        history = new_field.get_property("history", "")
+        if history:
+            history += '\n'
+        history += f"{new_field.identity()} derived from {fld.identity()} by cf-python {cf.__version__} ({today})."
+        new_field.set_property("history", history)
+        logger.debug("Appending new field: %r (cyclic status %s)", new_field, new_field.iscyclic("X"))
         fields.append(new_field)
 
     return field_info(new_fields)
@@ -469,7 +435,7 @@ def save_selected_fields(
         current = field.nc_dataset_chunksizes()
         before_chunks = _normalize_chunk_shape(current)
 
-        identity = field.identity() 
+        identity = field.identity()
 
         if not requested_text:
             logger.debug(
@@ -541,7 +507,8 @@ def add_dimension_coordinate_bounds(
     fields: list,
     field_index: int,
 ) -> tuple[list[dict[str, object]], list[str]]:
-    """Add missing bounds to dimension coordinates on the selected field.
+    """
+    Add missing bounds to dimension coordinates on the selected field.
 
     Existing bounds are left untouched. When a coordinate has only a single
     cell, its own cellsize is used if available so bounds can still be created.
@@ -551,29 +518,19 @@ def add_dimension_coordinate_bounds(
         raise IndexError(f"Field index out of range for add_bounds: {field_index}")
 
     fld = fields[field_index]
-    updated_coordinate_names: list[str] = []
-
-    dimension_coordinates = getattr(fld, "dimension_coordinates", None)
-    if not callable(dimension_coordinates):
-        logger.warning("Selected field does not expose dimension coordinates")
-        return field_info(fields), updated_coordinate_names
-
-    coords = dimension_coordinates()
+    updated_coordinate_names = []
+    coords = fld.dimension_coordinates()
     coord_iterable = coords.values() if hasattr(coords, "values") else coords
-
+    
     for coord in coord_iterable:
-        has_bounds = getattr(coord, "has_bounds", None)
-        if not callable(has_bounds):
-            continue
 
-        try:
-            if has_bounds():
-                continue
-        except Exception as exc:
-            logger.warning("Could not inspect bounds for coordinate %r: %s", coord, exc)
+        has_bounds = coord.has_bounds()
+        if has_bounds:
+            logger.debug("Coordinate %r already has bounds, skipping", coord)
             continue
-
+        
         created = False
+
         try:
             coord.create_bounds(inplace=True)
             created = True
@@ -596,17 +553,13 @@ def add_dimension_coordinate_bounds(
             logger.warning("Failed to create bounds for coordinate %r: %s", coord, exc)
 
         if created:
-            identity = getattr(coord, "identity", None)
-            if callable(identity):
-                name = str(identity(default="unknown")).strip() or "unknown"
-            else:
-                name = "unknown"
-            updated_coordinate_names.append(name)
+            updated_coordinate_names.append(coord.identity()) 
 
     return field_info(fields), updated_coordinate_names
 
 def contour_data_range(pfld: object) -> tuple[float, float]:
-    """Return contour min/max while tolerating backend indexing quirks.
+    """
+    Return contour min/max while tolerating backend indexing quirks.
 
     Primary path uses the field array directly so masked values are excluded.
     If that fails (for example with some h5netcdf/h5py indexing behaviors),
