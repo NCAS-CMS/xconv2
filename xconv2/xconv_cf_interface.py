@@ -601,6 +601,11 @@ def get_data_for_plotting(
     """
 
     def _parse_bound(value: object) -> object:
+        """ 
+        Use to convert an object which might be a string
+        into a number if possible, otherwise return the
+        original entity.
+        """
         if isinstance(value, (int, float)):
             return value
 
@@ -613,13 +618,44 @@ def get_data_for_plotting(
             except ValueError:
                 return text
 
+    def _snap_singleton_bound(coord_name: str, value: object) -> object:
+        """ 
+        GUI coordinate values may not correspond exactly to 
+        coordinate values in the field (in terms of binary equivalence).
+        Hence we use this to snap singleton bounds to the nearest
+        actual coordinate value.
+        """
+       
+        coord = field.dimension_coordinate(coord_name, default=None)
+        if coord is None:
+            coord = field.auxiliary_coordinate(coord_name, default=None)
+        if coord is None:
+            return value
+
+        arr = coord.array
+       
+        try:
+            numeric = np.ma.array(arr, dtype=float).compressed()
+        except Exception:
+            return value
+        if numeric.size == 0:
+            return value
+
+        nearest_index = int(np.abs(numeric - float(value)).argmin())
+        nearest = float(numeric[nearest_index])
+        if isinstance(value, int) and nearest.is_integer():
+            return int(nearest)
+        return nearest
+
     subspace_kwargs: dict[str, object] = {}
     for coord_name, bounds in selection_spec.items():
         lo, hi = bounds
+        # make sure we have numeric values
         lo = _parse_bound(lo)
         hi = _parse_bound(hi)
         if lo == hi:
-            subspace_kwargs[coord_name] = lo
+            # deal with GUI to field value equivalence
+            subspace_kwargs[coord_name] = _snap_singleton_bound(coord_name, lo)
         else:
             if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
                 lo, hi = sorted((lo, hi))

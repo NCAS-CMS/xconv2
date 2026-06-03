@@ -87,16 +87,29 @@ def test_coordinate_info_nemo_uses_2d_fallback_ranges() -> None:
 
 
 class _FakePlotField:
-    def __init__(self) -> None:
+    def __init__(self, coord_arrays: dict[str, object] | None = None) -> None:
         self.kwargs: dict[str, object] | None = None
         self.collapse_calls: list[tuple[str, str, bool]] = []
+        self.coord_arrays = coord_arrays or {}
 
     def subspace(self, **kwargs: object) -> "_FakePlotField":
         self.kwargs = kwargs
         return self
 
-    def dimension_coordinate(self, coord_name) -> None:
+    class _Coord:
+        def __init__(self, array: object) -> None:
+            self.array = array
+            self.size = len(array)
+
+    def dimension_coordinate(self, coord_name, default=None):
+        if coord_name in self.coord_arrays:
+            return _FakePlotField._Coord(self.coord_arrays[coord_name])
+        if default is not None:
+            return default
         return np.array([0.0, 1.0])
+
+    def auxiliary_coordinate(self, coord_name, default=None):
+        return default
 
     def collapse(self, instruction: str, weights: bool = False) -> "_FakePlotField":
         self.collapse_calls.append((instruction, weights))
@@ -124,6 +137,20 @@ def test_get_data_for_plotting_builds_subspace_kwargs() -> None:
     assert fld.collapse_calls == [
         ("time: mean name: max", True),
     ]
+
+
+def test_get_data_for_plotting_snaps_singleton_to_nearest_coordinate_value() -> None:
+    fld = _FakePlotField(coord_arrays={"longitude": np.array([0.0, 0.07, 0.14])})
+
+    pfld = get_data_for_plotting(
+        fld,
+        {"longitude": ("0.069999", "0.069999")},
+        {},
+    )
+
+    assert pfld is fld
+    assert fld.kwargs is not None
+    assert fld.kwargs["longitude"] == pytest.approx(0.07)
 
 
 def test_append_unary_xy_field_operation_appends_grad_row(monkeypatch: pytest.MonkeyPatch) -> None:
