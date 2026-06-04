@@ -42,7 +42,7 @@ from .core_window import CFVCore
 from .xconv_cf_interface import parse_coordinate_subspace_commands
 # Remote-access helpers are imported lazily (inside the methods that use them)
 # so that p5rem/paramiko are not loaded at GUI startup.
-from .ui.dialogs import OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog, SaveSelectedFieldsDialog
+from .ui.dialogs import OpenURIDialog, RegridDialog, RemoteConfigurationDialog, RemoteOpenDialog, SaveSelectedFieldsDialog
 
 logger = logging.getLogger(__name__)
 
@@ -1817,6 +1817,13 @@ class CFVMain(CFVCore):
             text = f"Mem app: {app_rss:.0f} MiB | worker: {worker_rss:.0f} MiB"
 
         self._memory_status_label.setText(text)
+
+    def _field_ops_regrid(self) -> None:
+        """Open the Regrid dialog for the currently selected fields."""
+        selected_items = list(self.field_list_widget.selectedItems())
+        selected_names = [item.text() for item in selected_items]
+        dialog = RegridDialog(self, selected_names)
+        dialog.show()
 
     def _field_ops_add_bounds(self) -> None:
         """Create missing dimension-coordinate bounds on the selected field."""

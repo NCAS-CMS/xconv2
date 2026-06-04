@@ -19,6 +19,7 @@ dependencies = [
     "zarr",
     "pandas",
     "setuptools>80",
+    "esmpy"
 ]
 
 [project.optional-dependencies]
