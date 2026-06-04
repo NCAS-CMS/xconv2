@@ -1,0 +1,6 @@
+{
+  "N1280": [
+    {"longitude": {"nx": 1280, "lon1": 123, "deltax": 123}},
+    {"latitude": {"ny": 1280, "lat1": 0, "deltay": 123}}
+  ]
+}
