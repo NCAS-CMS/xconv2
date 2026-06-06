@@ -89,6 +89,27 @@ def unary_xy_field_operation(index: int, operation: str) -> str:
     ).lstrip()
 
 
+def regrid_fields_operation(regrid_config_json: str) -> str:
+    """Generate worker code that regrids selected field(s) from JSON config."""
+    return textwrap.dedent(
+        f"""
+        _cfview_regrid_config_json = {regrid_config_json!r}
+        metadata_rows = regrid_from_config(f, _cfview_regrid_config_json)
+        send_to_gui('METADATA_APPEND', metadata_rows) #omit4save
+        _cfview_added_count = len(metadata_rows)
+        _cfview_target = 'unknown'
+        try:
+            import json as _json
+            _cfview_target = str(_json.loads(_cfview_regrid_config_json).get('target', 'unknown'))
+        except Exception:
+            pass
+        send_to_gui(
+            f"STATUS:Added {{_cfview_added_count}} regridded field(s) (target={{_cfview_target}})."
+        ) #omit4save
+        """
+    ).lstrip()
+
+
 def add_dimension_coordinate_bounds(index: int) -> str:
     """Generate worker code that adds missing bounds to dimension coordinates."""
     return textwrap.dedent(

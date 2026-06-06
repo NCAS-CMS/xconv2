@@ -33,6 +33,7 @@ from .cf_templates import (
     coordinate_list,
     field_list,
     plot_from_selection,
+    regrid_fields_operation,
     remove_selected_fields,
     save_data_from_selection,
     save_selected_fields_task,
@@ -1821,9 +1822,58 @@ class CFVMain(CFVCore):
     def _field_ops_regrid(self) -> None:
         """Open the Regrid dialog for the currently selected fields."""
         selected_items = list(self.field_list_widget.selectedItems())
-        selected_names = [item.text() for item in selected_items]
-        dialog = RegridDialog(self, selected_names)
+        if not selected_items:
+            self._show_status_message("Select one or more fields to regrid.", is_error=True)
+            return
+
+        selected_rows: list[dict[str, object]] = []
+        for item in selected_items:
+            idx = self.field_list_widget.row(item)
+            if idx < 0:
+                continue
+            selected_rows.append(
+                {
+                    "index": idx,
+                    "identity": str(item.text()),
+                }
+            )
+
+        if not selected_rows:
+            self._show_status_message("No valid selected fields to regrid.", is_error=True)
+            return
+
+        dialog = RegridDialog(self, selected_rows, on_submit=self._run_regrid_operation)
         dialog.show()
+
+    def _run_regrid_operation(self, regrid_config: dict[str, object]) -> None:
+        """Dispatch a regrid operation through worker-side JSON config parsing."""
+        selected_indices = regrid_config.get("field_indices", [])
+        if not isinstance(selected_indices, list) or not selected_indices:
+            self._show_status_message("Regrid configuration did not include selected fields.", is_error=True)
+            return
+
+        source_paths: set[str] = set()
+        for raw_idx in selected_indices:
+            try:
+                idx = int(raw_idx)
+            except (TypeError, ValueError):
+                continue
+            item = self.field_list_widget.item(idx)
+            if item is None:
+                continue
+            raw_source = item.data(Qt.UserRole + 2)
+            if isinstance(raw_source, str) and raw_source.strip():
+                source_paths.add(raw_source)
+
+        self._pending_field_op_source = next(iter(source_paths)) if len(source_paths) == 1 else None
+
+        target = str(regrid_config.get("target", "unknown"))
+        self._show_status_message(f"Running Regrid for target {target}...")
+        logger.info("Running regrid operation target=%s selected_count=%d", target, len(selected_indices))
+
+        config_json = json.dumps(regrid_config, sort_keys=True)
+        code = regrid_fields_operation(config_json)
+        self._send_worker_task(code, emit_image=False)
 
     def _field_ops_add_bounds(self) -> None:
         """Create missing dimension-coordinate bounds on the selected field."""

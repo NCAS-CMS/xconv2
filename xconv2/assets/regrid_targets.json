@@ -1,6 +1,6 @@
 {
-  "N1280": [
-    {"longitude": {"nx": 1280, "lon1": 123, "deltax": 123}},
-    {"latitude": {"ny": 1280, "lat1": 0, "deltay": 123}}
+  "N216T": [
+    {"longitude": {"nx": 432, "lon1": 0.41666667, "deltax": 0.83333333}},
+    {"latitude": {"ny": 324, "lat1":-89.72222222 , "deltay":0.55555556}}
   ]
 }

@@ -2077,11 +2077,22 @@ class RegridDialog(QDialog):
     _LATLON_ENTRY = "lat/lon"
     _HEALPIX_ENTRY = "healpix"
     _SELECTED_FIELD_ENTRY = "selected field"
+    _REGRID_METHODS = (
+        "linear",
+        "bilinear",
+        "conservative_1st",
+        "conservative",
+        "conservative_2nd",
+        "patch",
+        "nearest_stod",
+        "nearest_dtos",
+    )
 
     def __init__(
         self,
         parent: QWidget | None,
-        selected_field_names: list[str],
+        selected_fields: list[dict[str, object]],
+        on_submit: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         super().__init__(parent)
         # Close automatically when the parent (main window) is destroyed
@@ -2089,7 +2100,9 @@ class RegridDialog(QDialog):
         self.setWindowTitle("Regrid")
         self.setMinimumWidth(480)
 
-        self._selected_field_names = selected_field_names
+        self._selected_fields = selected_fields
+        self._on_submit = on_submit
+        self._configured = False
 
         # Load regrid targets JSON
         _json_path = Path(__file__).parent.parent / "assets" / "regrid_targets.json"
@@ -2109,10 +2122,10 @@ class RegridDialog(QDialog):
         self._fields_list = QListWidget()
         self._fields_list.setSelectionMode(QAbstractItemView.NoSelection)
         self._fields_list.setFocusPolicy(Qt.NoFocus)
-        for name in selected_field_names:
-            self._fields_list.addItem(name)
+        for row in selected_fields:
+            self._fields_list.addItem(str(row.get("identity", "")))
         self._fields_list.setFixedHeight(
-            min(max(len(selected_field_names), 1), 6) * self._fields_list.sizeHintForRow(0) + 4
+            min(max(len(selected_fields), 1), 6) * self._fields_list.sizeHintForRow(0) + 4
         )
         layout.addWidget(self._fields_list)
 
@@ -2131,6 +2144,16 @@ class RegridDialog(QDialog):
         configure_btn = QPushButton("Configure")
         configure_btn.clicked.connect(self._on_configure)
         layout.addWidget(configure_btn)
+
+        # --- Shared post-configure options ---
+        self._post_config_widget = QWidget()
+        _post_config_layout = QFormLayout(self._post_config_widget)
+        _post_config_layout.setContentsMargins(0, 0, 0, 0)
+        self._method_combo = QComboBox()
+        self._method_combo.addItems(list(self._REGRID_METHODS))
+        _post_config_layout.addRow("Method:", self._method_combo)
+        self._post_config_widget.hide()
+        layout.addWidget(self._post_config_widget)
 
         # --- Configuration detail area (stacked) ---
         self._detail_stack = QStackedWidget()
@@ -2233,7 +2256,7 @@ class RegridDialog(QDialog):
         choice = self._target_combo.currentText()
 
         if choice == self._SELECTED_FIELD_ENTRY:
-            if len(self._selected_field_names) < 2:
+            if len(self._selected_fields) < 2:
                 QMessageBox.warning(
                     self,
                     "Not enough fields",
@@ -2241,15 +2264,25 @@ class RegridDialog(QDialog):
                 )
                 return
             self._source_field_combo.clear()
-            self._source_field_combo.addItems(self._selected_field_names)
+            for row in self._selected_fields:
+                self._source_field_combo.addItem(
+                    str(row.get("identity", "")),
+                    int(row.get("index", -1)),
+                )
             self._chosen_field_label.clear()
             self._detail_stack.setCurrentIndex(2)
+            self._post_config_widget.show()
+            self._configured = True
 
         elif choice == self._LATLON_ENTRY:
             self._detail_stack.setCurrentIndex(3)
+            self._post_config_widget.show()
+            self._configured = True
 
         elif choice == self._HEALPIX_ENTRY:
             self._detail_stack.setCurrentIndex(4)
+            self._post_config_widget.show()
+            self._configured = True
 
         else:
             # Preset JSON key
@@ -2257,6 +2290,8 @@ class RegridDialog(QDialog):
             text = json.dumps(value, indent=2) if value is not None else "(no data)"
             self._preset_label.setText(text)
             self._detail_stack.setCurrentIndex(1)
+            self._post_config_widget.show()
+            self._configured = True
 
     def _on_source_field_changed(self, index: int) -> None:
         if index < 0:
@@ -2264,33 +2299,57 @@ class RegridDialog(QDialog):
         name = self._source_field_combo.itemText(index)
         self._chosen_field_label.setText(f"Target field: {name}")
 
-    def _on_go(self) -> None:
+    def _build_regrid_config(self) -> dict[str, object]:
+        """Build worker-facing JSON-serializable regrid configuration."""
         choice = self._target_combo.currentText()
-        summary: dict[str, object] = {
-            "fields": self._selected_field_names,
+        selected_indices = [
+            int(row.get("index", -1))
+            for row in self._selected_fields
+            if int(row.get("index", -1)) >= 0
+        ]
+
+        config: dict[str, object] = {
             "target": choice,
+            "field_indices": selected_indices,
+            "method": self._method_combo.currentText(),
         }
 
         if choice == self._SELECTED_FIELD_ENTRY:
-            summary["target_field"] = self._source_field_combo.currentText()
-
+            config["target_field_index"] = int(self._source_field_combo.currentData())
+            config["target_field_name"] = self._source_field_combo.currentText()
         elif choice == self._LATLON_ENTRY:
-            summary["nx"] = self._nx_spin.value()
-            summary["lon1"] = self._lon1_spin.value()
-            summary["deltax"] = self._deltax_spin.value()
-            summary["ny"] = self._ny_spin.value()
-            summary["lat1"] = self._lat1_spin.value()
-            summary["deltay"] = self._deltay_spin.value()
-
+            config["target_spec"] = {
+                "nx": self._nx_spin.value(),
+                "lon1": self._lon1_spin.value(),
+                "deltax": self._deltax_spin.value(),
+                "ny": self._ny_spin.value(),
+                "lat1": self._lat1_spin.value(),
+                "deltay": self._deltay_spin.value(),
+            }
         elif choice == self._HEALPIX_ENTRY:
-            summary["level"] = self._healpix_level_spin.value()
-
+            config["target_spec"] = {
+                "level": self._healpix_level_spin.value(),
+            }
         else:
-            summary["preset"] = self._regrid_targets.get(choice)
+            config["target_key"] = choice
+            config["target_spec"] = self._regrid_targets.get(choice)
 
-        QMessageBox.information(
-            self,
-            "Not implemented",
-            json.dumps(summary, indent=2),
-        )
+        return config
+
+    def _on_go(self) -> None:
+        if not self._configured:
+            QMessageBox.warning(self, "Not configured", "Press Configure before running regrid.")
+            return
+
+        if self._target_combo.currentText() == self._SELECTED_FIELD_ENTRY and self._source_field_combo.count() <= 0:
+            QMessageBox.warning(self, "Missing target field", "Choose a target field before running regrid.")
+            return
+
+        config = self._build_regrid_config()
+        if self._on_submit is not None:
+            self._on_submit(config)
+            self.close()
+            return
+
+        QMessageBox.information(self, "Regrid configuration", json.dumps(config, indent=2))
 
