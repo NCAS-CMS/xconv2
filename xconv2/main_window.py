@@ -29,6 +29,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QLabel, QInputDialog, QLine
 
 from .cf_templates import (
     add_dimension_coordinate_bounds,
+    binary_field_operation,
     contour_range_from_selection,
     coordinate_list,
     field_list,
@@ -1792,6 +1793,38 @@ class CFVMain(CFVCore):
         code = add_dimension_coordinate_bounds(field_index)
         self._send_worker_task(code, emit_image=False)
 
+    def _selected_two_field_indices_for_operation(self, operation: str) -> tuple[int, int] | None:
+        """Return exactly two selected field indices for binary operations."""
+        selected = [int(i) for i in getattr(self, "_selected_field_indices", []) if int(i) >= 0]
+        if len(selected) != 2:
+            self._show_status_message("Two fields need to be selected for difference", is_error=True)
+            return None
+        return selected[0], selected[1]
+
+    def _run_binary_field_operation(self, operation_name: str, operation_key: str) -> None:
+        """Dispatch binary field operation using exactly two selected fields."""
+        pair = self._selected_two_field_indices_for_operation(operation_name)
+        if pair is None:
+            return
+
+        idx_a, idx_b = pair
+        source_paths: list[str] = []
+        for idx in (idx_a, idx_b):
+            item = self.field_list_widget.item(idx)
+            if item is None:
+                continue
+            raw_source = item.data(Qt.UserRole + 2)
+            if isinstance(raw_source, str) and raw_source.strip():
+                source_paths.append(raw_source)
+        unique_sources = sorted(set(source_paths))
+        self._pending_field_op_source = unique_sources[0] if len(unique_sources) == 1 else None
+
+        self._show_status_message(f"Running {operation_name} on field indices {idx_a} and {idx_b}...")
+        logger.info("Running binary field op %s on field indices %d and %d", operation_name, idx_a, idx_b)
+
+        code = binary_field_operation(idx_a, idx_b, operation_key, source_files=source_paths)
+        self._send_worker_task(code, emit_image=False)
+
     def _process_rss_mib(self, pid: int | None) -> float | None:
         """Return RSS for a process in MiB, or None if unavailable."""
         if not isinstance(pid, int) or pid <= 0:
@@ -1882,6 +1915,14 @@ class CFVMain(CFVCore):
     def _field_ops_maths_grad(self) -> None:
         """Create and append grad field via cf.Field.grad_xy."""
         self._run_unary_xy_field_operation("Grad", "grad")
+
+    def _field_ops_maths_difference_ab(self) -> None:
+        """Create and append binary difference field using first-selected minus second-selected."""
+        self._run_binary_field_operation("Difference (A-B)", "difference_ab")
+
+    def _field_ops_maths_difference_ba(self) -> None:
+        """Create and append binary difference field using second-selected minus first-selected."""
+        self._run_binary_field_operation("Difference (B-A)", "difference_ba")
 
     def _field_ops_maths_laplacian(self) -> None:
         """Create and append laplacian field via cf.Field.laplacian_xy."""

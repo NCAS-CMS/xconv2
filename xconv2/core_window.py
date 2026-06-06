@@ -2002,6 +2002,14 @@ class CFVCore(QMainWindow):
         """Placeholder action for Field Ops -> Maths."""
         self._show_not_implemented_dialog("Field Ops: Maths")
 
+    def _field_ops_maths_difference_ab(self) -> None:
+        """Placeholder action for Field Ops -> Maths -> Difference (A-B)."""
+        self._show_not_implemented_dialog("Field Ops: Maths -> Difference (A-B)")
+
+    def _field_ops_maths_difference_ba(self) -> None:
+        """Placeholder action for Field Ops -> Maths -> Difference (B-A)."""
+        self._show_not_implemented_dialog("Field Ops: Maths -> Difference (B-A)")
+
     def _field_ops_maths_grad(self) -> None:
         """Placeholder action for Field Ops -> Maths -> Grad."""
         self._show_not_implemented_dialog("Field Ops: Maths -> Grad")

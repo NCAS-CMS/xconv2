@@ -8,6 +8,7 @@ from xconv2.cf_templates import regrid_fields_operation
 
 from xconv2.xconv_cf_interface import (
     add_dimension_coordinate_bounds,
+    append_binary_field_operation,
     append_unary_xy_field_operation,
     auto_contour_title,
     coordinate_info,
@@ -249,6 +250,115 @@ def test_append_unary_xy_field_operation_keeps_x_wrap_off_for_non_cyclic_x(monke
     _ = append_unary_xy_field_operation(fields, 0, "grad")
 
     assert seen["kwargs"] == {"radius": "earth"}
+
+
+def test_append_binary_field_operation_difference_ab_appends_new_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    base = cf.example_field(0)
+    fields = [base, base.copy()]
+    seen: dict[str, object] = {"calls": []}
+
+    def _fake_sub(self, other):
+        calls = seen["calls"]
+        assert isinstance(calls, list)
+        calls.append((self.identity(), other.identity()))
+        return cf.example_field(2)
+
+    monkeypatch.setattr(cf.Field, "__sub__", _fake_sub)
+
+    rows = append_binary_field_operation(fields, 0, 1, "difference_ab")
+
+    assert len(rows) == 1
+    assert len(fields) == 3
+    calls = seen["calls"]
+    assert isinstance(calls, list)
+    assert len(calls) == 1
+
+
+def test_append_binary_field_operation_difference_ba_appends_new_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    base = cf.example_field(0)
+    fields = [base, base.copy()]
+    seen: dict[str, object] = {"calls": []}
+
+    def _fake_sub(self, other):
+        calls = seen["calls"]
+        assert isinstance(calls, list)
+        calls.append((self.identity(), other.identity()))
+        return cf.example_field(2)
+
+    monkeypatch.setattr(cf.Field, "__sub__", _fake_sub)
+
+    rows = append_binary_field_operation(fields, 0, 1, "difference_ba")
+
+    assert len(rows) == 1
+    assert len(fields) == 3
+    calls = seen["calls"]
+    assert isinstance(calls, list)
+    assert len(calls) == 1
+
+
+def test_append_binary_field_operation_requires_two_distinct_indices() -> None:
+    fields = [cf.example_field(0)]
+
+    with pytest.raises(ValueError, match="distinct"):
+        append_binary_field_operation(fields, 0, 0, "difference_ab")
+
+
+def test_append_binary_field_operation_requires_same_coordinates(monkeypatch: pytest.MonkeyPatch) -> None:
+    fields = [cf.example_field(0), cf.example_field(1)]
+    monkeypatch.setattr(cf_interface, "coordinate_info", lambda fld: [(fld.identity(), ["0"], "1")])
+
+    with pytest.raises(ValueError, match="Two fields need the same coordinates"):
+        append_binary_field_operation(fields, 0, 1, "difference_ab")
+
+
+def test_append_binary_field_operation_requires_same_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    base = cf.example_field(0)
+    other = base.copy()
+    other.del_property("standard_name", default=None)
+    other.set_property("long_name", "different_identity")
+    fields = [base, other]
+    monkeypatch.setattr(cf_interface, "coordinate_info", lambda _fld: [("X", ["0", "1"], "degrees")])
+
+    with pytest.raises(ValueError, match="Two fields need the same identity"):
+        append_binary_field_operation(fields, 0, 1, "difference_ab")
+
+
+def test_append_binary_field_operation_requires_same_units(monkeypatch: pytest.MonkeyPatch) -> None:
+    base = cf.example_field(0)
+    other = base.copy()
+    other.override_units("K", inplace=True)
+    fields = [base, other]
+    monkeypatch.setattr(cf_interface, "coordinate_info", lambda _fld: [("X", ["0", "1"], "degrees")])
+
+    with pytest.raises(ValueError, match="Two fields need the same units"):
+        append_binary_field_operation(fields, 0, 1, "difference_ab")
+
+
+def test_append_binary_field_operation_records_source_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    base = cf.example_field(0)
+    fields = [base, base.copy()]
+
+    monkeypatch.setattr(cf_interface, "coordinate_info", lambda _fld: [("X", ["0", "1"], "degrees")])
+
+    def _fake_sub(self, other):
+        _ = (self, other)
+        return cf.example_field(2)
+
+    monkeypatch.setattr(cf.Field, "__sub__", _fake_sub)
+
+    rows = append_binary_field_operation(
+        fields,
+        0,
+        1,
+        "difference_ab",
+        source_files=["/tmp/a.nc", "/tmp/b.nc"],
+    )
+
+    props = rows[0]["properties"]
+    assert isinstance(props, dict)
+    assert "xconv_source_files" in props
+    assert "/tmp/a.nc" in str(props["xconv_source_files"])
+    assert "/tmp/b.nc" in str(props["xconv_source_files"])
 
 
 def test_regrid_from_config_selected_field_conservative(monkeypatch: pytest.MonkeyPatch) -> None:

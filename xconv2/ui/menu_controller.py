@@ -108,6 +108,16 @@ class MenuController:
 
         maths_menu = field_ops_menu.addMenu("Maths")
 
+        difference_ab_action = QAction("Difference (A-B)", self.host)
+        difference_ab_action.triggered.connect(self.host._field_ops_maths_difference_ab)
+        maths_menu.addAction(difference_ab_action)
+
+        difference_ba_action = QAction("Difference (B-A)", self.host)
+        difference_ba_action.triggered.connect(self.host._field_ops_maths_difference_ba)
+        maths_menu.addAction(difference_ba_action)
+
+        maths_menu.addSeparator()
+
         grad_action = QAction("Grad", self.host)
         grad_action.triggered.connect(self.host._field_ops_maths_grad)
         maths_menu.addAction(grad_action)

@@ -89,6 +89,36 @@ def unary_xy_field_operation(index: int, operation: str) -> str:
     ).lstrip()
 
 
+def binary_field_operation(
+    index_a: int,
+    index_b: int,
+    operation: str,
+    source_files: list[str] | None = None,
+) -> str:
+    """Generate worker code for binary field operations that append derived metadata."""
+    return textwrap.dedent(
+        f"""
+        _cfview_field_index_a = {index_a}
+        _cfview_field_index_b = {index_b}
+        _cfview_operation = {operation!r}
+        _cfview_source_files = {source_files or []!r}
+        metadata_rows = append_binary_field_operation(
+            f,
+            _cfview_field_index_a,
+            _cfview_field_index_b,
+            _cfview_operation,
+            source_files=_cfview_source_files,
+        )
+        send_to_gui('METADATA_APPEND', metadata_rows) #omit4save
+        _cfview_added_count = len(metadata_rows)
+        _cfview_first_id = metadata_rows[0].get('identity', 'unknown') if metadata_rows else 'unknown'
+        send_to_gui(
+            f"STATUS:Added {{_cfview_added_count}} field(s) via {{_cfview_operation}}; first: {{_cfview_first_id}}"
+        ) #omit4save
+        """
+    ).lstrip()
+
+
 def regrid_fields_operation(regrid_config_json: str) -> str:
     """Generate worker code that regrids selected field(s) from JSON config."""
     return textwrap.dedent(

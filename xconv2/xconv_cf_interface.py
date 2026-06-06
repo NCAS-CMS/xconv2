@@ -34,6 +34,7 @@ __all__ = [
     "save_selected_fields",
     "add_dimension_coordinate_bounds",
     "append_unary_xy_field_operation",
+    "append_binary_field_operation",
     "regrid_from_config",
     "get_data_for_plotting",
     "save_selected_field_data",
@@ -445,6 +446,66 @@ def append_unary_xy_field_operation(
         fields.append(new_field)
 
     return field_info(new_fields)
+
+
+def append_binary_field_operation(
+    fields: list,
+    index_a: int,
+    index_b: int,
+    operation: str,
+    source_files: list[str] | None = None,
+) -> list[dict[str, object]]:
+    """Create derived field(s) from two source fields, append them, and return metadata rows."""
+
+    if index_a < 0 or index_a >= len(fields):
+        raise IndexError(f"Field index out of range for binary operation {operation!r}: {index_a}")
+    if index_b < 0 or index_b >= len(fields):
+        raise IndexError(f"Field index out of range for binary operation {operation!r}: {index_b}")
+    if index_a == index_b:
+        raise ValueError("Binary field operation requires two distinct fields.")
+
+    fld_a = fields[index_a]
+    fld_b = fields[index_b]
+
+    if coordinate_info(fld_a) != coordinate_info(fld_b):
+        raise ValueError("Two fields need the same coordinates")
+
+    if fld_a.identity() != fld_b.identity():
+        raise ValueError("Two fields need the same identity")
+
+    units_a = str(getattr(fld_a, "Units", ""))
+    units_b = str(getattr(fld_b, "Units", ""))
+    if units_a != units_b:
+        raise ValueError("Two fields need the same units")
+
+    normalized = operation.strip().lower()
+    if normalized == "difference_ab":
+        new_field = fld_a - fld_b
+    elif normalized == "difference_ba":
+        new_field = fld_b - fld_a
+    else:
+        raise ValueError(f"Unsupported binary field operation: {operation!r}")
+
+    today = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    history = new_field.get_property("history", "")
+    if history:
+        history += "\n"
+    history += (
+        f"{new_field.identity()} derived from {fld_a.identity()} and {fld_b.identity()} "
+        f"by {normalized} via cf-python {cf.__version__} ({today})."
+    )
+    if source_files:
+        history += f" Source files: {', '.join(str(x) for x in source_files if str(x).strip())}."
+    new_field.set_property("history", history)
+
+    if source_files:
+        new_field.set_property(
+            "xconv_source_files",
+            ", ".join(str(x) for x in source_files if str(x).strip()),
+        )
+
+    fields.append(new_field)
+    return field_info([new_field])
 
 
 def regrid_from_config(fields: list, regrid_config_json: str) -> list[dict[str, object]]:
