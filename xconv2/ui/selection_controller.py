@@ -108,6 +108,14 @@ class SelectionController:
     def __init__(self, host: "CFVCore") -> None:
         self.host = host
 
+    @staticmethod
+    def _slider_display_name(name: str) -> str:
+        """Return a user-facing coordinate name without mutating the key name."""
+        display_name = name
+        if display_name.lower().startswith("long_name="):
+            display_name = display_name[10:].strip()
+        return display_name.capitalize()
+
     def _set_save_controls_enabled(self, enabled: bool) -> None:
         """Enable or disable save mode selector and save action button."""
         save_combo = getattr(self.host, "save_target_combo", None)
@@ -178,7 +186,8 @@ class SelectionController:
             header_row = QHBoxLayout()
             header_row.setContentsMargins(0, 0, 0, 0)
             header_row.setSpacing(4)
-            name_label = QLabel(f"{name.upper()}:")
+            name_label = QLabel(f"{self._slider_display_name(name)}:")
+            name_label.setStyleSheet("font-weight: 600;")
             collapse_label = QLabel("collapse")
             collapse_checkbox = QCheckBox("")
             collapse_checkbox.setToolTip("Select a collapse method")
@@ -199,6 +208,8 @@ class SelectionController:
             bounds_end_label = QLabel(str(values[-1]))
             bounds_start_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             bounds_end_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+
 
             slider = KeyboardRangeSlider(
                 Qt.Horizontal,
