@@ -113,10 +113,11 @@ GUI_EXCLUDES = [
     "netCDF4", "xarray", "h5py", "h5netcdf",
     # Worker-specific xconv2 submodules (importing them drags in cf/scipy)
     "xconv2.worker",
-    "xconv2.xconv_cf_interface",
-    "xconv2.lineplot",
+    "xconv2.cf_interface",
+    "xconv2.cf_interface.lineplot",
+    "xconv2.cf_interface.regridding",
     "xconv2.cell_method_handler",
-    "xconv2.plot_layout_helpers",
+    "xconv2.cf_interface.plot_layout_helpers",
     # Heavyweight tooling never needed in the GUI process
     "IPython", "ipykernel", "ipython_genutils",
     "jupyter", "jupyter_client", "jupyter_core",
