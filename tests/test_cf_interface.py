@@ -647,12 +647,18 @@ def test_regrid_from_config_healpix_target(monkeypatch: pytest.MonkeyPatch) -> N
     fields = [cf.example_field(0), cf.example_field(1)]
     seen: dict[str, object] = {"calls": [], "level": None}
 
-    def _fake_regrids(self, **kwargs):
+    def _fake_create_healpix(level):
+        seen["level"] = int(level)
+        return object()
+
+    def _fake_regrids(self, dst, **kwargs):
+        _ = self
         calls = seen["calls"]
         assert isinstance(calls, list)
-        calls.append(dict(kwargs))
+        calls.append({"dst": dst, "kwargs": dict(kwargs)})
         return cf.example_field(2)
 
+    monkeypatch.setattr(cf.Domain, "create_healpix", _fake_create_healpix)
     monkeypatch.setattr(cf.Field, "regrids", _fake_regrids)
 
     payload = {
@@ -664,21 +670,23 @@ def test_regrid_from_config_healpix_target(monkeypatch: pytest.MonkeyPatch) -> N
 
     rows = regrid_from_config(fields, json.dumps(payload))
 
+    assert seen["level"] == 6
     assert len(rows) == 2
     calls = seen["calls"]
     assert isinstance(calls, list)
     assert len(calls) == 2
-    assert all(entry == {"method": "conservative_2nd", "target": "healpix", "level": 6} for entry in calls)
+    assert all(entry["kwargs"] == {"method": "conservative_2nd"} for entry in calls)
 
 
 def test_regrid_from_config_regular_latlon_target(monkeypatch: pytest.MonkeyPatch) -> None:
     fields = [cf.example_field(0), cf.example_field(1)]
     seen: dict[str, object] = {"targets": []}
 
-    def _fake_regrids(self, **kwargs):
+    def _fake_regrids(self, dst, **kwargs):
+        _ = self
         targets = seen["targets"]
         assert isinstance(targets, list)
-        targets.append(dict(kwargs))
+        targets.append({"dst": dst, "kwargs": dict(kwargs)})
         return cf.example_field(2)
 
     monkeypatch.setattr(cf.Field, "regrids", _fake_regrids)
@@ -699,25 +707,18 @@ def test_regrid_from_config_regular_latlon_target(monkeypatch: pytest.MonkeyPatc
     targets = seen["targets"]
     assert isinstance(targets, list)
     assert len(targets) == 2
-    assert all(
-        entry == {
-            "method": "nearest_stod",
-            "target": "regular lonlat",
-            "longitude": {"nx": 10, "lon1": 0.0, "delta": 1.0},
-            "latitude": {"ny": 10, "lat1": -45.0, "delta": 1.0},
-        }
-        for entry in targets
-    )
+    assert all(entry["kwargs"] == {"method": "nearest_stod"} for entry in targets)
+    assert isinstance(targets[0]["dst"], list)
+    assert len(targets[0]["dst"]) == 2
 
 
 def test_regrid_from_config_asset_target_spec_list_form(monkeypatch: pytest.MonkeyPatch) -> None:
     fields = [cf.example_field(0), cf.example_field(1)]
-    seen: dict[str, object] = {"kwargs": []}
+    seen: dict[str, object] = {"target": None}
 
-    def _fake_regrids(self, **kwargs):
-        kwargs_list = seen["kwargs"]
-        assert isinstance(kwargs_list, list)
-        kwargs_list.append(dict(kwargs))
+    def _fake_regrids(self, dst, **kwargs):
+        _ = (self, kwargs)
+        seen["target"] = dst
         return cf.example_field(2)
 
     monkeypatch.setattr(cf.Field, "regrids", _fake_regrids)
@@ -735,18 +736,9 @@ def test_regrid_from_config_asset_target_spec_list_form(monkeypatch: pytest.Monk
     rows = regrid_from_config(fields, json.dumps(payload))
 
     assert len(rows) == 2
-    kwargs_list = seen["kwargs"]
-    assert isinstance(kwargs_list, list)
-    assert len(kwargs_list) == 2
-    assert all(
-        entry == {
-            "method": "linear",
-            "target": "regular lonlat",
-            "longitude": {"nx": 432, "lon1": 0.41666667, "delta": 0.55555556},
-            "latitude": {"ny": 324, "lat1": -89.72222222, "delta": 0.55555556},
-        }
-        for entry in kwargs_list
-    )
+    target = seen["target"]
+    assert isinstance(target, list)
+    assert len(target) == 2
 
 
 def test_regrid_from_config_rejects_unknown_target_without_spec() -> None:

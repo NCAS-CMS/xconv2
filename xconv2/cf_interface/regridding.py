@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 
 import cf
+import numpy as np
 
 from .metadata_operations import field_info
 
@@ -102,7 +103,20 @@ class XconvRegridder:
 
         for source_index in self.field_indices:
             src_field = fields[source_index]
-            regridded = src_field.regrids(**self.keywords)
+            kwargs = dict(self.keywords)
+            target = kwargs.pop("target", None)
+
+            if target == "healpix":
+                level = kwargs.pop("level")
+                dst = cf.Domain.create_healpix(level)
+                regridded = src_field.regrids(dst, **kwargs)
+            elif target == "regular lonlat":
+                longitude = kwargs.pop("longitude")
+                latitude = kwargs.pop("latitude")
+                dst = _build_lonlat_coordinate_list(longitude, latitude)
+                regridded = src_field.regrids(dst, **kwargs)
+            else:
+                regridded = src_field.regrids(**kwargs)
 
             history += (
                 f"{regridded.identity()} regridded from {self._domain_description(src_field)}\n"
@@ -111,6 +125,7 @@ class XconvRegridder:
             )
             regridded.set_property("history", history)
             new_fields.append(regridded)
+            fields.append(regridded)
 
         return field_info(new_fields)
 
@@ -137,11 +152,13 @@ class XconvRegridder:
             }
         """
         try:
-            nx, lon1, delta = (target_spec.get("longitude")[k] for k in ("nx", "lon1", "delta"))
-            ny, lat1, delta = (target_spec.get("latitude")[k] for k in ("ny", "lat1", "delta"))
+            lon_spec = target_spec.get("longitude")
+            lat_spec = target_spec.get("latitude")
+            nx, lon1, dlon = lon_spec["nx"], lon_spec["lon1"], lon_spec["delta"]
+            ny, lat1, dlat = lat_spec["ny"], lat_spec["lat1"], lat_spec["delta"]
         except (AttributeError, TypeError, KeyError) as exc:
             raise ValueError("Invalid target_spec for regular lonlat target.") from exc
-        return (nx, lon1, delta, ny, lat1, delta)
+        return (nx, lon1, dlon, ny, lat1, dlat)
     
 
     @staticmethod
@@ -162,12 +179,40 @@ class XconvRegridder:
         elif target == "healpix":
             return {"method": method, "target": "healpix", "level": spec["level"]}
         elif target == "regular lonlat":
-            nx, lon1, delta, ny, lat1, delta = spec
+            nx, lon1, dlon, ny, lat1, dlat = spec
             return {"method": method, "target": "regular lonlat", 
-                    "longitude": {"nx": nx, "lon1": lon1, "delta": delta},
-                    "latitude": {"ny": ny, "lat1": lat1, "delta": delta}}
+                    "longitude": {"nx": nx, "lon1": lon1, "delta": dlon},
+                    "latitude": {"ny": ny, "lat1": lat1, "delta": dlat}}
         else:
             raise ValueError(f"Unsupported regrid target: {target!r}")  
+
+
+def _build_lonlat_coordinate_list(longitude: dict, latitude: dict) -> list:
+    """Build a list of cf.DimensionCoordinate objects for a regular lon/lat grid.
+    
+    Args:
+        longitude: dict with keys nx, lon1, delta
+        latitude:  dict with keys ny, lat1, delta
+    Returns:
+        [lat_dc, lon_dc] as required by cf.Field.regrids()
+    """
+    nx, lon1, dlon = longitude["nx"], longitude["lon1"], longitude["delta"]
+    ny, lat1, dlat = latitude["ny"], latitude["lat1"], latitude["delta"]
+
+    lon_vals = lon1 + np.arange(nx) * dlon
+    lon_bounds = np.column_stack([lon_vals - dlon / 2, lon_vals + dlon / 2])
+    lat_vals = lat1 + np.arange(ny) * dlat
+    lat_bounds = np.column_stack([lat_vals - dlat / 2, lat_vals + dlat / 2])
+
+    lon_dc = cf.DimensionCoordinate(
+        data=cf.Data(lon_vals, units="degrees_east"),
+        bounds=cf.Bounds(data=cf.Data(lon_bounds, units="degrees_east")),
+    )
+    lat_dc = cf.DimensionCoordinate(
+        data=cf.Data(lat_vals, units="degrees_north"),
+        bounds=cf.Bounds(data=cf.Data(lat_bounds, units="degrees_north")),
+    )
+    return [lat_dc, lon_dc]
 
 
 def regrid_from_config(fields, config_json):
