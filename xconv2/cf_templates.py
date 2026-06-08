@@ -157,6 +157,33 @@ def add_dimension_coordinate_bounds(index: int) -> str:
     ).lstrip()
 
 
+def apply_selection_field_operation(
+    index: int,
+    selections: dict[str, tuple[object, object]],
+    collapse_by_coord: dict[str, str],
+) -> str:
+    """Generate worker code that applies current selection and appends a new field."""
+    return textwrap.dedent(
+        f"""
+        _cfview_field_index = {index}
+        _cfview_selection_spec = {selections!r}
+        _cfview_collapse_by_coord = {collapse_by_coord!r}
+        metadata_rows = append_selection_field_operation(
+            f,
+            _cfview_field_index,
+            _cfview_selection_spec,
+            _cfview_collapse_by_coord,
+        )
+        send_to_gui('METADATA_APPEND', metadata_rows) #omit4save
+        _cfview_added_count = len(metadata_rows)
+        _cfview_first_id = metadata_rows[0].get('identity', 'unknown') if metadata_rows else 'unknown'
+        send_to_gui(
+            f"STATUS:Added {{_cfview_added_count}} field(s) via apply_selection; first: {{_cfview_first_id}}"
+        ) #omit4save
+        """
+    ).lstrip()
+
+
 def remove_selected_fields(indices: list[int]) -> str:
     """Generate worker code that removes selected fields from the worker list."""
     return textwrap.dedent(
@@ -200,6 +227,7 @@ def plot_from_selection(
     collapse_by_coord: dict[str, str],
     plot_kind: str,
     plot_options: dict[str, object] | None = None,
+    plot_action: str = "plot",
     save_data_path: str | None = None,
 ) -> str:
     """Generate worker code for plotting based on GUI selections.
@@ -209,13 +237,15 @@ def plot_from_selection(
     """
     if plot_kind not in {"lineplot", "contour"}:
         raise ValueError(f"Unsupported plot kind: {plot_kind}")
+    if plot_action not in {"plot", "overplot"}:
+        raise ValueError(f"Unsupported plot action: {plot_action}")
 
     prep_code = _pfld_from_selection_code(selections, collapse_by_coord)
 
     if plot_kind == "lineplot":
-        plot_code = lineplot(options=plot_options)
+        plot_code = lineplot(options=plot_options, plot_action=plot_action)
     elif plot_kind == "contour":
-        plot_code = contour(options=plot_options)
+        plot_code = contour(options=plot_options, plot_action=plot_action)
 
     data_save_code = _save_data_code(save_data_path) if save_data_path else ""
     parts = [prep_code, plot_code]
@@ -275,11 +305,12 @@ def _pfld_from_selection_code(
     return "\n".join([payload_code, selection_code])
 
 
-def contour(options: dict[str, object] | None) -> str:
+def contour(options: dict[str, object] | None, plot_action: str) -> str:
     """Generate worker code that delegates contour rendering to API helpers."""
     payload_code = textwrap.dedent(
         f"""
         contour_options = {options!r}
+        contour_plot_action = {plot_action!r}
         mapset_options = {{
             'map_projection': contour_options.get('map_projection') if contour_options else None,
             'bbox': contour_options.get('bbox') if contour_options else None,
@@ -291,6 +322,7 @@ def contour(options: dict[str, object] | None) -> str:
         run_contour_plot(
             pfld=pfld,
             options=contour_options,
+            plot_action=contour_plot_action,
             mapset=mapset_options,
             selection_spec=selection_spec,
             collapse_by_coord=collapse_by_coord,
@@ -302,14 +334,16 @@ def contour(options: dict[str, object] | None) -> str:
     return payload_code
 
 
-def lineplot(options: dict[str, object] | None) -> str:
+def lineplot(options: dict[str, object] | None, plot_action: str) -> str:
     """Generate worker code that delegates line-plot rendering to API helpers."""
     payload_code = textwrap.dedent(
         f"""
         lineplot_options = {options!r}
+        lineplot_action = {plot_action!r}
         run_line_plot(
             pfld=pfld,
             options=lineplot_options,
+            plot_action=lineplot_action,
             selection_spec=selection_spec,
             collapse_by_coord=collapse_by_coord,
         )

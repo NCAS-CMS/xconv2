@@ -495,7 +495,9 @@ class SelectionController:
             self.host.last_varying_dims = None
             self.host.available_plot_kinds = []
             self.host.selected_plot_kind = None
+            self.host.selected_plot_action = "plot"
             self.host.plot_view_controller.set_plot_type_options([], None)
+            self.host.plot_view_controller.set_plot_action_options(has_existing_plot=False)
             self.host.plot_button.setEnabled(False)
             self.host.options_button.setEnabled(False)
             self._set_save_controls_enabled(False)
@@ -541,6 +543,9 @@ class SelectionController:
         self.host.selected_plot_kind = selected_kind
         self.host.last_varying_dims = varying_dims
         self.host.plot_view_controller.set_plot_type_options(available_plot_kinds, selected_kind)
+        self.host.plot_view_controller.set_plot_action_options(
+            has_existing_plot=getattr(self.host, "_plot_pixmap_original", None) is not None
+        )
 
         if varying_dims == 0:
             self.host.plot_summary_label.setText(f"{dims_text} \nTotal collapse, plot not possible")

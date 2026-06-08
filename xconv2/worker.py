@@ -27,8 +27,8 @@ import cf
 import cfplot as cfp
 from matplotlib import pyplot as plt
 
-from . import xconv_cf_interface
-from . import lineplot as xconv_lineplot
+from . import cf_interface
+from .cf_interface import lineplot as xconv_lineplot
 from . import cell_method_handler as xconv_cell_method_handler
 from . import __version__
 from .logging_utils import apply_scoped_runtime_logging, configure_logging
@@ -68,7 +68,7 @@ SAVE_TASK_HEADER = "#SAVE_TASK_CODE_PATH_B64:"
 EMIT_IMAGE_HEADER = "#EMIT_IMAGE:"
 TASK_KIND_HEADER = "#TASK_KIND:"
 TASK_PAYLOAD_HEADER = "#TASK_PAYLOAD_B64:"
-INTERFACE_EXPORTS = tuple(getattr(xconv_cf_interface, "__all__", ()))
+INTERFACE_EXPORTS = tuple(getattr(cf_interface, "__all__", ()))
 OMIT4SAVE_TOKEN = "#omit4save"
 REMOTE_SESSION_TTL_SECONDS = 180.0
 REMOTE_SESSION_MAX = 4
@@ -108,6 +108,8 @@ class RemoteSessionEntry:
 
 remote_session_pool: dict[str, RemoteSessionEntry] = {}
 
+_HANDLED_TASK_EXCEPTIONS = (ValueError, IndexError)
+
 # This dictionary persists data (like 'f') between GUI commands
 worker_globals = {
     'cf': cf,
@@ -119,7 +121,7 @@ worker_globals = {
 # Expose helper functions/constants from the interface module to generated code.
 worker_globals.update(
     {
-        name: getattr(xconv_cf_interface, name)
+        name: getattr(cf_interface, name)
         for name in INTERFACE_EXPORTS
     }
 )
@@ -510,6 +512,7 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
             raise ValueError("REMOTE_OPEN requires session_id, descriptor_hash, and descriptor")
 
         uri = str(payload.get("uri", ""))
+        append = bool(payload.get("append", False))
         raw_paths = payload.get("paths")
         if isinstance(raw_paths, list):
             paths = [str(item) for item in raw_paths if str(item)]
@@ -550,9 +553,17 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
         worker_globals["_cfview_file_path"] = uri
         worker_globals["_cfview_field_index"] = None
         worker_globals["_cfview_remote_descriptor"] = descriptor
-        worker_globals["f"] = fields
-
-        send_to_gui("METADATA", xconv_cf_interface.field_info(fields))
+        if append:
+            existing = worker_globals.get("f")
+            if existing is None:
+                worker_globals["f"] = fields
+            else:
+                existing.extend(fields)
+                worker_globals["f"] = existing
+            send_to_gui("METADATA", cf_interface.field_info(fields))
+        else:
+            worker_globals["f"] = fields
+            send_to_gui("METADATA", cf_interface.field_info(fields))
         send_to_gui(
             "REMOTE_OPEN_RESULT",
             {
@@ -583,7 +594,7 @@ def _build_saved_plot_script(exec_code: str) -> str:
 
     helper_sources: dict[str, str] = {}
     for name in INTERFACE_EXPORTS:
-        obj = getattr(xconv_cf_interface, name, None)
+        obj = getattr(cf_interface, name, None)
         if obj is None or not callable(obj):
             continue
         try:
@@ -608,7 +619,7 @@ def _build_saved_plot_script(exec_code: str) -> str:
                 queue.append(candidate)
 
     # Collect auxiliary functions from cell_method_handler that are referenced by
-    # inlined helpers but are not exported from xconv_cf_interface directly.
+    # inlined helpers but are not exported from cf_interface directly.
     aux_module_funcs: list[tuple[str, object]] = [
         (name, obj)
         for name, obj in vars(xconv_cell_method_handler).items()
@@ -642,7 +653,7 @@ def _build_saved_plot_script(exec_code: str) -> str:
             "import numpy as np",
             "import pandas as pd",
             "",
-            "# Inlined LinePlot class from xconv2.lineplot for standalone execution.",
+            "# Inlined LinePlot class from xconv2.cf_interface.lineplot for standalone execution.",
             "",
         ])
         try:
@@ -668,7 +679,7 @@ def _build_saved_plot_script(exec_code: str) -> str:
 
     lines.extend([
         "",
-        "# Inlined helpers from xconv2.xconv_cf_interface for standalone execution.",
+        "# Inlined helpers from xconv2.cf_interface for standalone execution.",
         "",
     ])
 
@@ -731,7 +742,6 @@ def _emit_latest_plot_image() -> None:
     buffer.seek(0)
     send_to_gui("IMG_READY", buffer.getvalue())
     buffer.close()
-    plt.close("all")
 
 
 def main():
@@ -825,6 +835,33 @@ def main():
                         started=task_start,
                         rss_before_mb=rss_before_mb,
                     )
+                except _HANDLED_TASK_EXCEPTIONS as exc:
+                    error_line = f"{type(exc).__name__}: {exc}"
+                    send_to_gui(
+                        "REMOTE_OPEN_RESULT",
+                        {
+                            "session_id": str((task_payload or {}).get("session_id", "")),
+                            "uri": str((task_payload or {}).get("uri", "")),
+                            "ok": False,
+                            "error": error_line,
+                        },
+                    )
+                    descriptor_hash = str((task_payload or {}).get("descriptor_hash", ""))
+                    session_id = str((task_payload or {}).get("session_id", ""))
+                    if descriptor_hash and session_id:
+                        _send_remote_status(
+                            "failed",
+                            session_id=session_id,
+                            descriptor_hash=descriptor_hash,
+                            message=error_line,
+                        )
+                    send_to_gui(f"STATUS:Error - {error_line}")
+                    logger.error("Control task handled error kind=%s: %s", task_kind, error_line)
+                    _log_task_memory(
+                        f"control_failed kind={task_kind}",
+                        started=task_start,
+                        rss_before_mb=rss_before_mb,
+                    )
                 except Exception:
                     err = traceback.format_exc()
                     error_line = err.splitlines()[-1]
@@ -885,6 +922,15 @@ def main():
                 logger.info("Task complete")
                 _log_task_memory(
                     "exec_task",
+                    started=task_start,
+                    rss_before_mb=rss_before_mb,
+                )
+            except _HANDLED_TASK_EXCEPTIONS as exc:
+                error_line = f"{type(exc).__name__}: {exc}"
+                send_to_gui(f"STATUS:Error - {error_line}")
+                logger.error("Task handled error: %s", error_line)
+                _log_task_memory(
+                    "exec_task_failed",
                     started=task_start,
                     rss_before_mb=rss_before_mb,
                 )

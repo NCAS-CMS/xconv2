@@ -176,7 +176,11 @@ class PlotViewController:
         self.host.plot_type_combo.setMinimumWidth(130)
         self.host.plot_type_combo.setEnabled(False)
         self.host.plot_type_combo.currentIndexChanged.connect(self.on_plot_type_changed)
-        self.host.plot_button = QPushButton("Plot")
+        self.host.plot_action_combo = QComboBox()
+        self.host.plot_action_combo.setMinimumWidth(110)
+        self.host.plot_action_combo.currentIndexChanged.connect(self.on_plot_action_changed)
+        self.set_plot_action_options(has_existing_plot=False)
+        self.host.plot_button = QPushButton("GO")
         self.host.plot_button.setEnabled(False)
         self.host.plot_button.clicked.connect(self.on_plot_button_clicked)
         self.host.options_button = QPushButton("Options")
@@ -214,8 +218,9 @@ class PlotViewController:
         plot_controls_layout.setContentsMargins(6, 2, 6, 2)
         plot_controls_layout.setSpacing(6)
         plot_controls_layout.addWidget(self.host.plot_type_combo)
-        plot_controls_layout.addWidget(self.host.plot_button)
+        plot_controls_layout.addWidget(self.host.plot_action_combo)
         plot_controls_layout.addWidget(self.host.options_button)
+        plot_controls_layout.addWidget(self.host.plot_button)
 
         export_controls_group = QFrame()
         export_controls_group.setObjectName("export_controls_group")
@@ -264,6 +269,28 @@ class PlotViewController:
 
         combo.blockSignals(False)
 
+    def set_plot_action_options(self, has_existing_plot: bool) -> None:
+        """Populate the plot-action selector based on current plot availability."""
+        combo = getattr(self.host, "plot_action_combo", None)
+        if combo is None:
+            return
+
+        current_action = getattr(self.host, "selected_plot_action", "plot")
+        options = ["plot"]
+        if has_existing_plot:
+            options.append("overplot")
+
+        combo.blockSignals(True)
+        combo.clear()
+        for action in options:
+            combo.addItem(action.title(), action)
+
+        selected_action = current_action if current_action in options else "plot"
+        selected_index = combo.findData(selected_action)
+        combo.setCurrentIndex(selected_index if selected_index >= 0 else 0)
+        combo.blockSignals(False)
+        self.host.selected_plot_action = selected_action
+
     def on_plot_type_changed(self) -> None:
         """Persist selected plot type and refresh context-sensitive actions."""
         combo = getattr(self.host, "plot_type_combo", None)
@@ -273,6 +300,15 @@ class PlotViewController:
         if isinstance(selected_kind, str):
             self.host.selected_plot_kind = selected_kind
             self.host.selection_controller.refresh_plot_summary()
+
+    def on_plot_action_changed(self) -> None:
+        """Persist selected plot action after combo-box changes."""
+        combo = getattr(self.host, "plot_action_combo", None)
+        if combo is None:
+            return
+        selected_action = combo.currentData()
+        if isinstance(selected_action, str):
+            self.host.selected_plot_action = selected_action
 
     def set_plot_loading(self, is_loading: bool, message: str = "Rendering plot...") -> None:
         """Show or hide an inline loading overlay while worker plot tasks run."""
@@ -295,6 +331,7 @@ class PlotViewController:
         self.host._plot_pixmap_original = None
         self.host.plot_frame.setPixmap(QPixmap())
         self.host.plot_frame.setText(message)
+        self.set_plot_action_options(has_existing_plot=False)
 
     def on_plot_button_clicked(self) -> None:
         """Request a plot refresh when the current selection is plottable."""
@@ -333,6 +370,7 @@ class PlotViewController:
             return
 
         self.host._plot_pixmap_original = pixmap
+        self.set_plot_action_options(has_existing_plot=True)
         self.set_plot_loading(False)
         self.refresh_plot_pixmap()
         QTimer.singleShot(0, self.fit_window_to_plot_aspect)

@@ -486,6 +486,7 @@ class CFVCore(QMainWindow):
         self.last_varying_dims: int | None = None
         self.available_plot_kinds: list[str] = []
         self.selected_plot_kind: str | None = None
+        self.selected_plot_action: str = "plot"
         self.plot_options_by_kind: dict[str, dict[str, object]] = {}
         self._plot_pixmap_original: QPixmap | None = None
         self.current_selection_info_text = "No selection info available."
@@ -1989,6 +1990,10 @@ class CFVCore(QMainWindow):
     def _remove_selected_fields(self) -> None:
         """Remove selected fields from the current list (worker-backed windows override)."""
         self._show_not_implemented_dialog("Remove selected fields")
+
+    def _field_ops_apply_selection(self) -> None:
+        """Placeholder action for Field Ops -> Apply Selection."""
+        self._show_not_implemented_dialog("Field Ops: Apply Selection")
 
     def _field_ops_add_bounds(self) -> None:
         """Create missing dimension-coordinate bounds on the selected field."""

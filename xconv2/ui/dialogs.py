@@ -2256,19 +2256,25 @@ class RegridDialog(QDialog):
         choice = self._target_combo.currentText()
 
         if choice == self._SELECTED_FIELD_ENTRY:
-            if len(self._selected_fields) < 2:
-                QMessageBox.warning(
-                    self,
-                    "Not enough fields",
-                    "You need at least two fields selected to use 'selected field' as the target.",
-                )
-                return
             self._source_field_combo.clear()
-            for row in self._selected_fields:
-                self._source_field_combo.addItem(
-                    str(row.get("identity", "")),
-                    int(row.get("index", -1)),
-                )
+            parent_fields = getattr(self.parent(), "field_list_widget", None)
+            if parent_fields is not None and hasattr(parent_fields, "count") and hasattr(parent_fields, "item"):
+                for idx in range(parent_fields.count()):
+                    item = parent_fields.item(idx)
+                    if item is None:
+                        continue
+                    self._source_field_combo.addItem(str(item.text()), int(idx))
+            else:
+                for row in self._selected_fields:
+                    self._source_field_combo.addItem(
+                        str(row.get("identity", "")),
+                        int(row.get("index", -1)),
+                    )
+
+            if self._source_field_combo.count() <= 0:
+                QMessageBox.warning(self, "No fields", "No fields are available to use as a regrid target.")
+                return
+
             self._chosen_field_label.clear()
             self._detail_stack.setCurrentIndex(2)
             self._post_config_widget.show()
@@ -2341,9 +2347,19 @@ class RegridDialog(QDialog):
             QMessageBox.warning(self, "Not configured", "Press Configure before running regrid.")
             return
 
-        if self._target_combo.currentText() == self._SELECTED_FIELD_ENTRY and self._source_field_combo.count() <= 0:
-            QMessageBox.warning(self, "Missing target field", "Choose a target field before running regrid.")
-            return
+        if self._target_combo.currentText() == self._SELECTED_FIELD_ENTRY:
+            if self._source_field_combo.count() <= 0:
+                QMessageBox.warning(self, "Missing target field", "Choose a target field before running regrid.")
+                return
+
+            selected_indices = [
+                int(row.get("index", -1))
+                for row in self._selected_fields
+                if int(row.get("index", -1)) >= 0
+            ]
+            if not selected_indices:
+                QMessageBox.warning(self, "Missing source field", "Select at least one source field to regrid.")
+                return
 
         config = self._build_regrid_config()
         if self._on_submit is not None:

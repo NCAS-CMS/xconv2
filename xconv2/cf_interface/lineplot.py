@@ -5,7 +5,7 @@ import pandas as pd
 from matplotlib import pyplot as plt
 
 from xconv2.cell_method_handler import cell_methods_string_from_field
-from xconv2.plot_layout_helpers import (
+from xconv2.cf_interface.plot_layout_helpers import (
     annotation_text,
     apply_vertical_padding,
     estimate_layout_padding,
@@ -20,10 +20,12 @@ class LinePlot:
         pfld: object,
         options: dict[str, object] | None = None,
         collapse_by_coord: dict[str, str] | None = None,
+        plot_action: str = "plot",
     ) -> None:
         self.pfld = pfld
         self.default_options = options or {}
         self.collapse_by_coord = collapse_by_coord or {}
+        self.plot_action = "overplot" if plot_action == "overplot" else "plot"
         ndims = self._varying_dims(self.pfld)
         if ndims not in (1, 2):
             raise ValueError(f"Line plots only support 1D or 2D fields, got {ndims}D")
@@ -133,6 +135,16 @@ class LinePlot:
         merged_options = dict(self.default_options)
         if options:
             merged_options.update(options)
+
+        get_fignums = getattr(plt, "get_fignums", None)
+        has_open_figures = False
+        if callable(get_fignums):
+            try:
+                has_open_figures = bool(get_fignums())
+            except Exception:
+                has_open_figures = False
+        if self.plot_action != "overplot" and has_open_figures:
+            plt.close("all")
 
         filename = merged_options.get("filename")
         lineplot_kwargs = self._lineplot_kwargs(merged_options)

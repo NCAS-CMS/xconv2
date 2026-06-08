@@ -29,6 +29,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QLabel, QInputDialog, QLine
 
 from .cf_templates import (
     add_dimension_coordinate_bounds,
+    apply_selection_field_operation,
     binary_field_operation,
     contour_range_from_selection,
     coordinate_list,
@@ -41,7 +42,7 @@ from .cf_templates import (
     unary_xy_field_operation,
 )
 from .core_window import CFVCore
-from .xconv_cf_interface import parse_coordinate_subspace_commands
+from .cf_interface import parse_coordinate_subspace_commands
 # Remote-access helpers are imported lazily (inside the methods that use them)
 # so that p5rem/paramiko are not loaded at GUI startup.
 from .ui.dialogs import OpenURIDialog, RegridDialog, RemoteConfigurationDialog, RemoteOpenDialog, SaveSelectedFieldsDialog
@@ -129,6 +130,7 @@ class CFVMain(CFVCore):
         self._pending_metadata_source: str | None = None
         self._pending_reselect_field_index: int | None = None
         self._pending_field_op_source: str | None = None
+        self._pending_binary_operation_name: str | None = None
         self._shutting_down: bool = False
 
         self.worker = QProcess()
@@ -172,16 +174,11 @@ class CFVMain(CFVCore):
                 self._show_status_message(f"File already loaded: {normalized_path}")
                 return
 
-            had_loaded_files = bool(self._loaded_file_paths)
             self._loaded_file_paths.append(normalized_path)
             refresh_menu = getattr(self, "_refresh_open_files_menu", None)
             if callable(refresh_menu):
                 refresh_menu()
-            self._load_selected_file(
-                normalized_path,
-                clear_existing=not had_loaded_files,
-                append_metadata=had_loaded_files,
-            )
+            self._load_selected_files(list(self._loaded_file_paths))
             self.setWindowTitle(f"{self.base_window_title}: {len(self._loaded_file_paths)} files")
             return
 
@@ -380,6 +377,8 @@ class CFVMain(CFVCore):
                     display_status_text,
                     is_error=is_error_status,
                 )
+                if is_error_status:
+                    self._maybe_show_binary_validation_dialog(status_text)
 
                 is_plot_error = self._plot_request_in_flight and is_error_status
                 should_finish = False
@@ -446,6 +445,7 @@ class CFVMain(CFVCore):
                 else:
                     logger.warning("Unexpected METADATA_APPEND payload type: %s", type(metadata).__name__)
                 self._pending_field_op_source = None
+                self._pending_binary_operation_name = None
 
             elif line.startswith("IMG_READY:"):
                 logger.info(
@@ -530,13 +530,40 @@ class CFVMain(CFVCore):
             if not line:
                 continue
             logger.error("Worker stderr: %s", line)
+            self._maybe_show_binary_validation_dialog(line)
+
+    def _maybe_show_binary_validation_dialog(self, stderr_line: str) -> None:
+        """Show user-facing dialog for any pending binary-operation failure."""
+        if not self._pending_binary_operation_name:
+            return
+
+        message = stderr_line.strip()
+        if not message:
+            return
+
+        if message.startswith("Error -"):
+            message = message[len("Error -"):].strip()
+
+        for prefix in ("ValueError:", "IndexError:", "RuntimeError:", "TypeError:", "Exception:"):
+            if message.startswith(prefix):
+                message = message[len(prefix):].strip()
+                break
+
+        if not message:
+            return
+
+        QMessageBox.warning(self, self._pending_binary_operation_name, message)
+        self._show_status_message(message, is_error=True)
+        self._pending_binary_operation_name = None
 
     def handle_worker_process_error(self, process_error: QProcess.ProcessError) -> None:
         """Capture QProcess-level failures, such as start or crash issues."""
         if self._shutting_down:
             return
         logger.error("Worker process error: %s", process_error)
-        self._show_status_message(f"Worker process error: {process_error}", is_error=True)
+        message = f"Worker process error: {process_error}"
+        self._show_status_message(message, is_error=True)
+        self._maybe_show_binary_validation_dialog(message)
         if self._plot_request_in_flight:
             self._plot_request_in_flight = False
             self._plot_request_expects_image = False
@@ -547,10 +574,9 @@ class CFVMain(CFVCore):
         """Capture worker shutdown information."""
         logger.warning("Worker finished with exit_code=%s exit_status=%s", exit_code, exit_status)
         if exit_code != 0:
-            self._show_status_message(
-                f"Worker stopped unexpectedly (exit_code={exit_code}).",
-                is_error=True,
-            )
+            message = f"Worker stopped unexpectedly (exit_code={exit_code})."
+            self._show_status_message(message, is_error=True)
+            self._maybe_show_binary_validation_dialog(message)
         if self._plot_request_in_flight:
             self._plot_request_in_flight = False
             self._plot_request_expects_image = False
@@ -572,13 +598,27 @@ class CFVMain(CFVCore):
         self._show_status_message(f"Loading file: {file_path}")
         logger.info("Loading file in worker: %s", file_path)
 
-        code = (
-            f"_cfview_file_path = {file_path!r}\n"
-            "_cfview_field_index = None\n"
-            f"f = cf.read({file_path!r})\n"
-            + field_list
-            + "send_to_gui('METADATA', fields)"
-        )
+        if append_metadata:
+            code = (
+                f"_cfview_file_path = {file_path!r}\n"
+                "_cfview_field_index = None\n"
+                f"_cfview_new_fields = cf.read({file_path!r})\n"
+                "try:\n"
+                "    f\n"
+                "except NameError:\n"
+                "    f = []\n"
+                "f.extend(_cfview_new_fields)\n"
+                "fields = field_info(_cfview_new_fields)\n"
+                "send_to_gui('METADATA', fields)"
+            )
+        else:
+            code = (
+                f"_cfview_file_path = {file_path!r}\n"
+                "_cfview_field_index = None\n"
+                f"f = cf.read({file_path!r})\n"
+                + field_list
+                + "send_to_gui('METADATA', fields)"
+            )
         self._send_worker_task(code)
 
     def _load_selected_files(self, file_paths: list[str]) -> None:
@@ -628,6 +668,7 @@ class CFVMain(CFVCore):
                 "descriptor": self._remote_descriptor,
                 "uri": uri,
                 "path": remote_path,
+                "append": append_metadata,
             },
         )
 
@@ -1755,6 +1796,7 @@ class CFVMain(CFVCore):
         field_index = self._selected_field_index_for_operation(operation_name)
         if field_index is None:
             return
+        self._pending_binary_operation_name = None
 
         source_file = None
         selected_item = self.field_list_widget.item(field_index)
@@ -1775,6 +1817,7 @@ class CFVMain(CFVCore):
         field_index = self._selected_field_index_for_operation(operation_name)
         if field_index is None:
             return
+        self._pending_binary_operation_name = None
 
         source_file = None
         selected_item = self.field_list_widget.item(field_index)
@@ -1806,6 +1849,7 @@ class CFVMain(CFVCore):
         pair = self._selected_two_field_indices_for_operation(operation_name)
         if pair is None:
             return
+        self._pending_binary_operation_name = operation_name
 
         idx_a, idx_b = pair
         source_paths: list[str] = []
@@ -1878,8 +1922,41 @@ class CFVMain(CFVCore):
         dialog = RegridDialog(self, selected_rows, on_submit=self._run_regrid_operation)
         dialog.show()
 
+    def _field_ops_apply_selection(self) -> None:
+        """Apply current selection/collapse state and append result as a new field."""
+        context = self._build_plot_context()
+        if context is None:
+            return
+
+        field_index = self._selected_field_index_for_operation("Apply Selection")
+        if field_index is None:
+            return
+
+        selections, collapse_by_coord, _plot_kind = context
+        source_file = None
+        selected_item = self.field_list_widget.item(field_index)
+        if selected_item is not None:
+            raw_source = selected_item.data(Qt.UserRole + 2)
+            if isinstance(raw_source, str) and raw_source.strip():
+                source_file = raw_source
+
+        self._pending_binary_operation_name = None
+        self._pending_field_op_source = source_file
+
+        self._show_status_message(f"Applying selection on field index {field_index}...")
+        logger.info(
+            "Applying selection on field index %d with %d selection(s) and %d collapse(s)",
+            field_index,
+            len(selections),
+            len(collapse_by_coord),
+        )
+
+        code = apply_selection_field_operation(field_index, selections, collapse_by_coord)
+        self._send_worker_task(code, emit_image=False)
+
     def _run_regrid_operation(self, regrid_config: dict[str, object]) -> None:
         """Dispatch a regrid operation through worker-side JSON config parsing."""
+        self._pending_binary_operation_name = None
         selected_indices = regrid_config.get("field_indices", [])
         if not isinstance(selected_indices, list) or not selected_indices:
             self._show_status_message("Regrid configuration did not include selected fields.", is_error=True)
@@ -2284,6 +2361,10 @@ class CFVMain(CFVCore):
                 plot_options.setdefault("page_title_fontsize", self._page_title_fontsize())
                 plot_options.setdefault("annotation_fontsize", self._annotation_fontsize())
 
+            plot_action = getattr(self, "selected_plot_action", "plot")
+            if plot_action not in {"plot", "overplot"}:
+                plot_action = "plot"
+
             if save_plot_target:
                 plot_options["filename"] = save_plot_target
             elif not plot_options:
@@ -2295,6 +2376,7 @@ class CFVMain(CFVCore):
                     collapse_by_coord,
                     plot_kind,
                     plot_options,
+                    plot_action=plot_action,
                     save_data_path=save_data_target,
                 )
             except (ValueError, NotImplementedError) as exc:

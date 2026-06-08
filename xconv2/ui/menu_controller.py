@@ -98,6 +98,10 @@ class MenuController:
         file_menu.addSeparator()
 
         field_ops_menu = menu_bar.addMenu("Operations")
+        apply_selection_action = QAction("Apply Selection", self.host)
+        apply_selection_action.triggered.connect(self.host._field_ops_apply_selection)
+        field_ops_menu.addAction(apply_selection_action)
+
         add_bounds_action = QAction("Add Bounds", self.host)
         add_bounds_action.triggered.connect(self.host._field_ops_add_bounds)
         field_ops_menu.addAction(add_bounds_action)
