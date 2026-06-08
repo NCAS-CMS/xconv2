@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 
 import pytest
-import xconv2.xconv_cf_interface as cf_interface
-from xconv2.cf_templates import regrid_fields_operation
+import xconv2.cf_interface.maths as maths_ops
+import xconv2.cf_interface.metadata_operations as metadata_ops
+import xconv2.cf_interface.plotting as plotting
+from xconv2.cf_templates import apply_selection_field_operation, regrid_fields_operation
 
-from xconv2.xconv_cf_interface import (
+from xconv2.cf_interface import (
     add_dimension_coordinate_bounds,
+    append_selection_field_operation,
     append_binary_field_operation,
     append_unary_xy_field_operation,
     auto_contour_title,
@@ -305,10 +308,145 @@ def test_append_binary_field_operation_requires_two_distinct_indices() -> None:
 
 def test_append_binary_field_operation_requires_same_coordinates(monkeypatch: pytest.MonkeyPatch) -> None:
     fields = [cf.example_field(0), cf.example_field(1)]
-    monkeypatch.setattr(cf_interface, "coordinate_info", lambda fld: [(fld.identity(), ["0"], "1")])
 
     with pytest.raises(ValueError, match="Two fields need the same coordinates"):
         append_binary_field_operation(fields, 0, 1, "difference_ab")
+
+
+def test_append_binary_field_operation_coordinate_message_includes_reason(
+) -> None:
+    field_a = cf.example_field(2)
+    time_vals = field_a.dimension_coordinate("time").array
+    field_b = field_a.subspace(time=cf.wi(time_vals[0], time_vals[1]))
+    fields = [field_a, field_b]
+
+    with pytest.raises(ValueError, match="T coordinate element counts differ"):
+        append_binary_field_operation(fields, 0, 1, "difference_ab")
+
+
+def test_append_binary_field_operation_allows_different_t_values_if_same_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = cf.example_field(2)
+    field_b = base.copy()
+    time_b = field_b.dimension_coordinate("time")
+    shifted_values = time_b.array + 1000.0
+    try:
+        time_b.set_data(cf.Data(shifted_values, time_b.Units), inplace=True)
+    except TypeError:
+        time_b.set_data(cf.Data(shifted_values, time_b.Units))
+    fields = [base, field_b]
+
+    def _fake_sub(self, other):
+        _ = (self, other)
+        return cf.example_field(2)
+
+    monkeypatch.setattr(cf.Field, "__sub__", _fake_sub)
+
+    rows = append_binary_field_operation(fields, 0, 1, "difference_ab")
+    assert len(rows) == 1
+
+
+def test_append_binary_field_operation_rejects_different_t_lengths(
+) -> None:
+    field_a = cf.example_field(2)
+    time_vals = field_a.dimension_coordinate("time").array
+    field_b = field_a.subspace(time=cf.wi(time_vals[0], time_vals[1]))
+    fields = [field_a, field_b]
+
+    with pytest.raises(ValueError, match="Two fields need the same coordinates"):
+        append_binary_field_operation(fields, 0, 1, "difference_ab")
+
+
+def test_cf_subtraction_fails_when_time_values_differ_but_lengths_match() -> None:
+    """Document upstream cf behavior for equal-length, non-matching time coordinates."""
+    field_a = cf.example_field(2)
+    field_b = field_a.copy()
+
+    time_b = field_b.dimension_coordinate("time")
+    shifted_values = time_b.array + 1000.0
+    try:
+        time_b.set_data(cf.Data(shifted_values, time_b.Units), inplace=True)
+    except TypeError:
+        time_b.set_data(cf.Data(shifted_values, time_b.Units))
+
+    assert len(field_a.dimension_coordinate("time").array) == len(field_b.dimension_coordinate("time").array)
+
+    with pytest.raises(
+        ValueError,
+        match=r"Can't combine size .* 'time' axes with non-matching coordinate values",
+    ):
+        _ = field_a - field_b
+
+
+def test_append_binary_field_operation_allows_time_length_one_broadcast() -> None:
+    field_a = cf.example_field(2)
+    time_value = field_a.dimension_coordinate("time").array[0]
+    field_b = field_a.subspace(time=time_value)
+    fields = [field_a, field_b]
+
+    rows = append_binary_field_operation(fields, 0, 1, "difference_ab")
+
+    assert len(rows) == 1
+    assert len(fields) == 3
+
+
+def test_append_binary_field_operation_aligns_copied_subtrahend_time_coordinates() -> None:
+    field_a = cf.example_field(2)
+    field_b = field_a.copy()
+    original_time_values = field_b.dimension_coordinate("time").array.copy()
+
+    time_b = field_b.dimension_coordinate("time")
+    shifted_values = time_b.array + 1000.0
+    try:
+        time_b.set_data(cf.Data(shifted_values, time_b.Units), inplace=True)
+    except TypeError:
+        time_b.set_data(cf.Data(shifted_values, time_b.Units))
+
+    fields = [field_a, field_b]
+    rows = append_binary_field_operation(fields, 0, 1, "difference_ab")
+
+    assert len(rows) == 1
+    assert len(fields) == 3
+    history = str(rows[0]["properties"].get("history", ""))
+    assert "Time coordinates of the subtracted field were shifted to match the field it was subtracted from." in history
+    assert list(field_b.dimension_coordinate("time").array) != list(field_a.dimension_coordinate("time").array)
+    assert list(field_b.dimension_coordinate("time").array) != list(original_time_values)
+    assert list(field_b.dimension_coordinate("time").array) == list(shifted_values)
+
+
+def test_append_binary_field_operation_aligns_mismatched_time_calendars_without_mutation() -> None:
+    field_a = cf.example_field(2)
+    field_b = field_a.copy()
+    original_time_values = field_b.dimension_coordinate("time").array.copy()
+
+    time_a = field_a.dimension_coordinate("time")
+    time_b = field_b.dimension_coordinate("time")
+
+    try:
+        time_a.override_units("days since 1850-01-01 00:00:00 noleap", inplace=True)
+    except TypeError:
+        time_a.override_units("days since 1850-01-01 00:00:00 noleap")
+
+    try:
+        time_b.override_units("days since 1850-01-01 00:00:00 standard", inplace=True)
+    except TypeError:
+        time_b.override_units("days since 1850-01-01 00:00:00 standard")
+
+    shifted_values = time_b.array + 1000.0
+    try:
+        time_b.set_data(cf.Data(shifted_values, time_b.Units), inplace=True)
+    except TypeError:
+        time_b.set_data(cf.Data(shifted_values, time_b.Units))
+
+    fields = [field_a, field_b]
+    rows = append_binary_field_operation(fields, 0, 1, "difference_ab")
+
+    assert len(rows) == 1
+    history = str(rows[0]["properties"].get("history", ""))
+    assert "Time coordinates of the subtracted field were shifted to match the field it was subtracted from." in history
+    assert list(field_b.dimension_coordinate("time").array) == list(shifted_values)
+    assert list(field_b.dimension_coordinate("time").array) != list(original_time_values)
 
 
 def test_append_binary_field_operation_requires_same_identity(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -317,7 +455,7 @@ def test_append_binary_field_operation_requires_same_identity(monkeypatch: pytes
     other.del_property("standard_name", default=None)
     other.set_property("long_name", "different_identity")
     fields = [base, other]
-    monkeypatch.setattr(cf_interface, "coordinate_info", lambda _fld: [("X", ["0", "1"], "degrees")])
+    monkeypatch.setattr(maths_ops, "coordinate_info", lambda _fld: [("X", ["0", "1"], "degrees")])
 
     with pytest.raises(ValueError, match="Two fields need the same identity"):
         append_binary_field_operation(fields, 0, 1, "difference_ab")
@@ -328,7 +466,7 @@ def test_append_binary_field_operation_requires_same_units(monkeypatch: pytest.M
     other = base.copy()
     other.override_units("K", inplace=True)
     fields = [base, other]
-    monkeypatch.setattr(cf_interface, "coordinate_info", lambda _fld: [("X", ["0", "1"], "degrees")])
+    monkeypatch.setattr(maths_ops, "coordinate_info", lambda _fld: [("X", ["0", "1"], "degrees")])
 
     with pytest.raises(ValueError, match="Two fields need the same units"):
         append_binary_field_operation(fields, 0, 1, "difference_ab")
@@ -338,7 +476,7 @@ def test_append_binary_field_operation_records_source_files(monkeypatch: pytest.
     base = cf.example_field(0)
     fields = [base, base.copy()]
 
-    monkeypatch.setattr(cf_interface, "coordinate_info", lambda _fld: [("X", ["0", "1"], "degrees")])
+    monkeypatch.setattr(maths_ops, "coordinate_info", lambda _fld: [("X", ["0", "1"], "degrees")])
 
     def _fake_sub(self, other):
         _ = (self, other)
@@ -356,9 +494,107 @@ def test_append_binary_field_operation_records_source_files(monkeypatch: pytest.
 
     props = rows[0]["properties"]
     assert isinstance(props, dict)
-    assert "xconv_source_files" in props
-    assert "/tmp/a.nc" in str(props["xconv_source_files"])
-    assert "/tmp/b.nc" in str(props["xconv_source_files"])
+    assert set(props.keys()) == {"history"}
+    history = str(props["history"])
+    assert history.startswith("Difference constructed from:")
+    assert "File: a.nc" in history
+    assert "File: b.nc" in history
+
+
+def test_append_binary_field_operation_history_keeps_remote_source_location(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = cf.example_field(0)
+    fields = [base, base.copy()]
+
+    monkeypatch.setattr(maths_ops, "coordinate_info", lambda _fld: [("X", ["0", "1"], "degrees")])
+
+    def _fake_sub(self, other):
+        _ = (self, other)
+        return cf.example_field(2)
+
+    monkeypatch.setattr(cf.Field, "__sub__", _fake_sub)
+
+    rows = append_binary_field_operation(
+        fields,
+        0,
+        1,
+        "difference_ab",
+        source_files=["ssh://remote.example.org/data/a.nc", "/tmp/b.nc"],
+    )
+
+    props = rows[0]["properties"]
+    assert isinstance(props, dict)
+    history = str(props.get("history", ""))
+    assert "File: ssh://remote.example.org/data/a.nc" in history
+    assert "File: b.nc" in history
+
+
+def test_append_binary_field_operation_history_uses_unknown_when_sources_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = cf.example_field(0)
+    fields = [base, base.copy()]
+
+    monkeypatch.setattr(maths_ops, "coordinate_info", lambda _fld: [("X", ["0", "1"], "degrees")])
+
+    def _fake_sub(self, other):
+        _ = (self, other)
+        return cf.example_field(2)
+
+    monkeypatch.setattr(cf.Field, "__sub__", _fake_sub)
+
+    rows = append_binary_field_operation(fields, 0, 1, "difference_ab", source_files=[])
+    history = str(rows[0]["properties"].get("history", ""))
+    assert "File: unknown" in history
+
+
+def test_append_selection_field_operation_appends_new_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    fields = [cf.example_field(0)]
+    produced = cf.example_field(2)
+
+    monkeypatch.setattr(metadata_ops, "get_data_for_plotting", lambda _fld, _sel, _collapse: produced)
+
+    rows = append_selection_field_operation(
+        fields,
+        0,
+        {"latitude": (-10, 10)},
+        {"time": "mean"},
+    )
+
+    assert isinstance(rows, list)
+    assert len(rows) == 1
+    assert len(fields) == 2
+
+
+def test_apply_selection_field_operation_template_executes() -> None:
+    fields = [cf.example_field(0)]
+    selections = {"latitude": (-10, 10)}
+    collapse_by_coord = {"time": "mean"}
+    code = apply_selection_field_operation(0, selections, collapse_by_coord)
+
+    captured: dict[str, object] = {"args": None}
+    messages: list[tuple[str, object]] = []
+
+    def _fake_append_selection_field_operation(worker_fields, index, selection_spec, collapse_map):
+        captured["args"] = (worker_fields, index, selection_spec, collapse_map)
+        return [{"identity": "selected_field", "detail": "mock", "properties": {}, "chunk_shape": ""}]
+
+    namespace = {
+        "f": fields,
+        "append_selection_field_operation": _fake_append_selection_field_operation,
+        "send_to_gui": lambda prefix, payload=None: messages.append((prefix, payload)),
+    }
+
+    exec(code, namespace)
+
+    args = captured["args"]
+    assert isinstance(args, tuple)
+    assert args[0] is fields
+    assert args[1] == 0
+    assert args[2] == selections
+    assert args[3] == collapse_by_coord
+    assert ("METADATA_APPEND", [{"identity": "selected_field", "detail": "mock", "properties": {}, "chunk_shape": ""}]) in messages
 
 
 def test_regrid_from_config_selected_field_conservative(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -415,6 +651,32 @@ def test_regrid_from_config_selected_field_linear(monkeypatch: pytest.MonkeyPatc
     assert seen["kwargs"] == {"method": "linear"}
 
 
+def test_regrid_from_config_selected_field_target_not_in_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    fields = [cf.example_field(0), cf.example_field(1), cf.example_field(2)]
+    seen: dict[str, object] = {"dst": None, "kwargs": None}
+
+    def _fake_regrids(self, dst, **kwargs):
+        _ = self
+        seen["dst"] = dst
+        seen["kwargs"] = dict(kwargs)
+        return cf.example_field(3)
+
+    monkeypatch.setattr(cf.Field, "regrids", _fake_regrids)
+
+    payload = {
+        "target": "selected field",
+        "field_indices": [0],
+        "target_field_index": 2,
+        "method": "linear",
+    }
+    rows = regrid_from_config(fields, json.dumps(payload))
+
+    assert len(rows) == 1
+    assert len(fields) == 4
+    assert seen["kwargs"] == {"method": "linear"}
+    assert seen["dst"] is fields[2]
+
+
 def test_regrid_from_config_healpix_target(monkeypatch: pytest.MonkeyPatch) -> None:
     fields = [cf.example_field(0), cf.example_field(1)]
     seen: dict[str, object] = {"calls": [], "level": None}
@@ -468,14 +730,10 @@ def test_regrid_from_config_regular_latlon_target(monkeypatch: pytest.MonkeyPatc
         "target": "lat/lon",
         "field_indices": [0, 1],
         "method": "nearest_stod",
-        "target_spec": {
-            "nx": 10,
-            "lon1": 0.0,
-            "deltax": 1.0,
-            "ny": 10,
-            "lat1": -45.0,
-            "deltay": 1.0,
-        },
+        "target_spec": [
+            {"longitude": {"nx": 10, "lon1": 0.0, "deltax": 1.0}},
+            {"latitude": {"ny": 10, "lat1": -45.0, "deltay": 1.0}},
+        ],
     }
 
     rows = regrid_from_config(fields, json.dumps(payload))
@@ -547,14 +805,17 @@ def test_regrid_fields_operation_template_executes_with_dialog_payload() -> None
     captured: dict[str, object] = {"json": None}
     messages: list[tuple[str, object]] = []
 
-    def _fake_regrid_from_config(worker_fields, config_json):
-        assert worker_fields is fields
-        captured["json"] = config_json
-        return [{"identity": "regridded_field", "detail": "mock", "properties": {}, "chunk_shape": ""}]
+    class _FakeRegridder:
+        def __init__(self, config_json):
+            captured["json"] = config_json
+
+        def dogrid(self, worker_fields):
+            assert worker_fields is fields
+            return [{"identity": "regridded_field", "detail": "mock", "properties": {}, "chunk_shape": ""}]
 
     namespace = {
         "f": fields,
-        "regrid_from_config": _fake_regrid_from_config,
+        "XconvRegridder": _FakeRegridder,
         "send_to_gui": lambda prefix, payload=None: messages.append((prefix, payload)),
     }
 
@@ -652,9 +913,9 @@ def test_save_selected_fields_writes_netcdf(monkeypatch: pytest.MonkeyPatch) -> 
     def _fake_write(fields, destination, fmt="NETCDF4", **kwargs):
         calls.append((fields, destination, fmt, kwargs))
 
-    monkeypatch.setattr(cf_interface.cf, "write", _fake_write)
+    monkeypatch.setattr(metadata_ops.cf, "write", _fake_write)
     monkeypatch.setattr(
-        cf_interface,
+        metadata_ops,
         "estimate_hdf5_metadata_bytes_for_fields",
         lambda *args, **kwargs: 1234,
     )
@@ -682,7 +943,7 @@ def test_save_selected_fields_writes_zarr(monkeypatch: pytest.MonkeyPatch) -> No
         _ = kwargs
         calls.append((fields, destination, fmt))
 
-    monkeypatch.setattr(cf_interface.cf, "write", _fake_write)
+    monkeypatch.setattr(metadata_ops.cf, "write", _fake_write)
 
     payload = [cf.example_field(0), cf.example_field(1)]
     count = save_selected_fields(payload, [1], "/tmp/out.zarr", "zarr")
@@ -697,9 +958,9 @@ def test_save_selected_fields_passes_chunk_overrides(monkeypatch: pytest.MonkeyP
     def _fake_write(fields, destination, fmt="NETCDF4", **kwargs):
         calls.append((fields, destination, fmt, kwargs))
 
-    monkeypatch.setattr(cf_interface.cf, "write", _fake_write)
+    monkeypatch.setattr(metadata_ops.cf, "write", _fake_write)
     monkeypatch.setattr(
-        cf_interface,
+        metadata_ops,
         "estimate_hdf5_metadata_bytes_for_fields",
         lambda *args, **kwargs: 2222,
     )
@@ -742,9 +1003,9 @@ def test_save_selected_fields_skips_matching_chunk_shape(monkeypatch: pytest.Mon
         _ = (fields, destination, fmt, kwargs)
         writes.append(1)
 
-    monkeypatch.setattr(cf_interface.cf, "write", _fake_write)
+    monkeypatch.setattr(metadata_ops.cf, "write", _fake_write)
     monkeypatch.setattr(
-        cf_interface,
+        metadata_ops,
         "estimate_hdf5_metadata_bytes_for_fields",
         lambda *args, **kwargs: 1111,
     )
@@ -844,12 +1105,19 @@ class _FakePlt:
     def __init__(self) -> None:
         self.figure = _FakeFigure()
         self.close_calls = 0
+        self.close_args: list[object] = []
+        self._fignums: list[int] = []
 
     def gcf(self) -> _FakeFigure:
         return self.figure
 
+    def get_fignums(self) -> list[int]:
+        return list(self._fignums)
+
     def close(self, _fig: object) -> None:
         self.close_calls += 1
+        self.close_args.append(_fig)
+        self._fignums = []
 
 
 def test_run_contour_plot_applies_levels_annotations_and_save(
@@ -858,8 +1126,8 @@ def test_run_contour_plot_applies_levels_annotations_and_save(
     cfp = _FakeCFPlot()
     plt_obj = _FakePlt()
 
-    monkeypatch.setattr(cf_interface, "cfp", cfp)
-    monkeypatch.setattr(cf_interface, "plt", plt_obj)
+    monkeypatch.setattr(plotting, "cfp", cfp)
+    monkeypatch.setattr(plotting, "plt", plt_obj)
 
     run_contour_plot(
         pfld=object(),
@@ -891,8 +1159,8 @@ def test_run_contour_plot_uses_configured_title_font_sizes(
     cfp = _FakeCFPlot()
     plt_obj = _FakePlt()
 
-    monkeypatch.setattr(cf_interface, "cfp", cfp)
-    monkeypatch.setattr(cf_interface, "plt", plt_obj)
+    monkeypatch.setattr(plotting, "cfp", cfp)
+    monkeypatch.setattr(plotting, "plt", plt_obj)
 
     run_contour_plot(
         pfld=object(),
@@ -923,8 +1191,8 @@ def test_run_contour_plot_sets_title_from_singleton_selection(
     cfp = _FakeCFPlot()
     plt_obj = _FakePlt()
 
-    monkeypatch.setattr(cf_interface, "cfp", cfp)
-    monkeypatch.setattr(cf_interface, "plt", plt_obj)
+    monkeypatch.setattr(plotting, "cfp", cfp)
+    monkeypatch.setattr(plotting, "plt", plt_obj)
 
     run_contour_plot(
         pfld=object(),
@@ -944,9 +1212,9 @@ def test_run_contour_plot_prefers_cell_method_title_for_collapses(
     cfp = _FakeCFPlot()
     plt_obj = _FakePlt()
 
-    monkeypatch.setattr(cf_interface, "cfp", cfp)
-    monkeypatch.setattr(cf_interface, "plt", plt_obj)
-    monkeypatch.setattr(cf_interface, "cell_methods_string_from_field", lambda _field, *args: "time: mean")
+    monkeypatch.setattr(plotting, "cfp", cfp)
+    monkeypatch.setattr(plotting, "plt", plt_obj)
+    monkeypatch.setattr(plotting, "cell_methods_string_from_field", lambda _field, *args: "time: mean")
 
     run_contour_plot(
         pfld=object(),
@@ -971,7 +1239,7 @@ def test_auto_contour_title_from_singleton_selection() -> None:
 def test_auto_contour_title_prefers_cell_method_for_collapse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(cf_interface, "cell_methods_string_from_field", lambda _field, *args: "time: mean")
+    monkeypatch.setattr(plotting, "cell_methods_string_from_field", lambda _field, *args: "time: mean")
     title = auto_contour_title(
         pfld=object(),
         selection_spec={"time": ("2001-01-01", "2001-12-31")},
@@ -991,20 +1259,23 @@ def test_run_line_plot_uses_canonical_axes_and_wraps_file_output() -> None:
                 self,
                 pfld: object,
                 options: dict[str, object] | None,
-                collapse_by_coord: dict[str, str] | None
+                collapse_by_coord: dict[str, str] | None,
+                plot_action: str,
         ) -> None:
             captured["pfld"] = pfld
             captured["options"] = options
+            captured["plot_action"] = plot_action
 
         def render(self) -> None:
             captured["rendered"] = True
 
-    monkeypatch.setattr(cf_interface, "LinePlot", _FakeLinePlot)
+    monkeypatch.setattr(plotting, "LinePlot", _FakeLinePlot)
 
     try:
         run_line_plot(
             pfld=field_eg,
             options={"filename": "/tmp/line.png", "title": "line"},
+            plot_action="overplot",
             selection_spec={"time": ("1", "2")},
             collapse_by_coord={},
         )
@@ -1013,13 +1284,34 @@ def test_run_line_plot_uses_canonical_axes_and_wraps_file_output() -> None:
 
     assert captured["pfld"] is field_eg
     assert captured["options"] == {"filename": "/tmp/line.png", "title": "line"}
+    assert captured["plot_action"] == "overplot"
     assert captured["rendered"] is True
+
+
+def test_run_contour_plot_skips_gopen_for_overplot_when_figure_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfp = _FakeCFPlot()
+    plt_obj = _FakePlt()
+    plt_obj._fignums = [1]
+
+    monkeypatch.setattr(plotting, "cfp", cfp)
+    monkeypatch.setattr(plotting, "plt", plt_obj)
+
+    run_contour_plot(
+        pfld=object(),
+        options={"mode": "default"},
+        plot_action="overplot",
+    )
+
+    assert cfp.gopen_calls == []
+    assert cfp.con_calls
 
 
 def test_save_selected_field_data_uses_cf_write(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[object, str]] = []
     monkeypatch.setattr(
-        cf_interface.cf,
+        metadata_ops.cf,
         "write",
         lambda field, filename: calls.append((field, filename)),
     )

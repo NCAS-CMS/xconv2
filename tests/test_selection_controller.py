@@ -40,9 +40,13 @@ class _DummyLabel:
 class _DummyComboController:
     def __init__(self) -> None:
         self.calls: list[tuple[list[str], str | None]] = []
+        self.action_calls: list[bool] = []
 
     def set_plot_type_options(self, options: list[str], selected: str | None) -> None:
         self.calls.append((options, selected))
+
+    def set_plot_action_options(self, has_existing_plot: bool) -> None:
+        self.action_calls.append(has_existing_plot)
 
 
 class _DummySlider:
@@ -70,9 +74,12 @@ def test_refresh_plot_summary_enables_options_for_lineplot() -> None:
     host.last_varying_dims = None
     host.available_plot_kinds = []
     host.selected_plot_kind = None
+    host.selected_plot_action = "plot"
+    host._plot_pixmap_original = None
 
     controller = SelectionController(host)
     controller.refresh_plot_summary()
 
     assert host.selected_plot_kind == "lineplot"
     assert host.options_button.enabled is True
+    assert host.plot_view_controller.action_calls == [False]

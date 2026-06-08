@@ -4,8 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import xconv2.lineplot as lineplot_module
-from xconv2.lineplot import LinePlot
+import xconv2.cf_interface.lineplot as lineplot_module
+from xconv2.cf_interface.lineplot import LinePlot
 
 
 class _FakeCoord:

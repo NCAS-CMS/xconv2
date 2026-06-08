@@ -8,7 +8,7 @@ import types
 import pytest
 
 from xconv2.cf_templates import coordinate_list
-from xconv2.xconv_cf_interface import coordinate_info, field_info
+from xconv2.cf_interface import coordinate_info, field_info
 from xconv2.gui import CFVMain
 import xconv2.main_window as main_window
 import xconv2.remote_access as _remote_access_mod
@@ -221,16 +221,8 @@ def test_on_file_selected_multi_mode_accumulates_paths() -> None:
     CFVMain.on_file_selected(host, "/tmp/new.nc")
 
     assert host._loaded_file_paths == ["/tmp/old.nc", "/tmp/new.nc"]
-    assert host.single_calls == [
-        (
-            "/tmp/new.nc",
-            {
-                "clear_existing": False,
-                "append_metadata": True,
-            },
-        )
-    ]
-    assert host.multi_calls == []
+    assert host.single_calls == []
+    assert host.multi_calls == [["/tmp/old.nc", "/tmp/new.nc"]]
     assert host.titles[-1] == "xconv2 (test): 2 files"
 
 
@@ -241,10 +233,14 @@ def test_on_file_selected_multi_mode_first_file_clears_placeholder() -> None:
             self._loaded_file_paths: list[str] = []
             self.base_window_title = "xconv2 (test)"
             self.single_calls: list[tuple[str, dict[str, object]]] = []
+            self.multi_calls: list[list[str]] = []
             self.titles: list[str] = []
 
         def _load_selected_file(self, path: str, **kwargs: object) -> None:
             self.single_calls.append((path, dict(kwargs)))
+
+        def _load_selected_files(self, paths: list[str]) -> None:
+            self.multi_calls.append(paths)
 
         def setWindowTitle(self, title: str) -> None:
             self.titles.append(title)
@@ -253,16 +249,24 @@ def test_on_file_selected_multi_mode_first_file_clears_placeholder() -> None:
     CFVMain.on_file_selected(host, "/tmp/first.nc")
 
     assert host._loaded_file_paths == ["/tmp/first.nc"]
-    assert host.single_calls == [
-        (
-            "/tmp/first.nc",
-            {
-                "clear_existing": True,
-                "append_metadata": False,
-            },
-        )
-    ]
+    assert host.single_calls == []
+    assert host.multi_calls == [["/tmp/first.nc"]]
     assert host.titles[-1] == "xconv2 (test): 1 files"
+
+
+def test_load_selected_file_append_builds_worker_append_task() -> None:
+    """Append mode should extend worker field state and emit only new metadata rows."""
+    window = _DummyWindow()
+    file_path = "/tmp/mock-data.nc"
+
+    CFVMain._load_selected_file(window, file_path, clear_existing=False, append_metadata=True)
+
+    assert len(window.sent_tasks) == 1
+    code = window.sent_tasks[0]
+    assert f"_cfview_new_fields = cf.read({file_path!r})" in code
+    assert "f.extend(_cfview_new_fields)" in code
+    assert "fields = field_info(_cfview_new_fields)" in code
+    assert "send_to_gui('METADATA', fields)" in code
 
 
 def test_load_selected_file_does_not_release_remote_session() -> None:
@@ -330,6 +334,7 @@ def test_load_remote_selected_file_builds_control_task() -> None:
                 "descriptor": {"protocol": "sftp"},
                 "uri": "ssh://host/data/file.nc",
                 "path": "/data/file.nc",
+                "append": False,
             },
         )
     ]
@@ -366,9 +371,139 @@ def test_load_remote_selected_file_multi_mode_appends_without_clearing() -> None
                 "descriptor": {"protocol": "sftp"},
                 "uri": "ssh://host/data/second.nc",
                 "path": "/data/second.nc",
+                "append": True,
             },
         )
     ]
+
+
+def test_maybe_show_binary_validation_dialog_warns_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _DummyOpsWindow:
+        def __init__(self) -> None:
+            self._pending_binary_operation_name = "Difference (A-B)"
+            self.status_messages: list[tuple[str, bool]] = []
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.status_messages.append((message, is_error))
+
+    seen: list[tuple[object, str, str]] = []
+    monkeypatch.setattr(main_window.QMessageBox, "warning", lambda parent, title, message: seen.append((parent, title, message)))
+
+    host = _DummyOpsWindow()
+    CFVMain._maybe_show_binary_validation_dialog(host, "ValueError: Two fields need the same coordinates")
+
+    assert seen == [(host, "Difference (A-B)", "Two fields need the same coordinates")]
+    assert host.status_messages[-1] == ("Two fields need the same coordinates", True)
+    assert host._pending_binary_operation_name is None
+
+
+def test_maybe_show_binary_validation_dialog_accepts_generic_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _DummyOpsWindow:
+        def __init__(self) -> None:
+            self._pending_binary_operation_name = "Difference (A-B)"
+            self.status_messages: list[tuple[str, bool]] = []
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.status_messages.append((message, is_error))
+
+    seen: list[tuple[object, str, str]] = []
+    monkeypatch.setattr(main_window.QMessageBox, "warning", lambda parent, title, message: seen.append((parent, title, message)))
+
+    host = _DummyOpsWindow()
+    CFVMain._maybe_show_binary_validation_dialog(host, "Error - something else")
+
+    assert seen == [(host, "Difference (A-B)", "something else")]
+    assert host.status_messages[-1] == ("something else", True)
+    assert host._pending_binary_operation_name is None
+
+
+def test_maybe_show_binary_validation_dialog_accepts_status_error_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _DummyOpsWindow:
+        def __init__(self) -> None:
+            self._pending_binary_operation_name = "Difference (A-B)"
+            self.status_messages: list[tuple[str, bool]] = []
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.status_messages.append((message, is_error))
+
+    seen: list[tuple[object, str, str]] = []
+    monkeypatch.setattr(main_window.QMessageBox, "warning", lambda parent, title, message: seen.append((parent, title, message)))
+
+    host = _DummyOpsWindow()
+    CFVMain._maybe_show_binary_validation_dialog(host, "Error - ValueError: Two fields need the same coordinates")
+
+    assert seen == [(host, "Difference (A-B)", "Two fields need the same coordinates")]
+    assert host.status_messages[-1] == ("Two fields need the same coordinates", True)
+    assert host._pending_binary_operation_name is None
+
+
+def test_maybe_show_binary_validation_dialog_accepts_detailed_coordinate_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DummyOpsWindow:
+        def __init__(self) -> None:
+            self._pending_binary_operation_name = "Difference (A-B)"
+            self.status_messages: list[tuple[str, bool]] = []
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.status_messages.append((message, is_error))
+
+    seen: list[tuple[object, str, str]] = []
+    monkeypatch.setattr(main_window.QMessageBox, "warning", lambda parent, title, message: seen.append((parent, title, message)))
+
+    host = _DummyOpsWindow()
+    detail = "Two fields need the same coordinates: latitude values differ"
+    CFVMain._maybe_show_binary_validation_dialog(host, f"Error - ValueError: {detail}")
+
+    assert seen == [(host, "Difference (A-B)", detail)]
+    assert host.status_messages[-1] == (detail, True)
+    assert host._pending_binary_operation_name is None
+
+
+def test_maybe_show_binary_validation_dialog_accepts_cf_time_combine_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DummyOpsWindow:
+        def __init__(self) -> None:
+            self._pending_binary_operation_name = "Difference (A-B)"
+            self.status_messages: list[tuple[str, bool]] = []
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.status_messages.append((message, is_error))
+
+    seen: list[tuple[object, str, str]] = []
+    monkeypatch.setattr(main_window.QMessageBox, "warning", lambda parent, title, message: seen.append((parent, title, message)))
+
+    host = _DummyOpsWindow()
+    detail = "Can't combine size 12 'time' axes with non-matching coordinate values"
+    CFVMain._maybe_show_binary_validation_dialog(host, f"Error - ValueError: {detail}")
+
+    assert seen == [(host, "Difference (A-B)", detail)]
+    assert host.status_messages[-1] == (detail, True)
+    assert host._pending_binary_operation_name is None
+
+
+def test_maybe_show_binary_validation_dialog_strips_valueerror_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DummyOpsWindow:
+        def __init__(self) -> None:
+            self._pending_binary_operation_name = "Difference (A-B)"
+            self.status_messages: list[tuple[str, bool]] = []
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.status_messages.append((message, is_error))
+
+    seen: list[tuple[object, str, str]] = []
+    monkeypatch.setattr(main_window.QMessageBox, "warning", lambda parent, title, message: seen.append((parent, title, message)))
+
+    host = _DummyOpsWindow()
+    detail = "Can't set Units to <Units: days since 1850-01-01 00:00:00 standard> that are not equivalent"
+    CFVMain._maybe_show_binary_validation_dialog(host, f"Error - ValueError: {detail}")
+
+    assert seen == [(host, "Difference (A-B)", detail)]
+    assert host.status_messages[-1] == (detail, True)
+    assert host._pending_binary_operation_name is None
 
 
 def test_load_remote_selected_file_multi_mode_skips_duplicate_uri() -> None:
@@ -513,6 +648,43 @@ def test_field_ops_add_bounds_builds_worker_task_for_selected_field() -> None:
     assert emit_image is False
     assert "add_dimension_coordinate_bounds(f, _cfview_field_index)" in code
     assert "send_to_gui('METADATA', metadata_rows)" in code
+
+
+def test_field_ops_apply_selection_builds_worker_task() -> None:
+    class _DummyOpsWindow:
+        def __init__(self) -> None:
+            self._selected_field_indices = [0]
+            self._pending_field_op_source = None
+            self._pending_binary_operation_name = None
+            self.field_list_widget = _DummyFieldListWidgetForOps(_DummyFieldItem("/tmp/a.nc"))
+            self.sent_tasks: list[tuple[str, bool]] = []
+            self.status_messages: list[str] = []
+
+        def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
+            _ = save_code_path
+            self.sent_tasks.append((code, emit_image))
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            _ = is_error
+            self.status_messages.append(message)
+
+        def _selected_field_index_for_operation(self, operation: str) -> int | None:
+            return CFVMain._selected_field_index_for_operation(self, operation)
+
+        def _build_plot_context(self):
+            return ({"latitude": (-10, 10)}, {"time": "mean"}, "contour")
+
+    window = _DummyOpsWindow()
+
+    CFVMain._field_ops_apply_selection(window)
+
+    assert window._pending_field_op_source == "/tmp/a.nc"
+    assert len(window.sent_tasks) == 1
+    code, emit_image = window.sent_tasks[0]
+    assert emit_image is False
+    assert "append_selection_field_operation" in code
+    assert "_cfview_selection_spec" in code
+    assert "_cfview_collapse_by_coord" in code
 
 
 def test_remove_selected_fields_updates_ui_and_sends_worker_task() -> None:

@@ -22,7 +22,7 @@ def test_build_saved_plot_script_omits_gui_only_lines(monkeypatch) -> None:
 
     script = worker._build_saved_plot_script(exec_code)
 
-    assert "from xconv2.xconv_cf_interface import" not in script
+    assert "from xconv2.cf_interface import" not in script
     assert "send_to_gui" not in script
     assert "#omit4save" not in script
     assert "def get_data_for_plotting(" in script
@@ -42,6 +42,12 @@ def test_saved_contour_script_executes_without_missing_inlined_helpers(monkeypat
         def collapse(self, _method, axes=None, weights=None):
             _ = (axes, weights)
             return self
+
+        def dimension_coordinate(self, _coord_name, default=None):
+            return default
+
+        def auxiliary_coordinate(self, _coord_name, default=None):
+            return default
 
     class _FakeFigure:
         def __init__(self) -> None:
@@ -93,7 +99,7 @@ def test_saved_contour_script_executes_without_missing_inlined_helpers(monkeypat
             "collapse_by_coord = {}",
             "pfld = get_data_for_plotting(fld, selection_spec, collapse_by_coord)",
             "contour_options = {'title': 'ok', 'page_title_display': False, 'annotation_display': False}",
-            "run_contour_plot(pfld=pfld, options=contour_options, selection_spec=selection_spec, collapse_by_coord=collapse_by_coord)",
+            "run_contour_plot(pfld=pfld, options=contour_options, plot_action='plot', selection_spec=selection_spec, collapse_by_coord=collapse_by_coord)",
         ]
     )
 
@@ -114,7 +120,7 @@ def test_build_saved_plot_script_inlines_lineplot_class_for_line_tasks(monkeypat
             "collapse_by_coord = {}",
             "pfld = get_data_for_plotting(fld, selection_spec, collapse_by_coord)",
             "lineplot_options = {'title': 'line'}",
-            "run_line_plot(pfld=pfld, options=lineplot_options, selection_spec=selection_spec, collapse_by_coord=collapse_by_coord)",
+            "run_line_plot(pfld=pfld, options=lineplot_options, plot_action='plot', selection_spec=selection_spec, collapse_by_coord=collapse_by_coord)",
         ]
     )
 

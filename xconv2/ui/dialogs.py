@@ -2324,14 +2324,22 @@ class RegridDialog(QDialog):
             config["target_field_index"] = int(self._source_field_combo.currentData())
             config["target_field_name"] = self._source_field_combo.currentText()
         elif choice == self._LATLON_ENTRY:
-            config["target_spec"] = {
-                "nx": self._nx_spin.value(),
-                "lon1": self._lon1_spin.value(),
-                "deltax": self._deltax_spin.value(),
-                "ny": self._ny_spin.value(),
-                "lat1": self._lat1_spin.value(),
-                "deltay": self._deltay_spin.value(),
-            }
+            config["target_spec"] = [
+                {
+                    "longitude": {
+                        "nx": self._nx_spin.value(),
+                        "lon1": self._lon1_spin.value(),
+                        "deltax": self._deltax_spin.value(),
+                    }
+                },
+                {
+                    "latitude": {
+                        "ny": self._ny_spin.value(),
+                        "lat1": self._lat1_spin.value(),
+                        "deltay": self._deltay_spin.value(),
+                    }
+                },
+            ]
         elif choice == self._HEALPIX_ENTRY:
             config["target_spec"] = {
                 "level": self._healpix_level_spin.value(),

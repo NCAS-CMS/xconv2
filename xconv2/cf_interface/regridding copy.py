@@ -160,7 +160,3 @@ class XconvRegridder:
             raise ValueError(f"Unsupported regrid target: {target!r}")  
 
 
-def regrid_from_config(fields, config_json):
-    return XconvRegridder(config_json).do_regrid(fields)
-
-

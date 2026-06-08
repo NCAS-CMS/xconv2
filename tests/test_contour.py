@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from xconv2.cf_templates import contour_range_from_selection, plot_from_selection, save_data_from_selection
-import xconv2.xconv_cf_interface as cf_interface
-from xconv2.xconv_cf_interface import (
+import xconv2.cf_interface.plotting as plotting
+from xconv2.cf_interface import (
     auto_contour_title,
     contour_data_range,
     get_data_for_plotting,
@@ -35,8 +35,15 @@ class _FakeField:
     def cell_methods(self, **kwargs) -> None:
         return {}
 
-    def dimension_coordinate(self, coord_name) -> None:
+    def dimension_coordinate(self, coord_name, default=None) -> object:
+        _ = coord_name
+        if default is not None:
+            return np.array([0.0, 1.0])
         return np.array([0.0, 1.0])
+
+    def auxiliary_coordinate(self, coord_name, default=None) -> object:
+        _ = coord_name
+        return default
 
     def dimension_coordinates(self, **kwargs) -> None:
         return {}
@@ -120,10 +127,10 @@ def _run_generated(
         plt_obj = _FakePlt()
 
     # Keep helper tests deterministic by overriding module-level plotting deps.
-    prev_cfp = cf_interface.cfp
-    prev_plt = cf_interface.plt
-    cf_interface.cfp = cfp
-    cf_interface.plt = plt_obj
+    prev_cfp = plotting.cfp
+    prev_plt = plotting.plt
+    plotting.cfp = cfp
+    plotting.plt = plt_obj
 
     namespace = {
         "fld": fld,
@@ -139,8 +146,8 @@ def _run_generated(
     try:
         exec(code, namespace)
     finally:
-        cf_interface.cfp = prev_cfp
-        cf_interface.plt = prev_plt
+        plotting.cfp = prev_cfp
+        plotting.plt = prev_plt
 
     return messages
 
@@ -288,10 +295,25 @@ def test_plot_from_selection_lineplot_generates_worker_call() -> None:
         collapse_by_coord={},
         plot_kind="lineplot",
         plot_options={"mode": "default"},
+        plot_action="overplot",
     )
 
     assert "run_line_plot(" in code
     assert "lineplot_options" in code
+    assert "lineplot_action = 'overplot'" in code
+
+
+def test_plot_from_selection_contour_includes_plot_action() -> None:
+    code = plot_from_selection(
+        selections={"latitude": ("-90", "90"), "longitude": ("0", "359")},
+        collapse_by_coord={},
+        plot_kind="contour",
+        plot_options={"mode": "default"},
+        plot_action="overplot",
+    )
+
+    assert "contour_plot_action = 'overplot'" in code
+    assert "plot_action=contour_plot_action" in code
 
 
 def test_plot_from_selection_includes_data_save_when_requested() -> None:

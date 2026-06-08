@@ -24,7 +24,7 @@ from .plotting import (
     run_contour_plot,
     run_line_plot,
 )
-from .regridding import regrid_from_config
+from .regridding import XconvRegridder, regrid_from_config
 
 __all__ = [
     "field_info",
@@ -36,6 +36,7 @@ __all__ = [
     "append_selection_field_operation",
     "append_unary_xy_field_operation",
     "append_binary_field_operation",
+    "XconvRegridder",
     "regrid_from_config",
     "get_data_for_plotting",
     "save_selected_field_data",

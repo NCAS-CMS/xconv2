@@ -124,7 +124,8 @@ def regrid_fields_operation(regrid_config_json: str) -> str:
     return textwrap.dedent(
         f"""
         _cfview_regrid_config_json = {regrid_config_json!r}
-        metadata_rows = regrid_from_config(f, _cfview_regrid_config_json)
+        regridder = XconvRegridder(_cfview_regrid_config_json)
+        metadata_rows = regridder.dogrid(f)
         send_to_gui('METADATA_APPEND', metadata_rows) #omit4save
         _cfview_added_count = len(metadata_rows)
         _cfview_target = 'unknown'
