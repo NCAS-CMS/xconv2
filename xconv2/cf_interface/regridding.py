@@ -111,12 +111,13 @@ class XconvRegridder:
                 dst = cf.Domain.create_healpix(level)
                 regridded = src_field.regrids(dst, **kwargs)
             elif target == "regular lonlat":
-                longitude = kwargs.pop("longitude")
-                latitude = kwargs.pop("latitude")
-                dst = _build_lonlat_coordinate_list(longitude, latitude)
+                dst = cf.Domain.create_regular(kwargs.pop("longitude"),  kwargs.pop("latitude"))
+                regridded = src_field.regrids(dst, **kwargs)
+            elif target == "selected field":
+                dst = fields[kwargs.pop("target_field_index")]
                 regridded = src_field.regrids(dst, **kwargs)
             else:
-                regridded = src_field.regrids(**kwargs)
+                raise ValueError(f"Unsupported regrid target: {target!r} (should have been caught in validation)")
 
             history += (
                 f"{regridded.identity()} regridded from {self._domain_description(src_field)}\n"
@@ -158,9 +159,8 @@ class XconvRegridder:
             ny, lat1, dlat = lat_spec["ny"], lat_spec["lat1"], lat_spec["delta"]
         except (AttributeError, TypeError, KeyError) as exc:
             raise ValueError("Invalid target_spec for regular lonlat target.") from exc
-        return (nx, lon1, dlon, ny, lat1, dlat)
+        return (lon1, lon1+nx*dlon, dlon), (lat1, lat1+ny*dlat, dlat)
     
-
     @staticmethod
     def _extract_target_spec_for_selected_field(target_spec):
         """ Find the target field index for the selected field target option. """
@@ -173,46 +173,15 @@ class XconvRegridder:
     def _build_regrid_keywords(self, method, target, spec):
         """ Build the keywords to pass to the regrids method based on the target and method. """
         if target == "selected field":
-            # We will need to extract the information fromn the selected field at the time of 
-            # regridding, because the initialisation method does not include the fields argument.
-            raise NotImplementedError("Regridding to a selected field is not yet implemented.")
+            return {"method": method, "target": "selected field", "target_field_index": spec}
         elif target == "healpix":
             return {"method": method, "target": "healpix", "level": spec["level"]}
         elif target == "regular lonlat":
-            nx, lon1, dlon, ny, lat1, dlat = spec
+            
             return {"method": method, "target": "regular lonlat", 
-                    "longitude": {"nx": nx, "lon1": lon1, "delta": dlon},
-                    "latitude": {"ny": ny, "lat1": lat1, "delta": dlat}}
+                    "longitude": spec[0], "latitude": spec[1]}
         else:
             raise ValueError(f"Unsupported regrid target: {target!r}")  
-
-
-def _build_lonlat_coordinate_list(longitude: dict, latitude: dict) -> list:
-    """Build a list of cf.DimensionCoordinate objects for a regular lon/lat grid.
-    
-    Args:
-        longitude: dict with keys nx, lon1, delta
-        latitude:  dict with keys ny, lat1, delta
-    Returns:
-        [lat_dc, lon_dc] as required by cf.Field.regrids()
-    """
-    nx, lon1, dlon = longitude["nx"], longitude["lon1"], longitude["delta"]
-    ny, lat1, dlat = latitude["ny"], latitude["lat1"], latitude["delta"]
-
-    lon_vals = lon1 + np.arange(nx) * dlon
-    lon_bounds = np.column_stack([lon_vals - dlon / 2, lon_vals + dlon / 2])
-    lat_vals = lat1 + np.arange(ny) * dlat
-    lat_bounds = np.column_stack([lat_vals - dlat / 2, lat_vals + dlat / 2])
-
-    lon_dc = cf.DimensionCoordinate(
-        data=cf.Data(lon_vals, units="degrees_east"),
-        bounds=cf.Bounds(data=cf.Data(lon_bounds, units="degrees_east")),
-    )
-    lat_dc = cf.DimensionCoordinate(
-        data=cf.Data(lat_vals, units="degrees_north"),
-        bounds=cf.Bounds(data=cf.Data(lat_bounds, units="degrees_north")),
-    )
-    return [lat_dc, lon_dc]
 
 
 def regrid_from_config(fields, config_json):
