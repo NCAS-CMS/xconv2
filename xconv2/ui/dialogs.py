@@ -2321,34 +2321,79 @@ class RegridDialog(QDialog):
         }
 
         if choice == self._SELECTED_FIELD_ENTRY:
-            config["target_field_index"] = int(self._source_field_combo.currentData())
+            config["target_spec"] = {
+                "target_field_index": int(self._source_field_combo.currentData()),
+            }
             config["target_field_name"] = self._source_field_combo.currentText()
         elif choice == self._LATLON_ENTRY:
-            config["target_spec"] = [
-                {
-                    "longitude": {
-                        "nx": self._nx_spin.value(),
-                        "lon1": self._lon1_spin.value(),
-                        "deltax": self._deltax_spin.value(),
-                    }
+            config["target_spec"] = {
+                "longitude": {
+                    "nx": self._nx_spin.value(),
+                    "lon1": self._lon1_spin.value(),
+                    "delta": self._deltax_spin.value(),
                 },
-                {
-                    "latitude": {
-                        "ny": self._ny_spin.value(),
-                        "lat1": self._lat1_spin.value(),
-                        "deltay": self._deltay_spin.value(),
-                    }
+                "latitude": {
+                    "ny": self._ny_spin.value(),
+                    "lat1": self._lat1_spin.value(),
+                    "delta": self._deltay_spin.value(),
                 },
-            ]
+            }
         elif choice == self._HEALPIX_ENTRY:
             config["target_spec"] = {
                 "level": self._healpix_level_spin.value(),
             }
         else:
             config["target_key"] = choice
-            config["target_spec"] = self._regrid_targets.get(choice)
+            config["target"] = "regular lonlat"
+            config["target_spec"] = self._normalize_regrid_target_spec(
+                self._regrid_targets.get(choice)
+            )
 
         return config
+
+    @staticmethod
+    def _normalize_regrid_target_spec(target_spec: object) -> dict[str, object]:
+        """Convert preset target JSON into the worker-facing lon/lat schema."""
+        if isinstance(target_spec, dict):
+            longitude = target_spec.get("longitude")
+            latitude = target_spec.get("latitude")
+            if isinstance(longitude, dict) and isinstance(latitude, dict):
+                return {
+                    "longitude": {
+                        "nx": longitude.get("nx"),
+                        "lon1": longitude.get("lon1"),
+                        "delta": longitude.get("delta", longitude.get("deltax")),
+                    },
+                    "latitude": {
+                        "ny": latitude.get("ny"),
+                        "lat1": latitude.get("lat1"),
+                        "delta": latitude.get("delta", latitude.get("deltay")),
+                    },
+                }
+
+        if isinstance(target_spec, list):
+            merged: dict[str, object] = {}
+            for item in target_spec:
+                if isinstance(item, dict):
+                    merged.update(item)
+
+            longitude = merged.get("longitude")
+            latitude = merged.get("latitude")
+            if isinstance(longitude, dict) and isinstance(latitude, dict):
+                return {
+                    "longitude": {
+                        "nx": longitude.get("nx"),
+                        "lon1": longitude.get("lon1"),
+                        "delta": longitude.get("delta", longitude.get("deltax")),
+                    },
+                    "latitude": {
+                        "ny": latitude.get("ny"),
+                        "lat1": latitude.get("lat1"),
+                        "delta": latitude.get("delta", latitude.get("deltay")),
+                    },
+                }
+
+        raise ValueError("Invalid preset regrid target specification.")
 
     def _on_go(self) -> None:
         if not self._configured:

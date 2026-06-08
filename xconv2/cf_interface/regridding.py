@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 import json
 
 import cf
-import numpy as np
 
 from .metadata_operations import field_info
 
@@ -21,7 +20,7 @@ _REGRID_METHODS = {
     "nearest_dtos",
 }
 
-_TARGET_OPTIONS  = ['regular_lonlat', 'healpix', 'selected field']
+_TARGET_OPTIONS  = ['regular lonlat', 'healpix', 'selected field']
 
 
 class XconvRegridder:
@@ -57,13 +56,13 @@ class XconvRegridder:
         if not isinstance(self.field_indices, list):
             raise ValueError("Regrid configuration field_indices must be a list.")
 
-        target = str(config.get("target", "None")).strip().lower()
-        if target not in _TARGET_OPTIONS:
-            raise ValueError(f"Unsupported regrid target: {target!r}")
-        
         method = str(config.get("method", "None")).strip().lower()
         if method not in _REGRID_METHODS:
             raise ValueError(f"Unsupported regrid method: {method!r}")
+
+        target = str(config.get("target", "None")).strip().lower()
+        if target not in _TARGET_OPTIONS:
+            raise ValueError(f"Unsupported regrid target: {target!r}")
         
         target_spec = config.get("target_spec")
 
@@ -83,7 +82,15 @@ class XconvRegridder:
         domain = field.domain
         if domain is None:
             return "unknown domain"
-        return f"{domain.__class__.__name__} with {len(domain.dimensions)} dimensions"
+        dimensions = getattr(domain, "dimensions", None)
+        if dimensions is None:
+            dimensions = getattr(domain, "directions", None)
+        if dimensions is None:
+            return domain.__class__.__name__
+        try:
+            return f"{domain.__class__.__name__} with {len(dimensions)} dimensions"
+        except TypeError:
+            return domain.__class__.__name__
     
 
     def do_regrid(self, fields: list) -> list[dict[str, object]]:
@@ -108,6 +115,7 @@ class XconvRegridder:
         return field_info(new_fields)
 
 
+    @staticmethod
     def _extract_target_spec_for_healpix(target_spec):
         """ 
            "target_spec": {"level": 4},
@@ -121,6 +129,7 @@ class XconvRegridder:
         return {"level": level}
     
 
+    @staticmethod
     def _extract_target_spec_for_regular_lonlat(target_spec):
         """ "target_spec": {
                 "longitude": {"nx": 360, "lon1": 0.0, "delta": 1.0},
@@ -135,6 +144,7 @@ class XconvRegridder:
         return (nx, lon1, delta, ny, lat1, delta)
     
 
+    @staticmethod
     def _extract_target_spec_for_selected_field(target_spec):
         """ Find the target field index for the selected field target option. """
         try:
@@ -162,5 +172,3 @@ class XconvRegridder:
 
 def regrid_from_config(fields, config_json):
     return XconvRegridder(config_json).do_regrid(fields)
-
-
