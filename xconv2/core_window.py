@@ -93,6 +93,38 @@ STATUSBAR_NORMAL_STYLE = ""
 STATUSBAR_ERROR_STYLE = "QStatusBar { color: #c62828; font-weight: 600; }"
 
 
+class CopyableStatusBar(QStatusBar):
+    """Status bar whose message text is selectable and copyable."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._message_label = QLabel("")
+        self._message_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
+        )
+        self._message_label.setToolTip("Select status text to copy.")
+        self.addWidget(self._message_label, 1)
+
+        copy_status_action = QAction("Copy Status Message", self)
+        copy_status_action.triggered.connect(
+            lambda: QApplication.clipboard().setText(self._message_label.text())
+        )
+        self._message_label.addAction(copy_status_action)
+        self._message_label.setContextMenuPolicy(Qt.ActionsContextMenu)
+
+    def showMessage(self, message: str, timeout: int = 0) -> None:  # type: ignore[override]
+        _ = timeout
+        self._message_label.setText(message)
+        self.messageChanged.emit(message)
+
+    def clearMessage(self) -> None:  # type: ignore[override]
+        self._message_label.clear()
+        self.messageChanged.emit("")
+
+    def currentMessage(self) -> str:  # type: ignore[override]
+        return self._message_label.text()
+
+
 
 class LogViewerDialog(QDialog):
     """Tail and display the shared application log file."""
@@ -1834,7 +1866,7 @@ class CFVCore(QMainWindow):
 
     def _setup_status_bar(self) -> None:
         """Create and initialize the status bar."""
-        self.status = QStatusBar()
+        self.status = CopyableStatusBar(self)
         self.setStatusBar(self.status)
         self._show_status_message("System Ready. Initialize S3 Load.")
 
@@ -2002,6 +2034,10 @@ class CFVCore(QMainWindow):
     def _field_ops_regrid(self) -> None:
         """Placeholder action for Field Ops -> Regrid."""
         self._show_not_implemented_dialog("Field Ops: Regrid")
+
+    def _field_ops_replay_last_operations(self) -> None:
+        """Placeholder action for Field Ops -> Replay Last Field Operations."""
+        self._show_not_implemented_dialog("Field Ops: Replay Last Field Operations")
 
     def _field_ops_maths(self) -> None:
         """Placeholder action for Field Ops -> Maths."""

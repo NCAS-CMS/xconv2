@@ -110,6 +110,12 @@ class MenuController:
         regrid_action.triggered.connect(self.host._field_ops_regrid)
         field_ops_menu.addAction(regrid_action)
 
+        replay_action = QAction("Replay Last Field Operations", self.host)
+        replay_action.triggered.connect(self.host._field_ops_replay_last_operations)
+        field_ops_menu.addAction(replay_action)
+
+        field_ops_menu.addSeparator()
+
         maths_menu = field_ops_menu.addMenu("Maths")
 
         difference_ab_action = QAction("Difference (A-B)", self.host)

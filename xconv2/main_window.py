@@ -45,7 +45,14 @@ from .core_window import CFVCore
 from .cf_interface import parse_coordinate_subspace_commands
 # Remote-access helpers are imported lazily (inside the methods that use them)
 # so that p5rem/paramiko are not loaded at GUI startup.
-from .ui.dialogs import OpenURIDialog, RegridDialog, RemoteConfigurationDialog, RemoteOpenDialog, SaveSelectedFieldsDialog
+from .ui.dialogs import (
+    OpenURIDialog,
+    ReplayOperationsDialog,
+    RegridDialog,
+    RemoteConfigurationDialog,
+    RemoteOpenDialog,
+    SaveSelectedFieldsDialog,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +130,8 @@ class CFVMain(CFVCore):
         self._pending_prepare_log_dialog: RemoteLoginLogDialog | None = None
         self._pending_list_loop: QEventLoop | None = None
         self._pending_list_result: dict | None = None
+        self._pending_remote_open_loop: QEventLoop | None = None
+        self._pending_remote_open_result: dict[str, object] | None = None
         self._ssh_session_passwords: dict[str, str] = {}
         self._selected_field_indices: list[int] = []
         self._loaded_file_paths: list[str] = []
@@ -132,6 +141,7 @@ class CFVMain(CFVCore):
         self._pending_field_op_source: str | None = None
         self._pending_binary_operation_name: str | None = None
         self._shutting_down: bool = False
+        self._replay_session_id: str = str(uuid.uuid4())
 
         self.worker = QProcess()
         self.worker.readyReadStandardOutput.connect(self.handle_worker_output)
@@ -332,6 +342,12 @@ class CFVMain(CFVCore):
                 if not isinstance(payload, dict):
                     logger.warning("Unexpected REMOTE_OPEN_RESULT payload type: %s", type(payload).__name__)
                     continue
+
+                self._pending_remote_open_result = payload
+                open_loop = getattr(self, "_pending_remote_open_loop", None)
+                if open_loop is not None:
+                    self._pending_remote_open_loop = None
+                    open_loop.quit()
 
                 if payload.get("ok"):
                     uri = str(payload.get("uri", ""))
@@ -1772,6 +1788,339 @@ class CFVMain(CFVCore):
             self._show_status_message(f"Loading coordinates for field index {index}...")
         self._send_worker_task(coordinate_list(index))
 
+    @staticmethod
+    def _json_safe_operation_payload(value: object) -> object:
+        """Return a JSON-compatible copy of operation payload data."""
+        try:
+            return json.loads(json.dumps(value, sort_keys=True))
+        except TypeError:
+            return json.loads(json.dumps(value, sort_keys=True, default=str))
+
+    def _last_operations_path(self) -> Path:
+        """Return path to the replayable operations history file."""
+        return Path.home() / ".xconv2" / "last_operations.json"
+
+    def _load_last_operations_payload(self) -> dict[str, object]:
+        """Load replay payload from disk, returning an empty schema when absent/invalid."""
+        path = self._last_operations_path()
+        default_payload: dict[str, object] = {
+            "schema_version": 1,
+            "session_id": "",
+            "saved_at": "",
+            "operations": [],
+        }
+        if not path.exists():
+            return default_payload
+
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logger.exception("Failed to read last operations file: %s", path)
+            return default_payload
+
+        if not isinstance(payload, dict):
+            logger.warning("Ignoring malformed last operations payload: expected dict")
+            return default_payload
+
+        operations = payload.get("operations")
+        if not isinstance(operations, list):
+            logger.warning("Ignoring malformed last operations payload: operations is not a list")
+            return default_payload
+
+        return {
+            "schema_version": int(payload.get("schema_version", 1) or 1),
+            "session_id": str(payload.get("session_id", "") or ""),
+            "saved_at": str(payload.get("saved_at", "") or ""),
+            "operations": operations,
+        }
+
+    def _record_replayable_operation(self, operation: dict[str, object]) -> None:
+        """Append one replayable field operation to disk."""
+        path = self._last_operations_path()
+        payload = self._load_last_operations_payload()
+
+        operations_raw = payload.get("operations", [])
+        operations = operations_raw if isinstance(operations_raw, list) else []
+        active_session_id = str(getattr(self, "_replay_session_id", "") or "")
+        payload_session_id = str(payload.get("session_id", "") or "")
+        if active_session_id and payload_session_id != active_session_id:
+            # Keep only the current GUI session's operations in this file.
+            operations = []
+        operations.append(CFVMain._json_safe_operation_payload(operation))
+
+        payload["schema_version"] = 1
+        payload["session_id"] = active_session_id
+        payload["saved_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        payload["operations"] = operations
+
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        except OSError:
+            logger.exception("Failed to persist replayable operations to %s", path)
+
+    def _worker_code_for_replay_operation(self, operation: dict[str, object]) -> str | None:
+        """Build worker task code for one replayable operation payload."""
+        kind = str(operation.get("kind", "")).strip().lower()
+
+        if kind == "unary_xy":
+            field_index = operation.get("field_index")
+            operation_key = operation.get("operation")
+            if isinstance(field_index, int) and isinstance(operation_key, str) and operation_key.strip():
+                return unary_xy_field_operation(field_index, operation_key)
+            return None
+
+        if kind == "binary":
+            index_a = operation.get("index_a")
+            index_b = operation.get("index_b")
+            operation_key = operation.get("operation")
+            source_files_raw = operation.get("source_files", [])
+            source_files = []
+            if isinstance(source_files_raw, list):
+                source_files = [str(item) for item in source_files_raw if isinstance(item, str)]
+            if (
+                isinstance(index_a, int)
+                and isinstance(index_b, int)
+                and isinstance(operation_key, str)
+                and operation_key.strip()
+            ):
+                return binary_field_operation(index_a, index_b, operation_key, source_files=source_files)
+            return None
+
+        if kind == "apply_selection":
+            field_index = operation.get("field_index")
+            selections = operation.get("selections")
+            collapse_by_coord = operation.get("collapse_by_coord")
+            if (
+                isinstance(field_index, int)
+                and isinstance(selections, dict)
+                and isinstance(collapse_by_coord, dict)
+            ):
+                return apply_selection_field_operation(field_index, selections, collapse_by_coord)
+            return None
+
+        if kind == "regrid":
+            config = operation.get("config")
+            if isinstance(config, dict):
+                return regrid_fields_operation(json.dumps(config, sort_keys=True))
+            return None
+
+        return None
+
+    def _describe_replay_operation(self, operation: dict[str, object]) -> str:
+        """Build a short, user-facing description for one replayable operation."""
+        kind = str(operation.get("kind", "")).strip().lower()
+
+        if kind == "unary_xy":
+            op = str(operation.get("operation", "unknown"))
+            idx = operation.get("field_index")
+            return f"Maths {op} on field index {idx}"
+
+        if kind == "binary":
+            op = str(operation.get("operation", "unknown"))
+            idx_a = operation.get("index_a")
+            idx_b = operation.get("index_b")
+            return f"Maths {op} on field indices {idx_a} and {idx_b}"
+
+        if kind == "apply_selection":
+            idx = operation.get("field_index")
+            return f"Apply Selection on field index {idx}"
+
+        if kind == "regrid":
+            config = operation.get("config")
+            if isinstance(config, dict):
+                target = str(config.get("target", "unknown"))
+                field_indices = config.get("field_indices", [])
+                if isinstance(field_indices, list):
+                    return f"Regrid target {target} for {len(field_indices)} field(s)"
+                return f"Regrid target {target}"
+            return "Regrid"
+
+        return f"Unknown operation kind: {kind or 'unknown'}"
+
+    def _source_files_for_replay_operation(self, operation: dict[str, object]) -> list[str]:
+        """Return ordered source-file hints associated with one replay operation."""
+        kind = str(operation.get("kind", "")).strip().lower()
+
+        if kind in {"unary_xy", "apply_selection"}:
+            source_file = operation.get("source_file")
+            if isinstance(source_file, str) and source_file.strip():
+                return [source_file.strip()]
+            return []
+
+        if kind == "binary":
+            source_files = operation.get("source_files")
+            if isinstance(source_files, list):
+                return [str(item).strip() for item in source_files if isinstance(item, str) and str(item).strip()]
+            return []
+
+        if kind == "regrid":
+            source_files = operation.get("source_files")
+            if isinstance(source_files, list):
+                return [str(item).strip() for item in source_files if isinstance(item, str) and str(item).strip()]
+            return []
+
+        return []
+
+    @staticmethod
+    def _is_remote_source_uri(uri: str) -> bool:
+        scheme = urlparse(uri).scheme.lower()
+        return scheme in {"s3", "ssh", "http", "https"}
+
+    def _open_remote_uri_for_replay_sync(self, uri: str) -> None:
+        """Open one remote URI via the normal remote-control path and wait for REMOTE_OPEN_RESULT."""
+        canonical_uri = CFVCore._canonical_remote_uri(uri)
+        config, remote_path, host_alias, unknown_host = self._resolve_remote_uri(canonical_uri)
+        if unknown_host or config is None:
+            raise ValueError(f"Replay could not resolve remote source URI: {canonical_uri}")
+
+        self._pending_remote_open_result = None
+        self._pending_remote_open_loop = QEventLoop()
+        open_loop = self._pending_remote_open_loop
+
+        timeout = QTimer(self)
+        timeout.setSingleShot(True)
+        timeout.timeout.connect(open_loop.quit)
+        timeout.start(15000)
+
+        before_prepare_failure = str(getattr(self, "_pending_prepare_failure_message", "") or "")
+        self._open_remote_uri_direct(
+            uri=canonical_uri,
+            remote_path=remote_path,
+            config=config,
+            host_alias=host_alias,
+        )
+        after_prepare_failure = str(getattr(self, "_pending_prepare_failure_message", "") or "")
+        if after_prepare_failure and after_prepare_failure != before_prepare_failure:
+            self._pending_remote_open_loop = None
+            timeout.stop()
+            raise ValueError(f"Replay remote preload failed for {canonical_uri}: {after_prepare_failure}")
+
+        if self._pending_remote_open_result is None and self._pending_remote_open_loop is not None:
+            open_loop.exec()
+
+        timed_out = not bool(self._pending_remote_open_result)
+        if timeout.isActive():
+            timeout.stop()
+        self._pending_remote_open_loop = None
+
+        payload = self._pending_remote_open_result
+        self._pending_remote_open_result = None
+        if timed_out or not isinstance(payload, dict):
+            raise ValueError(f"Replay remote preload timed out for source: {canonical_uri}")
+        if not bool(payload.get("ok")):
+            error = str(payload.get("error") or "Remote open failed")
+            raise ValueError(f"Replay remote preload failed for {canonical_uri}: {error}")
+
+    def _field_ops_replay_last_operations(self) -> None:
+        """Replay persisted field-creating worker operations from last session state."""
+        payload = self._load_last_operations_payload()
+        operations_raw = payload.get("operations", [])
+        operations = operations_raw if isinstance(operations_raw, list) else []
+        if not operations:
+            self._show_status_message("No replayable field operations found.", is_error=True)
+            return
+
+        candidates: list[tuple[str, str, dict[str, object]]] = []
+        skipped = 0
+        for raw in operations:
+            if not isinstance(raw, dict):
+                skipped += 1
+                continue
+            code = self._worker_code_for_replay_operation(raw)
+            if not isinstance(code, str) or not code.strip():
+                skipped += 1
+                continue
+            candidates.append((code, self._describe_replay_operation(raw), raw))
+
+        if not candidates:
+            self._show_status_message("No valid replayable operations found in history.", is_error=True)
+            return
+
+        chooser = ReplayOperationsDialog(
+            self,
+            operation_labels=[label for _code, label, _operation in candidates],
+        )
+        if chooser.exec() != QDialog.Accepted:
+            return
+
+        selected_indices = chooser.selected_indices()
+        if not selected_indices:
+            self._show_status_message("No operations selected for replay.", is_error=True)
+            return
+
+        selected_operations = [
+            candidates[idx][2]
+            for idx in selected_indices
+            if 0 <= idx < len(candidates)
+        ]
+
+        code_blocks = [
+            candidates[idx][0]
+            for idx in selected_indices
+            if 0 <= idx < len(candidates)
+        ]
+        skipped += len(candidates) - len(code_blocks)
+
+        if not code_blocks:
+            self._show_status_message("No valid replayable operations found in history.", is_error=True)
+            return
+
+        replay_sources: list[str] = []
+        for operation in selected_operations:
+            for source in self._source_files_for_replay_operation(operation):
+                if source not in replay_sources:
+                    replay_sources.append(source)
+
+        remote_sources = [source for source in replay_sources if self._is_remote_source_uri(source)]
+        local_sources = [source for source in replay_sources if source not in remote_sources]
+
+        if remote_sources:
+            self._show_status_message(f"Preloading {len(remote_sources)} remote source(s) for replay...")
+            prior_mode = str(getattr(self, "file_open_mode", "single"))
+            try:
+                self.file_open_mode = "multi"
+                self._loaded_file_paths = []
+                self._clear_loaded_data_views()
+                for remote_uri in remote_sources:
+                    self._open_remote_uri_for_replay_sync(remote_uri)
+            finally:
+                self.file_open_mode = prior_mode
+
+        preamble = ""
+        if local_sources:
+            replay_read_target: str = (
+                "_cfview_replay_sources[0]" if len(local_sources) == 1 else "_cfview_replay_sources"
+            )
+            preamble = (
+                f"_cfview_replay_sources = {local_sources!r}\n"
+                "_cfview_file_path = _cfview_replay_sources if len(_cfview_replay_sources) != 1 else _cfview_replay_sources[0]\n"
+                "_cfview_field_index = None\n"
+                "try:\n"
+                f"    _cfview_new_fields = cf.read({replay_read_target})\n"
+                "    try:\n"
+                "        f\n"
+                "    except NameError:\n"
+                "        f = []\n"
+                "    f.extend(_cfview_new_fields)\n"
+                "except Exception as _cfview_exc:\n"
+                "    raise ValueError(\n"
+                "        f\"Replay preload failed for source(s): {_cfview_replay_sources}. Error: {_cfview_exc}\"\n"
+                "    )\n"
+                "fields = field_info(f)\n"
+                "send_to_gui('METADATA', fields) #omit4save\n\n"
+            )
+
+        replay_code = preamble + "\n\n".join(code_blocks)
+        self._pending_binary_operation_name = None
+        self._pending_metadata_append = False
+        self._pending_metadata_source = None
+        self._show_status_message(
+            f"Replaying {len(code_blocks)} field operation(s){f' (skipped {skipped})' if skipped else ''}..."
+        )
+        logger.info("Replaying %d field operations (skipped=%d)", len(code_blocks), skipped)
+        self._send_worker_task(replay_code, emit_image=False)
+
     def _selected_field_index_for_operation(self, operation: str) -> int | None:
         """Return a single selected field index suitable for unary field operations."""
         selected = list(getattr(self, "_selected_field_indices", []))
@@ -1808,6 +2157,16 @@ class CFVMain(CFVCore):
 
         self._show_status_message(f"Running {operation_name} on field index {field_index}...")
         logger.info("Running field op %s on field index %d", operation_name, field_index)
+
+        self._record_replayable_operation(
+            {
+                "kind": "unary_xy",
+                "field_index": field_index,
+                "selected_indices": [field_index],
+                "operation": operation_key,
+                "source_file": source_file,
+            }
+        )
 
         code = unary_xy_field_operation(field_index, operation_key)
         self._send_worker_task(code, emit_image=False)
@@ -1865,6 +2224,17 @@ class CFVMain(CFVCore):
 
         self._show_status_message(f"Running {operation_name} on field indices {idx_a} and {idx_b}...")
         logger.info("Running binary field op %s on field indices %d and %d", operation_name, idx_a, idx_b)
+
+        self._record_replayable_operation(
+            {
+                "kind": "binary",
+                "index_a": idx_a,
+                "index_b": idx_b,
+                "selected_indices": [idx_a, idx_b],
+                "operation": operation_key,
+                "source_files": source_paths,
+            }
+        )
 
         code = binary_field_operation(idx_a, idx_b, operation_key, source_files=source_paths)
         self._send_worker_task(code, emit_image=False)
@@ -1951,6 +2321,17 @@ class CFVMain(CFVCore):
             len(collapse_by_coord),
         )
 
+        self._record_replayable_operation(
+            {
+                "kind": "apply_selection",
+                "field_index": field_index,
+                "selected_indices": [field_index],
+                "selections": selections,
+                "collapse_by_coord": collapse_by_coord,
+                "source_file": source_file,
+            }
+        )
+
         code = apply_selection_field_operation(field_index, selections, collapse_by_coord)
         self._send_worker_task(code, emit_image=False)
 
@@ -1975,11 +2356,20 @@ class CFVMain(CFVCore):
             if isinstance(raw_source, str) and raw_source.strip():
                 source_paths.add(raw_source)
 
-        self._pending_field_op_source = next(iter(source_paths)) if len(source_paths) == 1 else None
+        sorted_sources = sorted(source_paths)
+        self._pending_field_op_source = sorted_sources[0] if len(sorted_sources) == 1 else None
 
         target = str(regrid_config.get("target", "unknown"))
         self._show_status_message(f"Running Regrid for target {target}...")
         logger.info("Running regrid operation target=%s selected_count=%d", target, len(selected_indices))
+
+        self._record_replayable_operation(
+            {
+                "kind": "regrid",
+                "config": regrid_config,
+                "source_files": sorted_sources,
+            }
+        )
 
         config_json = json.dumps(regrid_config, sort_keys=True)
         code = regrid_fields_operation(config_json)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 import types
 
 import pytest
@@ -557,6 +558,7 @@ def test_field_ops_grad_builds_worker_task_for_selected_field() -> None:
             self.field_list_widget = _DummyFieldListWidgetForOps(_DummyFieldItem("/tmp/a.nc"))
             self.sent_tasks: list[tuple[str, bool]] = []
             self.status_messages: list[str] = []
+            self.replay_operations: list[dict[str, object]] = []
 
         def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
             _ = save_code_path
@@ -572,6 +574,9 @@ def test_field_ops_grad_builds_worker_task_for_selected_field() -> None:
         def _run_unary_xy_field_operation(self, operation_name: str, method_name: str) -> None:
             return CFVMain._run_unary_xy_field_operation(self, operation_name, method_name)
 
+        def _record_replayable_operation(self, operation: dict[str, object]) -> None:
+            self.replay_operations.append(operation)
+
     window = _DummyOpsWindow()
 
     CFVMain._field_ops_maths_grad(window)
@@ -583,6 +588,15 @@ def test_field_ops_grad_builds_worker_task_for_selected_field() -> None:
     assert "append_unary_xy_field_operation" in code
     assert "_cfview_operation = 'grad'" in code
     assert "send_to_gui('METADATA_APPEND'" in code
+    assert window.replay_operations == [
+        {
+            "kind": "unary_xy",
+            "field_index": 0,
+            "selected_indices": [0],
+            "operation": "grad",
+            "source_file": "/tmp/a.nc",
+        }
+    ]
 
 
 def test_field_ops_grad_requires_exactly_one_selected_field() -> None:
@@ -659,6 +673,7 @@ def test_field_ops_apply_selection_builds_worker_task() -> None:
             self.field_list_widget = _DummyFieldListWidgetForOps(_DummyFieldItem("/tmp/a.nc"))
             self.sent_tasks: list[tuple[str, bool]] = []
             self.status_messages: list[str] = []
+            self.replay_operations: list[dict[str, object]] = []
 
         def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
             _ = save_code_path
@@ -674,6 +689,9 @@ def test_field_ops_apply_selection_builds_worker_task() -> None:
         def _build_plot_context(self):
             return ({"latitude": (-10, 10)}, {"time": "mean"}, "contour")
 
+        def _record_replayable_operation(self, operation: dict[str, object]) -> None:
+            self.replay_operations.append(operation)
+
     window = _DummyOpsWindow()
 
     CFVMain._field_ops_apply_selection(window)
@@ -685,6 +703,459 @@ def test_field_ops_apply_selection_builds_worker_task() -> None:
     assert "append_selection_field_operation" in code
     assert "_cfview_selection_spec" in code
     assert "_cfview_collapse_by_coord" in code
+    assert window.replay_operations == [
+        {
+            "kind": "apply_selection",
+            "field_index": 0,
+            "selected_indices": [0],
+            "selections": {"latitude": (-10, 10)},
+            "collapse_by_coord": {"time": "mean"},
+            "source_file": "/tmp/a.nc",
+        }
+    ]
+
+
+def test_record_replayable_operation_persists_last_operations(tmp_path: Path) -> None:
+    class _DummyReplayStore:
+        def __init__(self) -> None:
+            self.path = tmp_path / "last_operations.json"
+
+        def _last_operations_path(self) -> Path:
+            return self.path
+
+        def _load_last_operations_payload(self) -> dict[str, object]:
+            return CFVMain._load_last_operations_payload(self)
+
+    host = _DummyReplayStore()
+
+    CFVMain._record_replayable_operation(
+        host,
+        {"kind": "unary_xy", "field_index": 2, "operation": "grad"},
+    )
+    CFVMain._record_replayable_operation(
+        host,
+        {"kind": "binary", "index_a": 1, "index_b": 3, "operation": "difference_ab"},
+    )
+
+    payload = json.loads(host.path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 1
+    assert payload["session_id"] == ""
+    assert isinstance(payload["saved_at"], str)
+    assert payload["operations"] == [
+        {"kind": "unary_xy", "field_index": 2, "operation": "grad"},
+        {"kind": "binary", "index_a": 1, "index_b": 3, "operation": "difference_ab"},
+    ]
+
+
+def test_replay_last_operations_builds_single_worker_task(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _SelectAllDialog:
+        def __init__(self, _parent, *, operation_labels: list[str]) -> None:
+            self._labels = operation_labels
+
+        def exec(self) -> int:
+            return 1
+
+        def selected_indices(self) -> list[int]:
+            return list(range(len(self._labels)))
+
+    monkeypatch.setattr(main_window, "ReplayOperationsDialog", _SelectAllDialog)
+
+    class _DummyReplayWindow:
+        def __init__(self) -> None:
+            self.sent_tasks: list[tuple[str, bool]] = []
+            self.status_messages: list[tuple[str, bool]] = []
+            self._pending_binary_operation_name: str | None = None
+
+        def _load_last_operations_payload(self) -> dict[str, object]:
+            return {
+                "schema_version": 1,
+                "saved_at": "2026-06-08T00:00:00Z",
+                "operations": [
+                    {"kind": "unary_xy", "field_index": 0, "operation": "grad"},
+                    {
+                        "kind": "binary",
+                        "index_a": 0,
+                        "index_b": 1,
+                        "operation": "difference_ab",
+                    },
+                    {
+                        "kind": "apply_selection",
+                        "field_index": 1,
+                        "selections": {"latitude": [-10, 10]},
+                        "collapse_by_coord": {"time": "mean"},
+                    },
+                    {
+                        "kind": "regrid",
+                        "config": {
+                            "field_indices": [0],
+                            "target": "regular_lon_lat",
+                            "method": "linear",
+                        },
+                    },
+                ],
+            }
+
+        def _worker_code_for_replay_operation(self, operation: dict[str, object]) -> str | None:
+            return CFVMain._worker_code_for_replay_operation(self, operation)
+
+        def _describe_replay_operation(self, operation: dict[str, object]) -> str:
+            return CFVMain._describe_replay_operation(self, operation)
+
+        def _source_files_for_replay_operation(self, operation: dict[str, object]) -> list[str]:
+            return CFVMain._source_files_for_replay_operation(self, operation)
+
+        def _is_remote_source_uri(self, uri: str) -> bool:
+            return CFVMain._is_remote_source_uri(uri)
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.status_messages.append((message, is_error))
+
+        def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
+            _ = save_code_path
+            self.sent_tasks.append((code, emit_image))
+
+    window = _DummyReplayWindow()
+
+    CFVMain._field_ops_replay_last_operations(window)
+
+    assert len(window.sent_tasks) == 1
+    code, emit_image = window.sent_tasks[0]
+    assert emit_image is False
+    assert "append_unary_xy_field_operation" in code
+    assert "append_binary_field_operation" in code
+    assert "append_selection_field_operation" in code
+    assert "XconvRegridder" in code
+    assert window.status_messages[-1] == ("Replaying 4 field operation(s)...", False)
+
+
+def test_replay_last_operations_respects_unchecked_actions(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _SelectSubsetDialog:
+        def __init__(self, _parent, *, operation_labels: list[str]) -> None:
+            assert len(operation_labels) == 3
+
+        def exec(self) -> int:
+            return 1
+
+        def selected_indices(self) -> list[int]:
+            return [0, 2]
+
+    monkeypatch.setattr(main_window, "ReplayOperationsDialog", _SelectSubsetDialog)
+
+    class _DummyReplayWindow:
+        def __init__(self) -> None:
+            self.sent_tasks: list[tuple[str, bool]] = []
+            self.status_messages: list[tuple[str, bool]] = []
+            self._pending_binary_operation_name: str | None = None
+
+        def _load_last_operations_payload(self) -> dict[str, object]:
+            return {
+                "schema_version": 1,
+                "saved_at": "2026-06-08T00:00:00Z",
+                "operations": [
+                    {"kind": "unary_xy", "field_index": 0, "operation": "grad"},
+                    {
+                        "kind": "binary",
+                        "index_a": 0,
+                        "index_b": 1,
+                        "operation": "difference_ab",
+                    },
+                    {
+                        "kind": "apply_selection",
+                        "field_index": 1,
+                        "selections": {"latitude": [-10, 10]},
+                        "collapse_by_coord": {"time": "mean"},
+                    },
+                ],
+            }
+
+        def _worker_code_for_replay_operation(self, operation: dict[str, object]) -> str | None:
+            return CFVMain._worker_code_for_replay_operation(self, operation)
+
+        def _describe_replay_operation(self, operation: dict[str, object]) -> str:
+            return CFVMain._describe_replay_operation(self, operation)
+
+        def _source_files_for_replay_operation(self, operation: dict[str, object]) -> list[str]:
+            return CFVMain._source_files_for_replay_operation(self, operation)
+
+        def _is_remote_source_uri(self, uri: str) -> bool:
+            return CFVMain._is_remote_source_uri(uri)
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.status_messages.append((message, is_error))
+
+        def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
+            _ = save_code_path
+            self.sent_tasks.append((code, emit_image))
+
+    window = _DummyReplayWindow()
+
+    CFVMain._field_ops_replay_last_operations(window)
+
+    assert len(window.sent_tasks) == 1
+    code, emit_image = window.sent_tasks[0]
+    assert emit_image is False
+    assert "append_unary_xy_field_operation" in code
+    assert "append_selection_field_operation" in code
+    assert "append_binary_field_operation" not in code
+    assert window.status_messages[-1] == ("Replaying 2 field operation(s) (skipped 1)...", False)
+
+
+def test_replay_last_operations_preloads_required_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _SelectAllDialog:
+        def __init__(self, _parent, *, operation_labels: list[str]) -> None:
+            self._labels = operation_labels
+
+        def exec(self) -> int:
+            return 1
+
+        def selected_indices(self) -> list[int]:
+            return list(range(len(self._labels)))
+
+    monkeypatch.setattr(main_window, "ReplayOperationsDialog", _SelectAllDialog)
+
+    class _DummyReplayWindow:
+        def __init__(self) -> None:
+            self.sent_tasks: list[tuple[str, bool]] = []
+            self.status_messages: list[tuple[str, bool]] = []
+            self._pending_binary_operation_name: str | None = None
+
+        def _load_last_operations_payload(self) -> dict[str, object]:
+            return {
+                "schema_version": 1,
+                "saved_at": "2026-06-08T00:00:00Z",
+                "operations": [
+                    {
+                        "kind": "unary_xy",
+                        "field_index": 0,
+                        "operation": "grad",
+                        "source_file": "/tmp/a.nc",
+                    },
+                    {
+                        "kind": "binary",
+                        "index_a": 0,
+                        "index_b": 1,
+                        "operation": "difference_ab",
+                        "source_files": ["/tmp/a.nc", "/tmp/b.nc"],
+                    },
+                ],
+            }
+
+        def _worker_code_for_replay_operation(self, operation: dict[str, object]) -> str | None:
+            return CFVMain._worker_code_for_replay_operation(self, operation)
+
+        def _describe_replay_operation(self, operation: dict[str, object]) -> str:
+            return CFVMain._describe_replay_operation(self, operation)
+
+        def _source_files_for_replay_operation(self, operation: dict[str, object]) -> list[str]:
+            return CFVMain._source_files_for_replay_operation(self, operation)
+
+        def _is_remote_source_uri(self, uri: str) -> bool:
+            return CFVMain._is_remote_source_uri(uri)
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.status_messages.append((message, is_error))
+
+        def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
+            _ = save_code_path
+            self.sent_tasks.append((code, emit_image))
+
+    window = _DummyReplayWindow()
+
+    CFVMain._field_ops_replay_last_operations(window)
+
+    assert len(window.sent_tasks) == 1
+    code, emit_image = window.sent_tasks[0]
+    assert emit_image is False
+    assert "_cfview_replay_sources = ['/tmp/a.nc', '/tmp/b.nc']" in code
+    assert "try:" in code
+    assert "_cfview_new_fields = cf.read(_cfview_replay_sources)" in code
+    assert "f.extend(_cfview_new_fields)" in code
+    assert "Replay preload failed for source(s)" in code
+    assert "send_to_gui('METADATA', fields)" in code
+    assert "append_unary_xy_field_operation" in code
+    assert "append_binary_field_operation" in code
+
+
+def test_replay_last_operations_uses_single_path_read_for_single_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _SelectAllDialog:
+        def __init__(self, _parent, *, operation_labels: list[str]) -> None:
+            self._labels = operation_labels
+
+        def exec(self) -> int:
+            return 1
+
+        def selected_indices(self) -> list[int]:
+            return list(range(len(self._labels)))
+
+    monkeypatch.setattr(main_window, "ReplayOperationsDialog", _SelectAllDialog)
+
+    class _DummyReplayWindow:
+        def __init__(self) -> None:
+            self.sent_tasks: list[tuple[str, bool]] = []
+            self.status_messages: list[tuple[str, bool]] = []
+            self._pending_binary_operation_name: str | None = None
+
+        def _load_last_operations_payload(self) -> dict[str, object]:
+            return {
+                "schema_version": 1,
+                "saved_at": "2026-06-08T00:00:00Z",
+                "operations": [
+                    {
+                        "kind": "unary_xy",
+                        "field_index": 0,
+                        "operation": "grad",
+                        "source_file": "/tmp/a.nc",
+                    }
+                ],
+            }
+
+        def _worker_code_for_replay_operation(self, operation: dict[str, object]) -> str | None:
+            return CFVMain._worker_code_for_replay_operation(self, operation)
+
+        def _describe_replay_operation(self, operation: dict[str, object]) -> str:
+            return CFVMain._describe_replay_operation(self, operation)
+
+        def _source_files_for_replay_operation(self, operation: dict[str, object]) -> list[str]:
+            return CFVMain._source_files_for_replay_operation(self, operation)
+
+        def _is_remote_source_uri(self, uri: str) -> bool:
+            return CFVMain._is_remote_source_uri(uri)
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.status_messages.append((message, is_error))
+
+        def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
+            _ = save_code_path
+            self.sent_tasks.append((code, emit_image))
+
+    window = _DummyReplayWindow()
+
+    CFVMain._field_ops_replay_last_operations(window)
+
+    assert len(window.sent_tasks) == 1
+    code, emit_image = window.sent_tasks[0]
+    assert emit_image is False
+    assert "_cfview_replay_sources = ['/tmp/a.nc']" in code
+    assert "try:" in code
+    assert "_cfview_new_fields = cf.read(_cfview_replay_sources[0])" in code
+    assert "f.extend(_cfview_new_fields)" in code
+    assert "f = cf.read(_cfview_replay_sources)" not in code
+
+
+def test_replay_last_operations_uses_remote_preload_helper_for_remote_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _SelectAllDialog:
+        def __init__(self, _parent, *, operation_labels: list[str]) -> None:
+            self._labels = operation_labels
+
+        def exec(self) -> int:
+            return 1
+
+        def selected_indices(self) -> list[int]:
+            return list(range(len(self._labels)))
+
+    monkeypatch.setattr(main_window, "ReplayOperationsDialog", _SelectAllDialog)
+
+    class _DummyReplayWindow:
+        def __init__(self) -> None:
+            self.sent_tasks: list[tuple[str, bool]] = []
+            self.status_messages: list[tuple[str, bool]] = []
+            self._pending_binary_operation_name: str | None = None
+            self.file_open_mode = "single"
+            self._loaded_file_paths: list[str] = []
+            self.opened_remote: list[str] = []
+            self.cleared = 0
+
+        def _load_last_operations_payload(self) -> dict[str, object]:
+            return {
+                "schema_version": 1,
+                "saved_at": "2026-06-08T00:00:00Z",
+                "operations": [
+                    {
+                        "kind": "unary_xy",
+                        "field_index": 0,
+                        "operation": "grad",
+                        "source_file": "s3://bnl/CMIP6-test.nc",
+                    }
+                ],
+            }
+
+        def _worker_code_for_replay_operation(self, operation: dict[str, object]) -> str | None:
+            return CFVMain._worker_code_for_replay_operation(self, operation)
+
+        def _describe_replay_operation(self, operation: dict[str, object]) -> str:
+            return CFVMain._describe_replay_operation(self, operation)
+
+        def _source_files_for_replay_operation(self, operation: dict[str, object]) -> list[str]:
+            return CFVMain._source_files_for_replay_operation(self, operation)
+
+        def _is_remote_source_uri(self, uri: str) -> bool:
+            return CFVMain._is_remote_source_uri(uri)
+
+        def _open_remote_uri_for_replay_sync(self, uri: str) -> None:
+            self.opened_remote.append(uri)
+
+        def _clear_loaded_data_views(self) -> None:
+            self.cleared += 1
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.status_messages.append((message, is_error))
+
+        def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
+            _ = save_code_path
+            self.sent_tasks.append((code, emit_image))
+
+    window = _DummyReplayWindow()
+
+    CFVMain._field_ops_replay_last_operations(window)
+
+    assert window.opened_remote == ["s3://bnl/CMIP6-test.nc"]
+    assert window.cleared == 1
+    assert len(window.sent_tasks) == 1
+    code, emit_image = window.sent_tasks[0]
+    assert emit_image is False
+    assert "_cfview_replay_sources" not in code
+    assert "cf.read(" not in code
+    assert "append_unary_xy_field_operation" in code
+
+
+def test_record_replayable_operation_resets_when_session_changes(tmp_path: Path) -> None:
+    class _DummyReplayStore:
+        def __init__(self) -> None:
+            self.path = tmp_path / "last_operations.json"
+            self._replay_session_id = "session-B"
+
+        def _last_operations_path(self) -> Path:
+            return self.path
+
+        def _load_last_operations_payload(self) -> dict[str, object]:
+            return CFVMain._load_last_operations_payload(self)
+
+    host = _DummyReplayStore()
+
+    host.path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "session_id": "session-A",
+                "saved_at": "2026-06-08T00:00:00Z",
+                "operations": [{"kind": "unary_xy", "field_index": 9, "operation": "grad"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    CFVMain._record_replayable_operation(
+        host,
+        {"kind": "unary_xy", "field_index": 2, "operation": "laplacian"},
+    )
+
+    payload = json.loads(host.path.read_text(encoding="utf-8"))
+    assert payload["session_id"] == "session-B"
+    assert payload["operations"] == [{"kind": "unary_xy", "field_index": 2, "operation": "laplacian"}]
 
 
 def test_remove_selected_fields_updates_ui_and_sends_worker_task() -> None:

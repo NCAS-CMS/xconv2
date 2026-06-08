@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -234,6 +235,80 @@ class SaveSelectedFieldsDialog(QDialog):
             item = self.selected_table.item(row_idx, 1)
             values.append(item.text().strip() if item is not None else "")
         return values
+
+
+class ReplayOperationsDialog(QDialog):
+    """Dialog for choosing which persisted field operations to replay."""
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        *,
+        operation_labels: list[str],
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Replay Field Operations")
+        self.resize(760, 420)
+
+        layout = QVBoxLayout(self)
+        header = QLabel("Select operations to replay")
+        header.setStyleSheet("font-weight: 600;")
+        layout.addWidget(header)
+
+        hint = QLabel("Unchecked operations will be skipped.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.operations_list = QListWidget(self)
+        self.operations_list.setSelectionMode(QAbstractItemView.NoSelection)
+        self.operations_list.setAlternatingRowColors(True)
+        for index, label in enumerate(operation_labels, start=1):
+            item = QListWidgetItem(f"{index}. {label}")
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            self.operations_list.addItem(item)
+        layout.addWidget(self.operations_list, 1)
+
+        controls = QHBoxLayout()
+        controls.addStretch(1)
+        select_all = QPushButton("Select All")
+        clear_all = QPushButton("Clear All")
+        select_all.clicked.connect(self._select_all)
+        clear_all.clicked.connect(self._clear_all)
+        controls.addWidget(select_all)
+        controls.addWidget(clear_all)
+        layout.addLayout(controls)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._validate_and_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _set_all(self, state: Qt.CheckState) -> None:
+        for idx in range(self.operations_list.count()):
+            item = self.operations_list.item(idx)
+            if item is not None:
+                item.setCheckState(state)
+
+    def _select_all(self) -> None:
+        self._set_all(Qt.Checked)
+
+    def _clear_all(self) -> None:
+        self._set_all(Qt.Unchecked)
+
+    def selected_indices(self) -> list[int]:
+        selected: list[int] = []
+        for idx in range(self.operations_list.count()):
+            item = self.operations_list.item(idx)
+            if item is not None and item.checkState() == Qt.Checked:
+                selected.append(idx)
+        return selected
+
+    def _validate_and_accept(self) -> None:
+        if not self.selected_indices():
+            QMessageBox.warning(self, "No operations selected", "Select at least one operation to replay.")
+            return
+        self.accept()
 
 
 def create_info_button(
