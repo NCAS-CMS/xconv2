@@ -206,13 +206,18 @@ class FieldMetadataController:
             item.setData(Qt.UserRole, detail)
             item.setData(Qt.UserRole + 1, properties)
             item.setData(Qt.UserRole + 3, chunk_shape)
+            item.setData(Qt.UserRole + 4, identity)
+            item.setData(Qt.UserRole + 5, bool(generated))
             if source_file and not generated:
                 item.setData(Qt.UserRole + 2, source_file)
             if color is not None:
                 item.setBackground(color)
+            if generated:
+                item.setForeground(QColor("#b00020"))
             self.host.field_list_widget.addItem(item)
             added_count += 1
 
+        self.renumber_field_list()
         self.set_field_list_visible_rows(self.host._field_list_rows())
         total_count = self.host.field_list_widget.count()
         if append:
@@ -231,6 +236,46 @@ class FieldMetadataController:
         if callable(refresh_menu):
             refresh_menu()
         logger.info("Displayed %d fields in list", self.host.field_list_widget.count())
+
+    @staticmethod
+    def _format_field_display_label(index: int, identity: str) -> str:
+        """Format list row labels with a fixed-width numeric prefix."""
+        return f"{index:02d} {identity}"
+
+    def field_identity_from_item(self, item: QListWidgetItem | None) -> str:
+        """Return stable field identity text independent of displayed list prefix."""
+        if item is None:
+            return ""
+        raw = item.data(Qt.UserRole + 4)
+        if isinstance(raw, str) and raw:
+            return raw
+        return item.text()
+
+    def renumber_field_list(self) -> None:
+        """Reapply fixed-width index prefixes for all visible field list rows."""
+        for idx in range(self.host.field_list_widget.count()):
+            item = self.host.field_list_widget.item(idx)
+            if item is None:
+                continue
+            identity = self.field_identity_from_item(item)
+            item.setText(self._format_field_display_label(idx, identity))
+
+    def mark_selected_items_saved(self, source_file: str) -> int:
+        """Mark currently selected generated rows as saved under a source file."""
+        selected_items = list(self.host.field_list_widget.selectedItems())
+        if not selected_items:
+            return 0
+
+        color = self._source_color(source_file)
+        updated = 0
+        for item in selected_items:
+            item.setData(Qt.UserRole + 2, source_file)
+            item.setData(Qt.UserRole + 5, False)
+            item.setBackground(color)
+            item.setForeground(QColor("#000000"))
+            updated += 1
+
+        return updated
 
     def _source_color(self, source_file: str) -> QColor:
         """Return a stable light tint for each source file in multi-file mode."""

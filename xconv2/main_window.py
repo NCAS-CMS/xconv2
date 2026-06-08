@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import pickle
+import re
 import socket
 import time
 import uuid
@@ -389,6 +390,7 @@ class CFVMain(CFVCore):
                     logger.debug("Ignoring stale worker error status after field reset: %s", status_text)
                     continue
 
+                CFVMain._apply_saved_selected_status(self, display_status_text)
                 self._show_status_message(
                     display_status_text,
                     is_error=is_error_status,
@@ -2121,6 +2123,18 @@ class CFVMain(CFVCore):
         logger.info("Replaying %d field operations (skipped=%d)", len(code_blocks), skipped)
         self._send_worker_task(replay_code, emit_image=False)
 
+    def _field_identity_from_item(self, item: QListWidgetItem | None) -> str:
+        """Return stable field identity text when available, else display text."""
+        if item is None:
+            return ""
+        controller = getattr(self, "field_metadata_controller", None)
+        resolver = getattr(controller, "field_identity_from_item", None)
+        if callable(resolver):
+            identity = resolver(item)
+            if isinstance(identity, str) and identity:
+                return identity
+        return item.text() if hasattr(item, "text") else ""
+
     def _selected_field_index_for_operation(self, operation: str) -> int | None:
         """Return a single selected field index suitable for unary field operations."""
         selected = list(getattr(self, "_selected_field_indices", []))
@@ -2281,7 +2295,7 @@ class CFVMain(CFVCore):
             selected_rows.append(
                 {
                     "index": idx,
-                    "identity": str(item.text()),
+                    "identity": CFVMain._field_identity_from_item(self, item),
                 }
             )
 
@@ -2418,6 +2432,11 @@ class CFVMain(CFVCore):
         for idx in indices:
             _ = self.field_list_widget.takeItem(idx)
 
+        controller = getattr(self, "field_metadata_controller", None)
+        renumber = getattr(controller, "renumber_field_list", None)
+        if callable(renumber):
+            renumber()
+
         self._selected_field_indices = []
         remaining = self.field_list_widget.count()
         if remaining <= 0:
@@ -2465,7 +2484,7 @@ class CFVMain(CFVCore):
             selected_rows.append(
                 {
                     "index": idx,
-                    "identity": str(item.text()),
+                    "identity": CFVMain._field_identity_from_item(self, item),
                     "chunk_shape": str(item.data(Qt.UserRole + 3) or ""),
                 }
             )
@@ -2507,6 +2526,35 @@ class CFVMain(CFVCore):
             output_chunk_by_index,
         )
         self._send_worker_task(code, emit_image=False)
+
+    def _apply_saved_selected_status(self, status_text: str) -> None:
+        """Adopt selected generated fields into the destination source after save-selected."""
+        match = re.match(
+            r"^Saved\s+\d+\s+selected field\(s\)\s+to\s+(.+?)\s+\([^)]+\)$",
+            status_text,
+        )
+        if not match:
+            return
+
+        destination = str(Path(match.group(1).strip()).expanduser())
+        if not destination:
+            return
+
+        controller = getattr(self, "field_metadata_controller", None)
+        mark_saved = getattr(controller, "mark_selected_items_saved", None)
+        if not callable(mark_saved):
+            return
+
+        updated = int(mark_saved(destination))
+        if updated <= 0:
+            return
+
+        if destination not in self._loaded_file_paths:
+            self._loaded_file_paths.append(destination)
+
+        refresh_menu = getattr(self, "_refresh_open_files_menu", None)
+        if callable(refresh_menu):
+            refresh_menu()
 
     def _normalize_coordinate_metadata(self, payload: object) -> dict[str, dict[str, object]]:
         """Normalize worker coordinate payload into slider metadata mapping."""
@@ -2729,6 +2777,17 @@ class CFVMain(CFVCore):
             )
             return
 
+        field_index = self._selected_field_index_for_operation("Plot")
+        if field_index is None:
+            return
+
+        selected_item = self.field_list_widget.item(field_index)
+        selected_field_label = (
+            CFVMain._field_identity_from_item(self, selected_item)
+            if selected_item is not None
+            else f"field[{field_index}]"
+        )
+
         save_target = None
         if save_code_path:
             save_target = str(Path(save_code_path).expanduser())
@@ -2774,6 +2833,12 @@ class CFVMain(CFVCore):
                 logger.warning("Plot template unavailable for kind=%s: %s", plot_kind, exc)
                 return
 
+        cmd = (
+            f"_cfview_field_index = {field_index}\n"
+            f"fld = f[{field_index}]\n"
+            + cmd
+        )
+
         if emit_image_override is not None:
             emit_image = emit_image_override
         else:
@@ -2788,9 +2853,10 @@ class CFVMain(CFVCore):
             bool(save_plot_target),
         )
         logger.info(
-            "PLOT_DIAG gui_plot_request pid=%s worker_pid=%s kind=%s emit_image=%s",
+            "PLOT_DIAG gui_plot_request pid=%s worker_pid=%s field_index=%s kind=%s emit_image=%s",
             os.getpid(),
             self.worker.processId(),
+            field_index,
             plot_kind,
             emit_image,
         )
@@ -2807,6 +2873,8 @@ class CFVMain(CFVCore):
             loading_message = "Rendering plot and saving code..."
         else:
             loading_message = "Rendering plot..."
+
+        loading_message = f"{loading_message} Field {field_index}: {selected_field_label}"
 
         self._plot_request_in_flight = True
         self._plot_request_expects_image = emit_image
