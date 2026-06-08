@@ -8,7 +8,9 @@
 import logging
 import sys
 from pathlib import Path
+from typing import Sequence
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from .core_window import CFVCore
@@ -21,8 +23,41 @@ logger = logging.getLogger(__name__)
 __all__ = ["CFVCore", "CFVMain", "main"]
 
 
+def _launch_paths_from_argv(argv: Sequence[str]) -> list[str]:
+    """Return normalized positional file paths from CLI arguments."""
+    if not argv:
+        return []
+    return [str(Path(arg).expanduser()) for arg in argv]
+
+
+def _open_paths_from_cli(window: CFVMain, file_paths: Sequence[str]) -> None:
+    """Open startup files passed on the command line.
+
+    One file opens in single-file mode and is added to recents.
+    Multiple files switch to multi-file mode and open all selected files.
+    """
+    normalized = [str(Path(path).expanduser()) for path in file_paths if str(path).strip()]
+    if not normalized:
+        return
+
+    if len(normalized) == 1:
+        file_path = normalized[0]
+        window._set_window_title_for_file(file_path)
+        window._record_recent_file(file_path)
+        window.on_file_selected(file_path)
+        return
+
+    window._set_file_open_mode("multi")
+    for file_path in normalized:
+        window._record_recent_file(file_path)
+    window.setWindowTitle(f"{window.base_window_title}: {len(normalized)} files")
+    window.on_files_selected(normalized)
+
+
 
 def main() -> None:
+    launch_paths = _launch_paths_from_argv(sys.argv[1:])
+
     log_file = configure_logging()
     logger.info("Launching cf-view GUI")
     logger.info("Log file: %s", log_file)
@@ -34,6 +69,9 @@ def main() -> None:
     if not window.app_icon.isNull():
         app.setWindowIcon(window.app_icon)
     window.show()
+    if launch_paths:
+        # Defer file opening so startup UI/worker plumbing is initialized first.
+        QTimer.singleShot(0, lambda: _open_paths_from_cli(window, launch_paths))
 
     # On macOS the PyInstaller bootloader may start the process with an
     # .accessory activation policy (no Dock icon, opens behind other windows).
@@ -76,7 +114,6 @@ def main() -> None:
             # Ensure we're a regular foreground app (shows in Dock + App Switcher).
             _set_policy_fn(_ns_app, _sel(b"setActivationPolicy:"), 0)
             # Defer activation until after the event loop has rendered the window.
-            from PySide6.QtCore import QTimer
             QTimer.singleShot(
                 0,
                 lambda: _activate_fn(_ns_app, _sel(b"activateIgnoringOtherApps:"), True),
