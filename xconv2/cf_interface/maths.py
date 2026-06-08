@@ -93,6 +93,7 @@ def append_binary_field_operation(
 
     fld_a = fields[index_a]
     fld_b = fields[index_b]
+    common_properties = _common_source_properties_for_difference(fld_a, fld_b)
 
     coordinate_mismatch = _difference_coordinate_mismatch_details(fld_a, fld_b)
     if coordinate_mismatch is not None:
@@ -117,19 +118,27 @@ def append_binary_field_operation(
     else:
         raise ValueError(f"Unsupported binary field operation: {operation!r}")
 
-    # For difference outputs, remove inherited metadata and replace with a
-    # minimal provenance history containing only source file lines.
-    clear_props = getattr(new_field, "clear_properties", None)
-    if callable(clear_props):
-        clear_props()
-    else:
-        for prop_name in list(new_field.properties().keys()):
-            try:
-                new_field.del_property(prop_name, default=None)
-            except Exception:
-                # Some CF internals (for example units handling) may reject
-                # direct property deletion; continue best-effort cleanup.
-                continue
+    # For difference outputs, keep only source-shared metadata plus provenance.
+    # Delete properties one-by-one instead of clear+restore to avoid touching
+    # CF-managed internals (notably units) that may reject re-assignment.
+    common_property_names = set(common_properties)
+    for prop_name in list(new_field.properties().keys()):
+        if prop_name in common_property_names:
+            continue
+        try:
+            new_field.del_property(prop_name, default=None)
+        except Exception:
+            # Some CF internals may reject direct property deletion; keep them.
+            continue
+
+    for prop_name, prop_value in common_properties.items():
+        if prop_name.lower() == "units":
+            continue
+        try:
+            new_field.set_property(prop_name, prop_value)
+        except Exception:
+            # Keep best-effort behavior for CF-managed properties.
+            continue
 
     source_labels = _difference_source_labels(source_files)
     history_lines = ["Difference constructed from:"]
@@ -141,9 +150,32 @@ def append_binary_field_operation(
 
     fields.append(new_field)
     rows = field_info([new_field])
-    for row in rows:
-        row["properties"] = {"history": history_text}
     return rows
+
+
+def _common_source_properties_for_difference(field_a: cf.Field, field_b: cf.Field) -> dict[str, object]:
+    """Return property mapping with keys/values shared by both source fields."""
+    properties_a = field_a.properties()
+    properties_b = field_b.properties()
+
+    common: dict[str, object] = {}
+    for key, value_a in properties_a.items():
+        if key not in properties_b:
+            continue
+        value_b = properties_b[key]
+        if _property_values_equal_for_difference(value_a, value_b):
+            common[key] = value_a
+
+    return common
+
+
+def _property_values_equal_for_difference(value_a: object, value_b: object) -> bool:
+    """Return True when two property values should be treated as equal."""
+    try:
+        return bool(value_a == value_b)
+    except Exception:
+        # Fall back to string representations for values lacking robust equality.
+        return str(value_a) == str(value_b)
 
 
 def _difference_source_labels(source_files: list[str] | None) -> list[str]:

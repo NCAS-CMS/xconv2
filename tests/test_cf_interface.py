@@ -494,7 +494,8 @@ def test_append_binary_field_operation_records_source_files(monkeypatch: pytest.
 
     props = rows[0]["properties"]
     assert isinstance(props, dict)
-    assert set(props.keys()) == {"history"}
+    assert props.get("standard_name") == base.get_property("standard_name")
+    assert "history" in props
     history = str(props["history"])
     assert history.startswith("Difference constructed from:")
     assert "File: a.nc" in history
