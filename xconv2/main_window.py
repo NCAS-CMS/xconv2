@@ -13,7 +13,6 @@ from collections import deque
 import json
 import logging
 import os
-import pickle
 import re
 import socket
 import time
@@ -46,6 +45,7 @@ from .cf_templates import (
 )
 from .core_window import CFVCore
 from .cf_interface import parse_coordinate_subspace_commands
+from .worker_message_router import WorkerMessageRouter
 # Remote-access helpers are imported lazily (inside the methods that use them)
 # so that p5rem/paramiko are not loaded at GUI startup.
 from .ui.dialogs import (
@@ -153,6 +153,7 @@ class CFVMain(CFVCore):
         self._pending_binary_operation_name: str | None = None
         self._shutting_down: bool = False
         self._replay_session_id: str = str(uuid.uuid4())
+        self._worker_output_router = WorkerMessageRouter(self, main_cls=CFVMain)
 
         self.worker = QProcess()
         self.worker.readyReadStandardOutput.connect(self.handle_worker_output)
@@ -302,277 +303,18 @@ class CFVMain(CFVCore):
 
     def handle_worker_output(self) -> None:
         """Process worker stdout messages and route updates to UI."""
+        router = getattr(self, "_worker_output_router", None)
+        if router is None:
+            router = WorkerMessageRouter(self, main_cls=CFVMain)
+            self._worker_output_router = router
+
         while self.worker.canReadLine():
             line = self.worker.readLine().data().decode().strip()
             if not line:
                 continue
 
             logger.debug("Worker stdout line: %s", line)
-
-            if line.startswith("REMOTE_STATUS:"):
-                raw_payload = line.split(":", 1)[1]
-                payload = pickle.loads(base64.b64decode(raw_payload))
-                if not isinstance(payload, dict):
-                    logger.warning("Unexpected REMOTE_STATUS payload type: %s", type(payload).__name__)
-                    continue
-
-                phase = str(payload.get("phase", ""))
-                message = str(payload.get("message") or f"Remote worker phase: {phase}")
-                is_error = phase == "failed"
-                self._show_status_message(message, is_error=is_error)
-
-                log_dialog = getattr(self, "_pending_prepare_log_dialog", None)
-                if log_dialog is not None:
-                    log_dialog.append_line(message)
-                    if phase == "failed":
-                        log_dialog.mark_failed("")
-                        self._pending_prepare_failure_message = message
-
-                if phase in ("ready", "failed"):
-                    loop = getattr(self, "_pending_prepare_loop", None)
-                    if loop is not None:
-                        self._pending_prepare_loop_ok = phase == "ready"
-                        self._pending_prepare_loop = None
-                        loop.quit()
-
-            elif line.startswith("REMOTE_LIST_RESULT:"):
-                raw_payload = line.split(":", 1)[1]
-                result = pickle.loads(base64.b64decode(raw_payload))
-                if isinstance(result, dict):
-                    self._pending_list_result = result
-                    loop = getattr(self, "_pending_list_loop", None)
-                    if loop is not None:
-                        self._pending_list_loop = None
-                        loop.quit()
-                else:
-                    logger.warning("Unexpected REMOTE_LIST_RESULT payload type: %s", type(result).__name__)
-
-            elif line.startswith("REMOTE_OPEN_RESULT:"):
-                raw_payload = line.split(":", 1)[1]
-                payload = pickle.loads(base64.b64decode(raw_payload))
-                if not isinstance(payload, dict):
-                    logger.warning("Unexpected REMOTE_OPEN_RESULT payload type: %s", type(payload).__name__)
-                    continue
-
-                self._pending_remote_open_result = payload
-                open_loop = getattr(self, "_pending_remote_open_loop", None)
-                if open_loop is not None:
-                    self._pending_remote_open_loop = None
-                    open_loop.quit()
-
-                if payload.get("ok"):
-                    uri = str(payload.get("uri", ""))
-                    if uri:
-                        if getattr(self, "file_open_mode", "single") == "multi":
-                            if uri not in self._loaded_file_paths:
-                                self._loaded_file_paths.append(uri)
-                            refresh_menu = getattr(self, "_refresh_open_files_menu", None)
-                            if callable(refresh_menu):
-                                refresh_menu()
-                            self.setWindowTitle(
-                                f"{self.base_window_title}: {len(self._loaded_file_paths)} files"
-                            )
-                        else:
-                            self._loaded_file_paths = [uri]
-                            refresh_menu = getattr(self, "_refresh_open_files_menu", None)
-                            if callable(refresh_menu):
-                                refresh_menu()
-                            self._set_window_title_for_file(uri)
-                        self._show_status_message(f"Loaded remote file: {uri}")
-                else:
-                    error = str(payload.get("error") or "Remote open failed")
-                    self._show_status_message(error, is_error=True)
-
-            elif line.startswith("STATUS:"):
-                status_text = line.split(":", 1)[1]
-                display_status_text = status_text
-                is_error_status = status_text.startswith("Error -")
-
-                if status_text == "Task Complete":
-                    elapsed = CFVMain._complete_pending_worker_task(self, consume=True)
-                    if elapsed is not None:
-                        display_status_text = f"Task Complete ({elapsed:.2f}s)"
-                elif is_error_status:
-                    CFVMain._complete_pending_worker_task(self, consume=True)
-
-                # Ignore delayed worker errors from a previous task right after field reselection.
-                if self._suppress_stale_error_status and is_error_status and not self._plot_request_in_flight:
-                    logger.debug("Ignoring stale worker error status after field reset: %s", status_text)
-                    continue
-
-                CFVMain._apply_saved_selected_status(self, display_status_text)
-                self._show_status_message(
-                    display_status_text,
-                    is_error=is_error_status,
-                )
-                if is_error_status:
-                    self._maybe_show_binary_validation_dialog(status_text)
-                    metadata_loop = getattr(self, "_pending_metadata_loop", None)
-                    if metadata_loop is not None:
-                        self._pending_metadata_error = status_text
-                        self._pending_metadata_loop = None
-                        metadata_loop.quit()
-
-                is_plot_error = self._plot_request_in_flight and is_error_status
-                should_finish = False
-                if is_plot_error:
-                    should_finish = True
-                elif (
-                    self._plot_request_in_flight
-                    and status_text == "Task Complete"
-                    and not self._plot_request_expects_image
-                ):
-                    should_finish = True
-
-                if is_plot_error:
-                    self._clear_plot_canvas("Plot failed.")
-
-                if should_finish:
-                    self._plot_request_in_flight = False
-                    self._plot_request_expects_image = False
-                    self._set_plot_loading(False)
-
-            elif line.startswith("METADATA:"):
-                raw_payload = line.split(":", 1)[1]
-                metadata = pickle.loads(base64.b64decode(raw_payload))
-                if isinstance(metadata, list):
-                    if not all(isinstance(row, dict) for row in metadata):
-                        logger.warning(
-                            "Malformed METADATA payload: expected list of dicts, got mixed types"
-                        )
-                        self._show_status_message(
-                            "Received malformed field metadata from worker.", is_error=True
-                        )
-                        continue
-                    logger.info("Received metadata for %d fields", len(metadata))
-                    row_sources: list[str] = []
-                    for row in metadata:
-                        source_raw = row.get("source_file") if isinstance(row, dict) else None
-                        if not isinstance(source_raw, str) or not source_raw.strip():
-                            continue
-                        source = source_raw.strip()
-                        if source not in row_sources:
-                            row_sources.append(source)
-                    if row_sources:
-                        self._loaded_file_paths = list(row_sources)
-                        if len(row_sources) > 1:
-                            mode_setter = getattr(self, "_set_file_open_mode", None)
-                            if callable(mode_setter):
-                                mode_setter("multi")
-                            else:
-                                self.file_open_mode = "multi"
-
-                    append = bool(getattr(self, "_pending_metadata_append", False))
-                    source_file = getattr(self, "_pending_metadata_source", None)
-                    self.populate_field_list(
-                        metadata,
-                        append=append,
-                        source_file=source_file,
-                    )
-                    reselect_index = getattr(self, "_pending_reselect_field_index", None)
-                    if isinstance(reselect_index, int) and reselect_index >= 0:
-                        if reselect_index < self.field_list_widget.count():
-                            self.field_list_widget.setCurrentRow(reselect_index)
-                    self._pending_reselect_field_index = None
-                    self._pending_metadata_append = False
-                    self._pending_metadata_source = None
-                    metadata_loop = getattr(self, "_pending_metadata_loop", None)
-                    if metadata_loop is not None:
-                        self._pending_metadata_received = True
-                        self._pending_metadata_loop = None
-                        metadata_loop.quit()
-                elif isinstance(metadata, dict):
-                    logger.info("Received metadata for %d coordinates", len(metadata))
-                    self.build_dynamic_sliders(metadata)
-                else:
-                    logger.warning("Unexpected metadata payload type: %s", type(metadata).__name__)
-
-            elif line.startswith("METADATA_APPEND:"):
-                raw_payload = line.split(":", 1)[1]
-                metadata = pickle.loads(base64.b64decode(raw_payload))
-                if isinstance(metadata, list) and all(isinstance(row, dict) for row in metadata):
-                    self.populate_field_list(
-                        metadata,
-                        append=True,
-                        source_file=getattr(self, "_pending_field_op_source", None),
-                        generated=True,
-                    )
-                else:
-                    logger.warning("Unexpected METADATA_APPEND payload type: %s", type(metadata).__name__)
-                self._pending_field_op_source = None
-                self._pending_binary_operation_name = None
-
-            elif line.startswith("IMG_READY:"):
-                logger.info(
-                    "PLOT_DIAG gui_img_ready pid=%s worker_pid=%s payload_kind=bytes",
-                    os.getpid(),
-                    self.worker.processId(),
-                )
-                raw_payload = line.split(":", 1)[1]
-                payload = pickle.loads(base64.b64decode(raw_payload))
-                if isinstance(payload, bytes):
-                    self.set_plot_image(payload)
-                    self._show_status_message("Plot Updated.")
-                    if self._plot_request_in_flight:
-                        self._plot_request_in_flight = False
-                        self._plot_request_expects_image = False
-                        self._set_plot_loading(False)
-                else:
-                    logger.warning("Unexpected IMG_READY payload type: %s", type(payload).__name__)
-
-            elif line == "READY":
-                # Worker has finished all heavy imports and is ready for tasks.
-                logger.info("Worker ready signal received")
-                self._show_status_message("Ready")
-
-            elif line == "IMG_READY":
-                self._show_status_message("Plot Updated.")
-                if self._plot_request_in_flight:
-                    self._plot_request_in_flight = False
-                    self._plot_request_expects_image = False
-                    self._set_plot_loading(False)
-
-            elif line.startswith("COORD:"):
-                raw_payload = line.split(":", 1)[1]
-                coords = pickle.loads(base64.b64decode(raw_payload))
-                metadata = self._normalize_coordinate_metadata(coords)
-                if metadata:
-                    set_mode = getattr(self, "_set_selection_panel_mode", None)
-                    if callable(set_mode):
-                        set_mode("single")
-                    logger.info("Received coordinate metadata for %d sliders", len(metadata))
-                    self.build_dynamic_sliders(metadata)
-                else:
-                    set_mode = getattr(self, "_set_selection_panel_mode", None)
-                    if callable(set_mode):
-                        set_mode("multi")
-                    logger.warning("Received empty coordinate metadata payload")
-                    self._show_status_message(
-                        "No slider-friendly coordinates were found. Use coordinate bounds commands."
-                    )
-
-            elif line.startswith("CONTOUR_RANGE:"):
-                raw_payload = line.split(":", 1)[1]
-                payload = pickle.loads(base64.b64decode(raw_payload))
-                if isinstance(payload, dict):
-                    try:
-                        range_min = float(payload["min"])
-                        range_max = float(payload["max"])
-                    except (KeyError, TypeError, ValueError):
-                        logger.warning("Malformed CONTOUR_RANGE payload: %r", payload)
-                        continue
-
-                    suggested_title = payload.get("suggested_title")
-                    if suggested_title is not None:
-                        suggested_title = str(suggested_title).strip() or None
-
-                    self._show_contour_options_dialog(
-                        range_min,
-                        range_max,
-                        suggested_title=suggested_title,
-                    )
-                else:
-                    logger.warning("Unexpected CONTOUR_RANGE payload type: %s", type(payload).__name__)
+            router.handle_line(line)
 
     def handle_worker_error(self) -> None:
         """Log any worker stderr output as errors."""
