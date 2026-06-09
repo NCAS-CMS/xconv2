@@ -115,10 +115,9 @@ def coordinate_info(field: cf.Field) -> list[tuple[str, list[str], str]]:
         if name in seen_names:
             return
         units = str(getattr(construct, "Units", ""))
-        if units.startswith("degrees"):
-            vals = [f"{v:.2f}" for v in values]
-        else:
-            vals = [str(x) for x in values]
+        # Keep full-precision serialized values for subspace bounds.
+        # UI formatting should round for display only.
+        vals = [str(x) for x in values]
         coords.append((name, vals, units))
         seen_names.add(name)
 

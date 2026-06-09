@@ -59,12 +59,43 @@ def test_coordinate_info_filters_singletons_and_serializes_values() -> None:
 
     field = cf.example_field(7) 
     payload = coordinate_info(field)
+    by_name = {name: (values, units) for name, values, units in payload}
 
-    assert payload == [
-        ('time', ['120.5', '121.5', '122.5'], 'days since 1979-1-1 gregorian'),
-        ('grid_latitude', ['0.44', '0.00', '-0.44', '-0.88'], 'degrees'),
-        ('grid_longitude', ['-1.18', '-0.74', '-0.30', '0.14', '0.58'], 'degrees')
+    assert by_name["time"][0] == ["120.5", "121.5", "122.5"]
+    assert by_name["time"][1] == "days since 1979-1-1 gregorian"
+
+    lat_values, lat_units = by_name["grid_latitude"]
+    lon_values, lon_units = by_name["grid_longitude"]
+    assert lat_units == "degrees"
+    assert lon_units == "degrees"
+    assert [float(v) for v in lat_values] == pytest.approx([0.44, 0.0, -0.44, -0.88])
+    assert [float(v) for v in lon_values] == pytest.approx([-1.18, -0.74, -0.30, 0.14, 0.58])
+
+
+def test_coordinate_info_preserves_degree_precision_for_selection_bounds() -> None:
+    field = cf.read("data/test1.nc")[0]
+    payload = coordinate_info(field)
+
+    by_name = {name: (values, units) for name, values, units in payload}
+
+    def _has_precision(values: list[str]) -> bool:
+        for raw in values:
+            text = str(raw)
+            if "." not in text:
+                continue
+            decimals = text.split(".", 1)[1]
+            if len(decimals) > 2 and any(ch != "0" for ch in decimals[2:]):
+                return True
+        return False
+
+    degree_axes = [
+        values
+        for values, units in by_name.values()
+        if str(units).startswith("degrees")
     ]
+
+    assert degree_axes, "Expected at least one degree-based coordinate axis"
+    assert any(_has_precision(values) for values in degree_axes)
 
 
 def test_coordinate_info_nemo_uses_2d_fallback_ranges() -> None:
@@ -87,9 +118,10 @@ def test_coordinate_info_nemo_uses_2d_fallback_ranges() -> None:
     assert len(lon_values) == 1440
 
     # Ranges are synthesized from directional min/max.
-    # Note: values are formatted to .2f precision for degrees coordinates
+    # Values should preserve full precision so slider endpoints map back to
+    # true coordinate bounds when building subspace selections.
     assert float(lat_values[0]) == pytest.approx(-89.5)
-    assert float(lat_values[-1]) == pytest.approx(89.95)  # 89.94786... rounded to .2f
+    assert float(lat_values[-1]) == pytest.approx(89.94786, abs=5e-4)
     assert float(lon_values[0]) == pytest.approx(-180.0)
     assert float(lon_values[-1]) == pytest.approx(180.0)
 

@@ -378,10 +378,13 @@ class SelectionController:
         start_idx, end_idx = control["range_slider"].value()
         lo_idx = int(min(start_idx, end_idx))
         hi_idx = int(max(start_idx, end_idx))
-        selected_count = hi_idx - lo_idx
+        singleton_idx = self._singleton_index(lo_idx, hi_idx, len(values))
+        if singleton_idx is not None:
+            selected_count = 1
+        else:
+            selected_count = (hi_idx - lo_idx) + 1
         self.host.selected_counts[name] = selected_count
 
-        singleton_idx = self._singleton_index(lo_idx, hi_idx, len(values))
         if singleton_idx is not None:
             lo_text = self.format_slider_label_value(values[singleton_idx], units, delta)
             hi_text = lo_text
