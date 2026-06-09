@@ -14,12 +14,10 @@ import json
 import logging
 import os
 import re
-import socket
 import time
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import urlparse
 import sys
 
 import psutil
@@ -57,10 +55,29 @@ from .main_window_components.remote_flow_ops import open_recent_file as _open_re
 from .main_window_components.remote_flow_ops import open_remote_from_config as _open_remote_from_config_helper
 from .main_window_components.remote_flow_ops import open_remote_uri_direct as _open_remote_uri_direct_helper
 from .main_window_components.remote_flow_ops import open_uri_entry as _open_uri_entry_helper
+from .main_window_components.remote_auth_ops import clear_ssh_cached_secrets_for_config as _clear_ssh_cached_secrets_for_config_helper
+from .main_window_components.remote_auth_ops import is_ssh_auth_failure_message as _is_ssh_auth_failure_message_helper
+from .main_window_components.remote_auth_ops import maybe_retry_ssh_authentication as _maybe_retry_ssh_authentication_helper
+from .main_window_components.remote_auth_ops import parse_proxy_jump_target as _parse_proxy_jump_target_helper
+from .main_window_components.remote_auth_ops import prepare_ssh_config_for_auth as _prepare_ssh_config_for_auth_helper
+from .main_window_components.remote_auth_ops import probe_ssh_auth_methods as _probe_ssh_auth_methods_helper
+from .main_window_components.remote_auth_ops import prompt_ssh_secret as _prompt_ssh_secret_helper
+from .main_window_components.remote_auth_ops import resolve_ssh_alias as _resolve_ssh_alias_helper
+from .main_window_components.remote_auth_ops import validate_ssh_secret as _validate_ssh_secret_helper
+from .main_window_components.remote_auth_ops import with_cache_defaults as _with_cache_defaults_helper
 from .main_window_components.remote_ops import resolve_remote_uri as _resolve_remote_uri_helper
+from .main_window_components.replay_ops import build_remote_open_requests_for_sources as _build_remote_open_requests_for_sources_helper
+from .main_window_components.replay_ops import describe_replay_operation as _describe_replay_operation_helper
 from .main_window_components.replay_ops import field_ops_replay_last_operations as _field_ops_replay_last_operations_helper
 from .main_window_components.replay_ops import file_ops_save_selected_provenance as _file_ops_save_selected_provenance_helper
 from .main_window_components.replay_ops import input_load_and_run_prov as _input_load_and_run_prov_helper
+from .main_window_components.replay_ops import is_remote_source_uri as _is_remote_source_uri_helper
+from .main_window_components.replay_ops import json_safe_operation_payload as _json_safe_operation_payload_helper
+from .main_window_components.replay_ops import last_operations_path as _last_operations_path_helper
+from .main_window_components.replay_ops import load_last_operations_payload as _load_last_operations_payload_helper
+from .main_window_components.replay_ops import record_replayable_operation as _record_replayable_operation_helper
+from .main_window_components.replay_ops import source_files_for_replay_operation as _source_files_for_replay_operation_helper
+from .main_window_components.replay_ops import workflow_payload_from_provenance_document as _workflow_payload_from_provenance_document_helper
 from .worker_message_router import WorkerMessageRouter
 # Remote-access helpers are imported lazily (inside the methods that use them)
 # so that p5rem/paramiko are not loaded at GUI startup.
@@ -72,7 +89,6 @@ from .ui.dialogs import (
     RemoteOpenDialog,
     SaveSelectedFieldsDialog,
 )
-from .workflow.xconv_workflow_to_prov import prov_json_dict_to_workflow
 
 if TYPE_CHECKING:
     from .ui.remote_file_navigator import RemoteLoginLogDialog
@@ -543,22 +559,7 @@ class CFVMain(CFVCore):
 
     def _with_cache_defaults(self, config: dict[str, object]) -> dict[str, object]:
         """Attach persisted cache settings when a remote config omits cache."""
-        merged = dict(config)
-        existing_cache = merged.get("cache")
-        if isinstance(existing_cache, dict):
-            return merged
-
-        raw = self._settings.get("last_remote_configuration", {})
-        if not isinstance(raw, dict):
-            return merged
-
-        merged["cache"] = {
-            "disk_mode": str(raw.get("disk_mode", "Disabled")),
-            "disk_location": str(raw.get("disk_location", str(Path.home() / ".cache/xconv2"))),
-            "disk_limit_gb": int(raw.get("disk_limit_gb", 10)),
-            "disk_expiry": str(raw.get("disk_expiry", "1 day")),
-        }
-        return merged
+        return _with_cache_defaults_helper(self, config)
 
     def _configure_remote_for_uri(self, uri: str) -> None:
         """Open Configure Remote pre-populated for URI-driven add-new workflows."""
@@ -577,45 +578,12 @@ class CFVMain(CFVCore):
         timeout: float = 6.0,
     ) -> set[str] | None:
         """Probe SSH server auth methods quickly without waiting for filesystem auth timeout."""
-        try:
-            import paramiko  # type: ignore
-        except Exception:
-            return None
-
-        sock = None
-        transport = None
-        try:
-            sock = socket.create_connection((hostname, port), timeout=timeout)
-            transport = paramiko.Transport(sock)
-            transport.start_client(timeout=timeout)
-            try:
-                transport.auth_none(username)
-                return set()
-            except paramiko.BadAuthenticationType as exc:  # type: ignore[attr-defined]
-                allowed = getattr(exc, "allowed_types", None) or ()
-                methods = {
-                    str(item).strip().lower()
-                    for item in allowed
-                    if str(item).strip()
-                }
-                return methods or None
-            except paramiko.AuthenticationException:  # type: ignore[attr-defined]
-                # Some servers reply with a generic auth failure for auth_none.
-                return None
-        except Exception as exc:
-            logger.info("SSH auth preflight probe failed for %s@%s: %s", username, hostname, exc)
-            return None
-        finally:
-            if transport is not None:
-                try:
-                    transport.close()
-                except Exception:
-                    pass
-            if sock is not None:
-                try:
-                    sock.close()
-                except Exception:
-                    pass
+        return _probe_ssh_auth_methods_helper(
+            hostname,
+            username,
+            port=port,
+            timeout=timeout,
+        )
 
     @staticmethod
     def _validate_ssh_secret(
@@ -627,84 +595,23 @@ class CFVMain(CFVCore):
         timeout: float = 6.0,
     ) -> bool | None:
         """Validate an SSH password/secret; returns None when validation is inconclusive."""
-        try:
-            import paramiko  # type: ignore
-        except Exception:
-            return None
-
-        client = paramiko.SSHClient()
-        client.load_system_host_keys()
-        from .ui.remote_file_navigator import _XconvHostKeyPolicy  # noqa: PLC0415
-        client.set_missing_host_key_policy(_XconvHostKeyPolicy())
-        try:
-            client.connect(
-                hostname,
-                port=port,
-                username=username,
-                password=secret,
-                timeout=timeout,
-                auth_timeout=timeout,
-                banner_timeout=timeout,
-                allow_agent=False,
-                look_for_keys=False,
-            )
-            return True
-        except paramiko.AuthenticationException:  # type: ignore[attr-defined]
-            return False
-        except Exception:
-            return None
-        finally:
-            try:
-                client.close()
-            except Exception:
-                pass
+        return _validate_ssh_secret_helper(
+            hostname,
+            username,
+            secret,
+            port=port,
+            timeout=timeout,
+        )
 
     @staticmethod
     def _parse_proxy_jump_target(proxy_jump: str) -> tuple[str | None, str, int]:
         """Parse first ProxyJump hop into (user, host-or-alias, port)."""
-        first = proxy_jump.split(",", 1)[0].strip()
-        if not first:
-            return None, "", 22
-
-        port = 22
-        user: str | None = None
-        if "@" in first:
-            user_part, rest = first.split("@", 1)
-            user = user_part or None
-        else:
-            rest = first
-
-        if ":" in rest:
-            host, port_text = rest.rsplit(":", 1)
-            try:
-                port = int(port_text)
-            except ValueError:
-                host = rest
-        else:
-            host = rest
-
-        return user, host, port
+        return _parse_proxy_jump_target_helper(proxy_jump)
 
     @staticmethod
     def _resolve_ssh_alias(alias: str) -> tuple[str, str | None]:
         """Resolve SSH config alias to concrete hostname/user when available."""
-        host = alias
-        user: str | None = None
-        try:
-            import paramiko  # type: ignore
-            ssh_config_path = Path.home() / ".ssh/config"
-            if ssh_config_path.is_file():
-                cfg = paramiko.SSHConfig.from_path(str(ssh_config_path))
-                looked_up = cfg.lookup(alias)
-                looked_host = looked_up.get("hostname")
-                looked_user = looked_up.get("user")
-                if isinstance(looked_host, str) and looked_host.strip():
-                    host = looked_host.strip()
-                if isinstance(looked_user, str) and looked_user.strip():
-                    user = looked_user.strip()
-        except Exception:
-            pass
-        return host, user
+        return _resolve_ssh_alias_helper(alias)
 
     def _prompt_ssh_secret(
         self,
@@ -713,239 +620,50 @@ class CFVMain(CFVCore):
         prompt: str,
     ) -> tuple[str, bool]:
         """Prompt the user for an SSH secret/response."""
-        secret, ok = QInputDialog.getText(
+        return _prompt_ssh_secret_helper(
             self,
-            title,
-            prompt,
-            QLineEdit.Password,
+            title=title,
+            prompt=prompt,
+            qinputdialog_cls=QInputDialog,
+            qlineedit_cls=QLineEdit,
         )
-        if not ok:
-            self._show_status_message("SSH login cancelled by user.", is_error=True)
-            return "", False
-        if not secret:
-            self._show_status_message("SSH secret is required for this host.", is_error=True)
-            return "", False
-        return secret, True
 
     def _prepare_ssh_config_for_auth(self, config: dict[str, object]) -> dict[str, object] | None:
         """Inject transient SSH password credentials when preflight indicates a challenge."""
-        if str(config.get("protocol", "")).upper() != "SSH":
-            return config
-
-        remote = config.get("remote")
-        if not isinstance(remote, dict):
-            return config
-
-        details = remote.get("details")
-        detail_map = dict(details) if isinstance(details, dict) else {}
-
-        hostname_raw = detail_map.get("hostname") or remote.get("hostname")
-        username_raw = detail_map.get("user") or remote.get("user")
-        hostname = str(hostname_raw).strip() if isinstance(hostname_raw, str) else ""
-        username = str(username_raw).strip() if isinstance(username_raw, str) else ""
-        if not hostname or not username:
-            return config
-
-        updated_remote = dict(remote)
-        updated_details = dict(detail_map)
-
-        target_auth_methods = self._probe_ssh_auth_methods(hostname, username)
-        target_needs_secret = bool(target_auth_methods) and (
-            "password" in target_auth_methods or "keyboard-interactive" in target_auth_methods
+        return _prepare_ssh_config_for_auth_helper(
+            self,
+            config,
+            default_probe_ssh_auth_methods_fn=CFVMain._probe_ssh_auth_methods,
+            default_prompt_ssh_secret_fn=CFVMain._prompt_ssh_secret,
+            validate_ssh_secret_fn=CFVMain._validate_ssh_secret,
+            parse_proxy_jump_target_fn=CFVMain._parse_proxy_jump_target,
+            resolve_ssh_alias_fn=CFVMain._resolve_ssh_alias,
+            qmessagebox_cls=QMessageBox,
         )
-
-        if target_needs_secret:
-            cache_key = f"{username}@{hostname}:22"
-            secret = self._ssh_session_passwords.get(cache_key, "")
-            requires_otp_style = bool(target_auth_methods) and (
-                "keyboard-interactive" in target_auth_methods and "password" not in target_auth_methods
-            )
-
-            if secret and not requires_otp_style:
-                validation = CFVMain._validate_ssh_secret(hostname, username, secret, port=22)
-                if validation is False:
-                    self._ssh_session_passwords.pop(cache_key, None)
-                    secret = ""
-
-            if not secret:
-                prompt = f"Enter SSH secret for {username}@{hostname}"
-                if requires_otp_style:
-                    prompt = f"Enter one-time code or challenge response for {username}@{hostname}"
-
-                attempts = 2
-                for attempt in range(attempts):
-                    entered, ok = self._prompt_ssh_secret(
-                        title="SSH Authentication Required",
-                        prompt=prompt,
-                    )
-                    if not ok:
-                        return None
-
-                    validation = CFVMain._validate_ssh_secret(hostname, username, entered, port=22)
-                    if validation is False:
-                        QMessageBox.warning(
-                            self,
-                            "SSH Authentication Failed",
-                            "Authentication failed for the provided SSH secret. Please try again.",
-                        )
-                        continue
-
-                    secret = entered
-                    break
-
-                if not secret:
-                    return None
-
-            self._ssh_session_passwords[cache_key] = secret
-            updated_details["password"] = secret
-            updated_remote["password"] = secret
-
-        proxy_jump_raw = updated_details.get("proxyjump") or updated_remote.get("proxyjump")
-        proxy_jump = str(proxy_jump_raw).strip() if isinstance(proxy_jump_raw, str) else ""
-        if proxy_jump:
-            jump_user_hint, jump_alias, jump_port = CFVMain._parse_proxy_jump_target(proxy_jump)
-            if jump_alias:
-                jump_host, jump_user_cfg = CFVMain._resolve_ssh_alias(jump_alias)
-                jump_user = (jump_user_hint or jump_user_cfg or username).strip()
-
-                jump_auth_methods = self._probe_ssh_auth_methods(jump_host, jump_user, port=jump_port)
-                jump_needs_secret = bool(jump_auth_methods) and (
-                    "password" in jump_auth_methods or "keyboard-interactive" in jump_auth_methods
-                )
-
-                if jump_needs_secret:
-                    jump_cache_key = f"jump:{jump_user}@{jump_host}:{jump_port}"
-                    jump_secret = self._ssh_session_passwords.get(jump_cache_key, "")
-                    jump_requires_otp_style = bool(jump_auth_methods) and (
-                        "keyboard-interactive" in jump_auth_methods and "password" not in jump_auth_methods
-                    )
-
-                    if jump_secret and not jump_requires_otp_style:
-                        validation = CFVMain._validate_ssh_secret(
-                            jump_host,
-                            jump_user,
-                            jump_secret,
-                            port=jump_port,
-                        )
-                        if validation is False:
-                            self._ssh_session_passwords.pop(jump_cache_key, None)
-                            jump_secret = ""
-
-                    if not jump_secret:
-                        prompt = (
-                            f"Authenticating with bastion host {jump_host} "
-                            f"before proxyjump to {hostname}.\n\n"
-                            f"Enter bastion SSH secret for {jump_user}@{jump_host}"
-                        )
-                        if jump_requires_otp_style:
-                            prompt = (
-                                f"Authenticating with bastion host {jump_host} "
-                                f"before proxyjump to {hostname}.\n\n"
-                                f"Enter bastion one-time code or challenge response for {jump_user}@{jump_host}"
-                            )
-
-                        attempts = 2
-                        for _ in range(attempts):
-                            entered, ok = self._prompt_ssh_secret(
-                                title="Bastion Authentication Required",
-                                prompt=prompt,
-                            )
-                            if not ok:
-                                return None
-
-                            validation = CFVMain._validate_ssh_secret(
-                                jump_host,
-                                jump_user,
-                                entered,
-                                port=jump_port,
-                            )
-                            if validation is False:
-                                QMessageBox.warning(
-                                    self,
-                                    "Bastion Authentication Failed",
-                                    "Authentication failed for the provided bastion secret. Please try again.",
-                                )
-                                continue
-
-                            jump_secret = entered
-                            break
-
-                        if not jump_secret:
-                            return None
-
-                    self._ssh_session_passwords[jump_cache_key] = jump_secret
-                    updated_details["proxyjump_password"] = jump_secret
-                    updated_details["proxyjump_user"] = jump_user
-                    updated_remote["proxyjump_password"] = jump_secret
-                    updated_remote["proxyjump_user"] = jump_user
-
-        updated_remote["details"] = updated_details
-
-        updated_config = dict(config)
-        updated_config["remote"] = updated_remote
-        return updated_config
 
     @staticmethod
     def _is_ssh_auth_failure_message(message: str) -> bool:
         """Return True when a worker prepare failure message looks like SSH auth failure."""
-        text = (message or "").strip().lower()
-        if not text:
-            return False
-        markers = (
-            "authentication",
-            "bad authentication type",
-            "auth fail",
-            "permission denied",
-            "keyboard-interactive",
-            "auth",
-        )
-        return any(marker in text for marker in markers)
+        return _is_ssh_auth_failure_message_helper(message)
 
     def _clear_ssh_cached_secrets_for_config(self, config: dict[str, object]) -> None:
         """Forget cached SSH secrets for target and bastion hosts in a config."""
-        if str(config.get("protocol", "")).upper() != "SSH":
-            return
-
-        remote = config.get("remote")
-        if not isinstance(remote, dict):
-            return
-
-        details = remote.get("details")
-        detail_map = dict(details) if isinstance(details, dict) else {}
-
-        hostname_raw = detail_map.get("hostname") or remote.get("hostname")
-        username_raw = detail_map.get("user") or remote.get("user")
-        hostname = str(hostname_raw).strip() if isinstance(hostname_raw, str) else ""
-        username = str(username_raw).strip() if isinstance(username_raw, str) else ""
-        if hostname and username:
-            self._ssh_session_passwords.pop(f"{username}@{hostname}:22", None)
-
-        proxy_jump_raw = detail_map.get("proxyjump") or remote.get("proxyjump")
-        proxy_jump = str(proxy_jump_raw).strip() if isinstance(proxy_jump_raw, str) else ""
-        if proxy_jump:
-            jump_user_hint, jump_alias, jump_port = CFVMain._parse_proxy_jump_target(proxy_jump)
-            if jump_alias:
-                jump_host, jump_user_cfg = CFVMain._resolve_ssh_alias(jump_alias)
-                jump_user = (jump_user_hint or jump_user_cfg or username).strip()
-                if jump_host and jump_user:
-                    self._ssh_session_passwords.pop(f"jump:{jump_user}@{jump_host}:{jump_port}", None)
+        _clear_ssh_cached_secrets_for_config_helper(
+            self,
+            config,
+            parse_proxy_jump_target_fn=CFVMain._parse_proxy_jump_target,
+            resolve_ssh_alias_fn=CFVMain._resolve_ssh_alias,
+        )
 
     def _maybe_retry_ssh_authentication(self, config: dict[str, object], failure_message: str) -> bool:
         """Offer auth retry for SSH prepare failures that look like authentication problems."""
-        if str(config.get("protocol", "")).upper() != "SSH":
-            return False
-        if not CFVMain._is_ssh_auth_failure_message(failure_message):
-            return False
-
-        self._clear_ssh_cached_secrets_for_config(config)
-        choice = QMessageBox.question(
+        return _maybe_retry_ssh_authentication_helper(
             self,
-            "SSH Authentication Failed",
-            "SSH authentication failed. Retry with new credentials/response?",
-            QMessageBox.Retry | QMessageBox.Cancel,
-            QMessageBox.Retry,
+            config,
+            failure_message,
+            is_ssh_auth_failure_message_fn=CFVMain._is_ssh_auth_failure_message,
+            qmessagebox_cls=QMessageBox,
         )
-        return choice == QMessageBox.Retry
 
     def _open_uri_entry(self, uri: str, *, from_uri_dialog: bool) -> None:
         """Open a URI from user input or recent list."""
@@ -1017,73 +735,19 @@ class CFVMain(CFVCore):
     @staticmethod
     def _json_safe_operation_payload(value: object) -> object:
         """Return a JSON-compatible copy of operation payload data."""
-        try:
-            return json.loads(json.dumps(value, sort_keys=True))
-        except TypeError:
-            return json.loads(json.dumps(value, sort_keys=True, default=str))
+        return _json_safe_operation_payload_helper(value)
 
     def _last_operations_path(self) -> Path:
         """Return path to the replayable operations history file."""
-        return Path.home() / ".xconv2" / "last_operations.json"
+        return _last_operations_path_helper()
 
     def _load_last_operations_payload(self) -> dict[str, object]:
         """Load replay payload from disk, returning an empty schema when absent/invalid."""
-        path = self._last_operations_path()
-        default_payload: dict[str, object] = {
-            "schema_version": 1,
-            "session_id": "",
-            "saved_at": "",
-            "operations": [],
-        }
-        if not path.exists():
-            return default_payload
-
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            logger.exception("Failed to read last operations file: %s", path)
-            return default_payload
-
-        if not isinstance(payload, dict):
-            logger.warning("Ignoring malformed last operations payload: expected dict")
-            return default_payload
-
-        operations = payload.get("operations")
-        if not isinstance(operations, list):
-            logger.warning("Ignoring malformed last operations payload: operations is not a list")
-            return default_payload
-
-        return {
-            "schema_version": int(payload.get("schema_version", 1) or 1),
-            "session_id": str(payload.get("session_id", "") or ""),
-            "saved_at": str(payload.get("saved_at", "") or ""),
-            "operations": operations,
-        }
+        return _load_last_operations_payload_helper(self)
 
     def _record_replayable_operation(self, operation: dict[str, object]) -> None:
         """Append one replayable field operation to disk."""
-        path = self._last_operations_path()
-        payload = self._load_last_operations_payload()
-
-        operations_raw = payload.get("operations", [])
-        operations = operations_raw if isinstance(operations_raw, list) else []
-        active_session_id = str(getattr(self, "_replay_session_id", "") or "")
-        payload_session_id = str(payload.get("session_id", "") or "")
-        if active_session_id and payload_session_id != active_session_id:
-            # Keep only the current GUI session's operations in this file.
-            operations = []
-        operations.append(CFVMain._json_safe_operation_payload(operation))
-
-        payload["schema_version"] = 1
-        payload["session_id"] = active_session_id
-        payload["saved_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        payload["operations"] = operations
-
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        except OSError:
-            logger.exception("Failed to persist replayable operations to %s", path)
+        _record_replayable_operation_helper(self, operation)
 
     def _worker_code_for_replay_operation(self, operation: dict[str, object]) -> str | None:
         """Build worker task code for one replayable operation payload."""
@@ -1171,63 +835,15 @@ class CFVMain(CFVCore):
 
     def _describe_replay_operation(self, operation: dict[str, object]) -> str:
         """Build a short, user-facing description for one replayable operation."""
-        kind = str(operation.get("kind", "")).strip().lower()
-
-        if kind == "unary_xy":
-            op = str(operation.get("operation", "unknown"))
-            idx = operation.get("field_index")
-            return f"Maths {op} on field index {idx}"
-
-        if kind == "binary":
-            op = str(operation.get("operation", "unknown"))
-            idx_a = operation.get("index_a")
-            idx_b = operation.get("index_b")
-            return f"Maths {op} on field indices {idx_a} and {idx_b}"
-
-        if kind == "apply_selection":
-            idx = operation.get("field_index")
-            return f"Apply Selection on field index {idx}"
-
-        if kind == "regrid":
-            config = operation.get("config")
-            if isinstance(config, dict):
-                target = str(config.get("target", "unknown"))
-                field_indices = config.get("field_indices", [])
-                if isinstance(field_indices, list):
-                    return f"Regrid target {target} for {len(field_indices)} field(s)"
-                return f"Regrid target {target}"
-            return "Regrid"
-
-        return f"Unknown operation kind: {kind or 'unknown'}"
+        return _describe_replay_operation_helper(operation)
 
     def _source_files_for_replay_operation(self, operation: dict[str, object]) -> list[str]:
         """Return ordered source-file hints associated with one replay operation."""
-        kind = str(operation.get("kind", "")).strip().lower()
-
-        if kind in {"unary_xy", "apply_selection"}:
-            source_file = operation.get("source_file")
-            if isinstance(source_file, str) and source_file.strip():
-                return [source_file.strip()]
-            return []
-
-        if kind == "binary":
-            source_files = operation.get("source_files")
-            if isinstance(source_files, list):
-                return [str(item).strip() for item in source_files if isinstance(item, str) and str(item).strip()]
-            return []
-
-        if kind == "regrid":
-            source_files = operation.get("source_files")
-            if isinstance(source_files, list):
-                return [str(item).strip() for item in source_files if isinstance(item, str) and str(item).strip()]
-            return []
-
-        return []
+        return _source_files_for_replay_operation_helper(operation)
 
     @staticmethod
     def _is_remote_source_uri(uri: str) -> bool:
-        scheme = urlparse(uri).scheme.lower()
-        return scheme in {"s3", "ssh", "http", "https"}
+        return _is_remote_source_uri_helper(uri)
 
     def _open_remote_uri_for_replay_sync(self, uri: str) -> None:
         """Open one remote URI via the normal remote-control path and wait for REMOTE_OPEN_RESULT."""
@@ -1406,37 +1022,12 @@ class CFVMain(CFVCore):
 
     def _build_remote_open_requests_for_sources(self, sources: list[str]) -> list[dict[str, object]]:
         """Build worker remote-open descriptors for a list of replay/provenance sources."""
-        remote_open_requests: list[dict[str, object]] = []
-        for source in sources:
-            if not CFVMain._is_remote_source_uri(source):
-                continue
-
-            config, remote_path, _host_alias, unknown_host = self._resolve_remote_uri(source)
-            if unknown_host or not isinstance(config, dict):
-                continue
-
-            try:
-                from .remote_access import build_remote_filesystem_spec, remote_descriptor_hash, spec_to_descriptor  # noqa: PLC0415
-
-                config_with_cache = CFVMain._with_cache_defaults(self, config)
-                spec = build_remote_filesystem_spec(config_with_cache)
-                descriptor = spec_to_descriptor(
-                    spec,
-                    cache=config_with_cache.get("cache") if isinstance(config_with_cache, dict) else None,
-                )
-                remote_open_requests.append(
-                    {
-                        "uri": source,
-                        "session_id": uuid.uuid4().hex,
-                        "descriptor_hash": remote_descriptor_hash(descriptor),
-                        "descriptor": descriptor,
-                        "paths": [remote_path],
-                    }
-                )
-            except Exception:
-                logger.exception("Failed to prepare remote preload request for %s", source)
-
-        return remote_open_requests
+        return _build_remote_open_requests_for_sources_helper(
+            self,
+            sources,
+            is_remote_source_uri_fn=CFVMain._is_remote_source_uri,
+            with_cache_defaults_fn=lambda payload: CFVMain._with_cache_defaults(self, payload),
+        )
 
     def _file_ops_save_selected_provenance(self) -> None:
         """Save field-specific upstream provenance for selected fields."""
@@ -1448,31 +1039,7 @@ class CFVMain(CFVCore):
     @staticmethod
     def _workflow_payload_from_provenance_document(payload: object) -> dict[str, object] | None:
         """Normalize either internal workflow JSON or PROV-JSON into replay workflow payload."""
-        if not isinstance(payload, dict):
-            return None
-
-        operations = payload.get("operations")
-        if isinstance(operations, list):
-            return {
-                "schema_version": int(payload.get("schema_version", 1) or 1),
-                "session_id": str(payload.get("session_id", "") or ""),
-                "saved_at": str(payload.get("saved_at", "") or ""),
-                "operations": operations,
-            }
-
-        try:
-            workflow = prov_json_dict_to_workflow(payload)
-        except ValueError:
-            return None
-
-        return {
-            "schema_version": int(workflow.get("schema_version", 1) or 1),
-            "session_id": str(workflow.get("session_id", "") or ""),
-            "saved_at": str(workflow.get("saved_at", "") or ""),
-            "operations": list(workflow.get("operations", []))
-            if isinstance(workflow.get("operations", []), list)
-            else [],
-        }
+        return _workflow_payload_from_provenance_document_helper(payload)
 
     def _input_load_and_run_prov(self) -> None:
         """Load internal/PROV workflow JSON and replay it through worker control messaging."""

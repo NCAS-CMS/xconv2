@@ -5,8 +5,223 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+import time
+import uuid
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+
+def json_safe_operation_payload(value: object) -> object:
+    """Return a JSON-compatible copy of operation payload data."""
+    try:
+        return json.loads(json.dumps(value, sort_keys=True))
+    except TypeError:
+        return json.loads(json.dumps(value, sort_keys=True, default=str))
+
+
+def last_operations_path() -> Path:
+    """Return path to the replayable operations history file."""
+    return Path.home() / ".xconv2" / "last_operations.json"
+
+
+def load_last_operations_payload(host: object) -> dict[str, object]:
+    """Load replay payload from disk, returning an empty schema when absent/invalid."""
+    path = host._last_operations_path()
+    default_payload: dict[str, object] = {
+        "schema_version": 1,
+        "session_id": "",
+        "saved_at": "",
+        "operations": [],
+    }
+    if not path.exists():
+        return default_payload
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.exception("Failed to read last operations file: %s", path)
+        return default_payload
+
+    if not isinstance(payload, dict):
+        logger.warning("Ignoring malformed last operations payload: expected dict")
+        return default_payload
+
+    operations = payload.get("operations")
+    if not isinstance(operations, list):
+        logger.warning("Ignoring malformed last operations payload: operations is not a list")
+        return default_payload
+
+    return {
+        "schema_version": int(payload.get("schema_version", 1) or 1),
+        "session_id": str(payload.get("session_id", "") or ""),
+        "saved_at": str(payload.get("saved_at", "") or ""),
+        "operations": operations,
+    }
+
+
+def record_replayable_operation(host: object, operation: dict[str, object]) -> None:
+    """Append one replayable field operation to disk."""
+    path = host._last_operations_path()
+    payload = host._load_last_operations_payload()
+
+    operations_raw = payload.get("operations", [])
+    operations = operations_raw if isinstance(operations_raw, list) else []
+    active_session_id = str(getattr(host, "_replay_session_id", "") or "")
+    payload_session_id = str(payload.get("session_id", "") or "")
+    if active_session_id and payload_session_id != active_session_id:
+        operations = []
+    json_safe_fn = getattr(host, "_json_safe_operation_payload", None)
+    if callable(json_safe_fn):
+        safe_operation = json_safe_fn(operation)
+    else:
+        safe_operation = json_safe_operation_payload(operation)
+    operations.append(safe_operation)
+
+    payload["schema_version"] = 1
+    payload["session_id"] = active_session_id
+    payload["saved_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["operations"] = operations
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError:
+        logger.exception("Failed to persist replayable operations to %s", path)
+
+
+def describe_replay_operation(operation: dict[str, object]) -> str:
+    """Build a short, user-facing description for one replayable operation."""
+    kind = str(operation.get("kind", "")).strip().lower()
+
+    if kind == "unary_xy":
+        op = str(operation.get("operation", "unknown"))
+        idx = operation.get("field_index")
+        return f"Maths {op} on field index {idx}"
+
+    if kind == "binary":
+        op = str(operation.get("operation", "unknown"))
+        idx_a = operation.get("index_a")
+        idx_b = operation.get("index_b")
+        return f"Maths {op} on field indices {idx_a} and {idx_b}"
+
+    if kind == "apply_selection":
+        idx = operation.get("field_index")
+        return f"Apply Selection on field index {idx}"
+
+    if kind == "regrid":
+        config = operation.get("config")
+        if isinstance(config, dict):
+            target = str(config.get("target", "unknown"))
+            field_indices = config.get("field_indices", [])
+            if isinstance(field_indices, list):
+                return f"Regrid target {target} for {len(field_indices)} field(s)"
+            return f"Regrid target {target}"
+        return "Regrid"
+
+    return f"Unknown operation kind: {kind or 'unknown'}"
+
+
+def source_files_for_replay_operation(operation: dict[str, object]) -> list[str]:
+    """Return ordered source-file hints associated with one replay operation."""
+    kind = str(operation.get("kind", "")).strip().lower()
+
+    if kind in {"unary_xy", "apply_selection"}:
+        source_file = operation.get("source_file")
+        if isinstance(source_file, str) and source_file.strip():
+            return [source_file.strip()]
+        return []
+
+    if kind == "binary":
+        source_files = operation.get("source_files")
+        if isinstance(source_files, list):
+            return [str(item).strip() for item in source_files if isinstance(item, str) and str(item).strip()]
+        return []
+
+    if kind == "regrid":
+        source_files = operation.get("source_files")
+        if isinstance(source_files, list):
+            return [str(item).strip() for item in source_files if isinstance(item, str) and str(item).strip()]
+        return []
+
+    return []
+
+
+def is_remote_source_uri(uri: str) -> bool:
+    scheme = urlparse(uri).scheme.lower()
+    return scheme in {"s3", "ssh", "http", "https"}
+
+
+def build_remote_open_requests_for_sources(
+    host: object,
+    sources: list[str],
+    *,
+    is_remote_source_uri_fn,
+    with_cache_defaults_fn,
+) -> list[dict[str, object]]:
+    """Build worker remote-open descriptors for replay/provenance sources."""
+    remote_open_requests: list[dict[str, object]] = []
+    for source in sources:
+        if not is_remote_source_uri_fn(source):
+            continue
+
+        config, remote_path, _host_alias, unknown_host = host._resolve_remote_uri(source)
+        if unknown_host or not isinstance(config, dict):
+            continue
+
+        try:
+            from ..remote_access import build_remote_filesystem_spec, remote_descriptor_hash, spec_to_descriptor  # noqa: PLC0415
+
+            config_with_cache = with_cache_defaults_fn(config)
+            spec = build_remote_filesystem_spec(config_with_cache)
+            descriptor = spec_to_descriptor(
+                spec,
+                cache=config_with_cache.get("cache") if isinstance(config_with_cache, dict) else None,
+            )
+            remote_open_requests.append(
+                {
+                    "uri": source,
+                    "session_id": uuid.uuid4().hex,
+                    "descriptor_hash": remote_descriptor_hash(descriptor),
+                    "descriptor": descriptor,
+                    "paths": [remote_path],
+                }
+            )
+        except Exception:
+            logger.exception("Failed to prepare remote preload request for %s", source)
+
+    return remote_open_requests
+
+
+def workflow_payload_from_provenance_document(payload: object) -> dict[str, object] | None:
+    """Normalize either internal workflow JSON or PROV-JSON into replay workflow payload."""
+    from ..workflow.xconv_workflow_to_prov import prov_json_dict_to_workflow  # noqa: PLC0415
+
+    if not isinstance(payload, dict):
+        return None
+
+    operations = payload.get("operations")
+    if isinstance(operations, list):
+        return {
+            "schema_version": int(payload.get("schema_version", 1) or 1),
+            "session_id": str(payload.get("session_id", "") or ""),
+            "saved_at": str(payload.get("saved_at", "") or ""),
+            "operations": operations,
+        }
+
+    try:
+        workflow = prov_json_dict_to_workflow(payload)
+    except ValueError:
+        return None
+
+    return {
+        "schema_version": int(workflow.get("schema_version", 1) or 1),
+        "session_id": str(workflow.get("session_id", "") or ""),
+        "saved_at": str(workflow.get("saved_at", "") or ""),
+        "operations": list(workflow.get("operations", []))
+        if isinstance(workflow.get("operations", []), list)
+        else [],
+    }
 
 
 def field_ops_replay_last_operations(host: object, *, replay_dialog_cls: type[object]) -> None:
