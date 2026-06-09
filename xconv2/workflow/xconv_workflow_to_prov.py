@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 from urllib.parse import urlparse
 
 _XCONV_NS = "https://github.com/NCAS-CMS/xconv2#"
@@ -64,12 +63,15 @@ def workflow_to_prov_json_dict(
     schema_version = int(workflow.get("schema_version", 1) or 1)
     session_id = str(workflow.get("session_id", "") or "")
     saved_at = str(workflow.get("saved_at", "") or "")
+    runtime_versions_raw = workflow.get("runtime_versions")
+    runtime_versions = runtime_versions_raw if isinstance(runtime_versions_raw, dict) else {}
     operations_raw = workflow.get("operations", [])
     operations = [op for op in operations_raw if isinstance(op, dict)] if isinstance(operations_raw, list) else []
 
     doc: dict[str, object] = {
         "prefix": {
             "prov": "http://www.w3.org/ns/prov#",
+            "dcterms": "http://purl.org/dc/terms/",
             "xconv": _XCONV_NS,
         },
         "entity": {},
@@ -103,6 +105,12 @@ def workflow_to_prov_json_dict(
         "prov:label": "xconv2",
         "xconv:repository": "https://github.com/NCAS-CMS/xconv2",
     }
+    xconv2_version = runtime_versions.get("xconv2")
+    if isinstance(xconv2_version, str) and xconv2_version.strip():
+        agents[agent_id]["xconv:xconv2_version"] = xconv2_version.strip()
+    cf_python_version = runtime_versions.get("cf_python")
+    if isinstance(cf_python_version, str) and cf_python_version.strip():
+        agents[agent_id]["xconv:cf_python_version"] = cf_python_version.strip()
 
     session_activity_id = f"xconv:session_{session_id or 'unknown'}"
     activities[session_activity_id] = {
@@ -122,6 +130,8 @@ def workflow_to_prov_json_dict(
     }
 
     source_entities: dict[str, str] = {}
+    source_properties_raw = workflow.get("source_properties")
+    source_properties = source_properties_raw if isinstance(source_properties_raw, dict) else {}
     next_field_entity = 0
     next_used = 0
     next_generated = 0
@@ -140,11 +150,20 @@ def workflow_to_prov_json_dict(
         if entity_id:
             return entity_id
         entity_id = _source_qname(effective_uri)
-        entities[entity_id] = {
+        entity: dict[str, object] = {
             "prov:type": "prov:Collection",
             "prov:label": Path(effective_uri).name if effective_uri else "source",
             "xconv:uri": effective_uri,
         }
+        source_meta = source_properties.get(uri)
+        if not isinstance(source_meta, dict):
+            source_meta = source_properties.get(effective_uri)
+        if isinstance(source_meta, dict):
+            tracking_id = source_meta.get("tracking_id")
+            if isinstance(tracking_id, str) and tracking_id.strip():
+                entity["dcterms:identifier"] = tracking_id.strip()
+
+        entities[entity_id] = entity
         source_entities[effective_uri] = entity_id
         return entity_id
 

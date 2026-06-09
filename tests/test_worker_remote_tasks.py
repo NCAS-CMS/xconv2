@@ -330,7 +330,11 @@ def test_handle_save_provenance_task_writes_shareable_s3_uri_in_prov_json(
             filesystem=_FakeFilesystem(),
         ),
     )
-    monkeypatch.setattr(worker, "_read_remote_fields", lambda **_kwargs: [{"identity": "src"}])
+    monkeypatch.setattr(
+        worker,
+        "_read_remote_fields",
+        lambda **_kwargs: [{"identity": "src", "tracking_id": "track-xyz-789"}],
+    )
     monkeypatch.setattr(
         worker.cf_interface,
         "field_info",
@@ -411,10 +415,22 @@ def test_handle_save_provenance_task_writes_shareable_s3_uri_in_prov_json(
     ]
     assert len(source_entities) == 1
     assert source_entities[0]["xconv:uri"] == "s3://object.example.org/bnl/CMIP6-test.nc"
+    assert source_entities[0]["dcterms:identifier"] == "track-xyz-789"
 
     activities = saved["activity"]
     assert isinstance(activities, dict)
     workflow_blob = activities["xconv:session_session-1"]["xconv:workflow_json"]
     assert isinstance(workflow_blob, str)
     assert '"source_file": "s3://bnl/CMIP6-test.nc"' in workflow_blob
+    assert '"runtime_versions"' in workflow_blob
+    assert '"cf_python"' in workflow_blob
+    assert '"xconv2"' in workflow_blob
+
+    agents = saved["agent"]
+    assert isinstance(agents, dict)
+    software_agent = agents["xconv:xconv2"]
+    assert isinstance(software_agent.get("xconv:xconv2_version"), str)
+    assert software_agent.get("xconv:xconv2_version")
+    assert isinstance(software_agent.get("xconv:cf_python_version"), str)
+    assert software_agent.get("xconv:cf_python_version")
     assert messages[-1][0].startswith("STATUS:Saved selected provenance")
