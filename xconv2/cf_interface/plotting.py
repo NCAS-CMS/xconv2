@@ -298,6 +298,108 @@ def run_line_plot(
     plotter.render()
 
 
+def run_vector_plot(
+    pfld_u: object,
+    pfld_v: object,
+    options: dict[str, object] | None,
+    plot_action: str = "plot",
+    mapset: dict[str, object] | None = None,
+    selection_spec: dict[str, tuple[object, object]] | None = None,
+    collapse_by_coord: dict[str, str] | None = None,
+) -> None:
+    """Render a vector plot for two prepared U/V component fields using cfp.vect."""
+    options = options or {}
+    mapset = mapset or {}
+    normalized_action = "overplot" if plot_action == "overplot" else "plot"
+
+    get_fignums = getattr(plt, "get_fignums", None)
+    has_existing_figure = False
+    if callable(get_fignums):
+        try:
+            has_existing_figure = bool(get_fignums())
+        except Exception:
+            pass
+
+    if normalized_action != "overplot" and has_existing_figure:
+        plt.close("all")
+        has_existing_figure = False
+
+    if mapset.get("map_projection") and (normalized_action != "overplot" or not has_existing_figure):
+        projection = mapset.get("map_projection")
+        resolution = mapset.get("map_resolution", "110m")
+        if projection in ["spstere", "npstere"]:
+            cfp.mapset(
+                proj=projection,
+                resolution=resolution,
+                boundinglat=mapset.get("boundinglat", -45 if projection == "spstere" else 45),
+                lon_0=mapset.get("lon_0", 0.0),
+            )
+        else:
+            bbox = mapset.get("bbox")
+            if bbox and isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                lonmin, latmin, lonmax, latmax = tuple(bbox)
+            else:
+                lonmin, latmin, lonmax, latmax = None, None, None, None
+            lon_0 = mapset.get("lon_0", 0.0)
+            lat_0 = mapset.get("lat_0", 0.0)
+            cfp.mapset(
+                proj=projection,
+                resolution=resolution,
+                lonmin=lonmin,
+                lonmax=lonmax,
+                latmin=latmin,
+                latmax=latmax,
+                lon_0=lon_0,
+                lat_0=lat_0,
+            )
+
+    filename = options.get("filename")
+    title = str(options.get("title", "") or "")
+
+    stride = int(options.get("stride", 1) or 1)
+    if stride < 1:
+        stride = 1
+
+    vecs_kwargs: dict[str, object] = {"stride": stride}
+
+    scale_raw = options.get("scale")
+    if scale_raw is not None:
+        try:
+            scale_val = float(scale_raw)
+            if scale_val > 0:
+                vecs_kwargs["scale"] = scale_val
+        except (TypeError, ValueError):
+            pass
+
+    key_length_raw = options.get("key_length")
+    if key_length_raw is not None:
+        try:
+            key_len_val = float(key_length_raw)
+            if key_len_val > 0:
+                vecs_kwargs["key_length"] = key_len_val
+        except (TypeError, ValueError):
+            pass
+
+    key_label = str(options.get("key_label", "") or "")
+    if key_label:
+        vecs_kwargs["key_label"] = key_label
+
+    if title:
+        vecs_kwargs["title"] = title
+
+    if normalized_action != "overplot" or not has_existing_figure:
+        cfp.gopen(user_plot=1)
+
+    cfp.vect(pfld_u, pfld_v, **vecs_kwargs)
+
+    mycanvas = plt.gcf()
+    if filename is not None:
+        mycanvas.savefig(str(filename))
+        plt.close(mycanvas)
+    else:
+        cfp.gclose()
+
+
 def auto_contour_title(
     pfld: object,
     selection_spec: dict[str, tuple[object, object]] | None,

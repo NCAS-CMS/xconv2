@@ -562,7 +562,7 @@ class SelectionController:
             )
             self.host.plot_info_button.show()
             self.host.plot_button.setEnabled(True)
-            self.host.options_button.setEnabled(selected_kind in {"contour", "lineplot"})
+            self.host.options_button.setEnabled(selected_kind in {"contour", "lineplot", "vector"})
             self._set_save_controls_enabled(True)
         elif varying_dims == 2:
             self.host.plot_summary_label.setText(
@@ -570,7 +570,7 @@ class SelectionController:
             )
             self.host.plot_info_button.show()
             self.host.plot_button.setEnabled(True)
-            self.host.options_button.setEnabled(selected_kind in {"contour", "lineplot"})
+            self.host.options_button.setEnabled(selected_kind in {"contour", "lineplot", "vector"})
             self._set_save_controls_enabled(True)
         else:
             self.host.plot_summary_label.setText(

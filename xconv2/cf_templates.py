@@ -236,7 +236,7 @@ def plot_from_selection(
     This currently wires the API contract and emits status information.
     Plot rendering and collapse application will be expanded later.
     """
-    if plot_kind not in {"lineplot", "contour"}:
+    if plot_kind not in {"lineplot", "contour", "vector"}:
         raise ValueError(f"Unsupported plot kind: {plot_kind}")
     if plot_action not in {"plot", "overplot"}:
         raise ValueError(f"Unsupported plot action: {plot_action}")
@@ -247,6 +247,10 @@ def plot_from_selection(
         plot_code = lineplot(options=plot_options, plot_action=plot_action)
     elif plot_kind == "contour":
         plot_code = contour(options=plot_options, plot_action=plot_action)
+    elif plot_kind == "vector":
+        plot_code = vector(options=plot_options, plot_action=plot_action)
+    else:
+        raise ValueError(f"Unsupported plot kind: {plot_kind}")
 
     data_save_code = _save_data_code(save_data_path) if save_data_path else ""
     parts = [prep_code, plot_code]
@@ -350,6 +354,41 @@ def lineplot(options: dict[str, object] | None, plot_action: str) -> str:
         )
         if lineplot_options and 'filename' in lineplot_options:  #omit4save
             send_to_gui(f"STATUS:Saved plot to {{lineplot_options['filename']}}")  #omit4save
+        """
+    ).lstrip()
+    return payload_code
+
+
+def vector(options: dict[str, object] | None, plot_action: str) -> str:
+    """Generate worker code that delegates vector rendering to API helpers."""
+    if not options or options.get("v_field_index") is None:
+        raise ValueError("vector plot options must include v_field_index; open Vector Options first")
+    payload_code = textwrap.dedent(
+        f"""
+        vector_options = {options!r}
+        vector_plot_action = {plot_action!r}
+        _cfview_v_field_index = vector_options.get('v_field_index')
+        fld_v = f[_cfview_v_field_index]
+        pfld_v = get_data_for_plotting(fld_v, selection_spec, collapse_by_coord)
+        mapset_options = {{
+            'map_projection': vector_options.get('map_projection') if vector_options else None,
+            'bbox': vector_options.get('bbox') if vector_options else None,
+            'boundinglat': vector_options.get('boundinglat') if vector_options else None,
+            'map_resolution': vector_options.get('map_resolution') if vector_options else None,
+            'lat_0': vector_options.get('lat_0') if vector_options else None,
+            'lon_0': vector_options.get('lon_0') if vector_options else None,
+        }}
+        run_vector_plot(
+            pfld_u=pfld,
+            pfld_v=pfld_v,
+            options=vector_options,
+            plot_action=vector_plot_action,
+            mapset=mapset_options,
+            selection_spec=selection_spec,
+            collapse_by_coord=collapse_by_coord,
+        )
+        if vector_options and 'filename' in vector_options:  #omit4save
+            send_to_gui(f"STATUS:Saved plot to {{vector_options['filename']}}")  #omit4save
         """
     ).lstrip()
     return payload_code

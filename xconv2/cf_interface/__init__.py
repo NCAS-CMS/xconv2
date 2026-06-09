@@ -23,6 +23,7 @@ from .plotting import (
     contour_data_range,
     run_contour_plot,
     run_line_plot,
+    run_vector_plot,
 )
 from .regridding import XconvRegridder, regrid_from_config
 
@@ -44,6 +45,7 @@ __all__ = [
     "auto_contour_title",
     "run_contour_plot",
     "run_line_plot",
+    "run_vector_plot",
     "annotation_text",
     "estimate_layout_padding",
     "apply_vertical_padding",

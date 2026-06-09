@@ -64,6 +64,7 @@ from . import __version__
 from .ui.contour_options_controller import ContourOptionsController
 from .ui.field_metadata_controller import FieldMetadataController
 from .ui.lineplot_options_controller import LineplotOptionsController
+from .ui.vector_options_controller import VectorOptionsController
 from .ui.menu_controller import MenuController
 from .ui.plot_view_controller import PlotViewController
 from .ui.selection_controller import SelectionController
@@ -503,6 +504,7 @@ class CFVCore(QMainWindow):
         self.plot_view_controller = PlotViewController(self)
         self.contour_options_controller = ContourOptionsController(self)
         self.lineplot_options_controller = LineplotOptionsController(self)
+        self.vector_options_controller = VectorOptionsController(self)
         self._settings = self._load_settings()
         self.setWindowTitle(self.base_window_title)
         self.resize(1000, 700)
@@ -2255,6 +2257,10 @@ class CFVCore(QMainWindow):
     def _show_lineplot_options_dialog(self) -> None:
         """Show lineplot options dialog and persist selected options."""
         self.lineplot_options_controller.show_lineplot_options_dialog()
+
+    def _show_vector_options_dialog(self, current_field_index: int) -> None:
+        """Show vector options dialog and persist selected options."""
+        self.vector_options_controller.show_vector_options_dialog(current_field_index)
 
     def _show_annotation_properties_chooser(
         self,

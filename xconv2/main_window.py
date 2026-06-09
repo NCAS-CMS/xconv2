@@ -3043,6 +3043,12 @@ class CFVMain(CFVCore):
             self._show_lineplot_options_dialog()
             return
 
+        if plot_kind == "vector":
+            field_index = self._selected_field_index_for_operation("Vector Plot Options")
+            if field_index is not None:
+                self._show_vector_options_dialog(field_index)
+            return
+
         if plot_kind != "contour":
             self._show_status_message(f"No options dialog available for plot type: {plot_kind}")
             return
@@ -3194,6 +3200,14 @@ class CFVMain(CFVCore):
                 plot_options.setdefault("contour_title_fontsize", self._contour_title_fontsize())
                 plot_options.setdefault("page_title_fontsize", self._page_title_fontsize())
                 plot_options.setdefault("annotation_fontsize", self._annotation_fontsize())
+
+            if plot_kind == "vector" and plot_options.get("v_field_index") is None:
+                self._show_status_message(
+                    "Open Vector Options to assign U and V fields before plotting.",
+                    is_error=False,
+                )
+                self._show_vector_options_dialog(field_index)
+                return
 
             plot_action = getattr(self, "selected_plot_action", "plot")
             if plot_action not in {"plot", "overplot"}:
