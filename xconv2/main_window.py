@@ -26,7 +26,7 @@ import psutil
 
 from PySide6.QtCore import QEventLoop, QProcess, QTimer, Qt
 from PySide6.QtGui import QCloseEvent, QFontDatabase
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QInputDialog, QLineEdit, QListWidgetItem, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QLabel, QInputDialog, QLineEdit, QListWidgetItem, QMessageBox
 
 from .cf_templates import (
     add_dimension_coordinate_bounds,
@@ -133,6 +133,9 @@ class CFVMain(CFVCore):
         self._pending_list_result: dict | None = None
         self._pending_remote_open_loop: QEventLoop | None = None
         self._pending_remote_open_result: dict[str, object] | None = None
+        self._pending_metadata_loop: QEventLoop | None = None
+        self._pending_metadata_received: bool = False
+        self._pending_metadata_error: str = ""
         self._ssh_session_passwords: dict[str, str] = {}
         self._selected_field_indices: list[int] = []
         self._loaded_file_paths: list[str] = []
@@ -397,6 +400,11 @@ class CFVMain(CFVCore):
                 )
                 if is_error_status:
                     self._maybe_show_binary_validation_dialog(status_text)
+                    metadata_loop = getattr(self, "_pending_metadata_loop", None)
+                    if metadata_loop is not None:
+                        self._pending_metadata_error = status_text
+                        self._pending_metadata_loop = None
+                        metadata_loop.quit()
 
                 is_plot_error = self._plot_request_in_flight and is_error_status
                 should_finish = False
@@ -444,6 +452,11 @@ class CFVMain(CFVCore):
                     self._pending_reselect_field_index = None
                     self._pending_metadata_append = False
                     self._pending_metadata_source = None
+                    metadata_loop = getattr(self, "_pending_metadata_loop", None)
+                    if metadata_loop is not None:
+                        self._pending_metadata_received = True
+                        self._pending_metadata_loop = None
+                        metadata_loop.quit()
                 elif isinstance(metadata, dict):
                     logger.info("Received metadata for %d coordinates", len(metadata))
                     self.build_dynamic_sliders(metadata)
@@ -1867,44 +1880,80 @@ class CFVMain(CFVCore):
 
         if kind == "unary_xy":
             field_index = operation.get("field_index")
+            field_ref = operation.get("field_ref")
             operation_key = operation.get("operation")
-            if isinstance(field_index, int) and isinstance(operation_key, str) and operation_key.strip():
-                return unary_xy_field_operation(field_index, operation_key)
+            resolved_index = None
+            if isinstance(field_ref, dict):
+                resolved_index = CFVMain._resolve_field_reference_index(self, field_ref)
+            if resolved_index is None and isinstance(field_index, int):
+                resolved_index = field_index
+            if isinstance(resolved_index, int) and isinstance(operation_key, str) and operation_key.strip():
+                return unary_xy_field_operation(resolved_index, operation_key)
             return None
 
         if kind == "binary":
             index_a = operation.get("index_a")
             index_b = operation.get("index_b")
+            field_ref_a = operation.get("field_ref_a")
+            field_ref_b = operation.get("field_ref_b")
             operation_key = operation.get("operation")
             source_files_raw = operation.get("source_files", [])
             source_files = []
             if isinstance(source_files_raw, list):
                 source_files = [str(item) for item in source_files_raw if isinstance(item, str)]
+            resolved_a = None
+            resolved_b = None
+            if isinstance(field_ref_a, dict):
+                resolved_a = CFVMain._resolve_field_reference_index(self, field_ref_a)
+            if isinstance(field_ref_b, dict):
+                resolved_b = CFVMain._resolve_field_reference_index(self, field_ref_b)
+            if resolved_a is None and isinstance(index_a, int):
+                resolved_a = index_a
+            if resolved_b is None and isinstance(index_b, int):
+                resolved_b = index_b
             if (
-                isinstance(index_a, int)
-                and isinstance(index_b, int)
+                isinstance(resolved_a, int)
+                and isinstance(resolved_b, int)
                 and isinstance(operation_key, str)
                 and operation_key.strip()
             ):
-                return binary_field_operation(index_a, index_b, operation_key, source_files=source_files)
+                return binary_field_operation(resolved_a, resolved_b, operation_key, source_files=source_files)
             return None
 
         if kind == "apply_selection":
             field_index = operation.get("field_index")
+            field_ref = operation.get("field_ref")
             selections = operation.get("selections")
             collapse_by_coord = operation.get("collapse_by_coord")
+            resolved_index = None
+            if isinstance(field_ref, dict):
+                resolved_index = CFVMain._resolve_field_reference_index(self, field_ref)
+            if resolved_index is None and isinstance(field_index, int):
+                resolved_index = field_index
             if (
-                isinstance(field_index, int)
+                isinstance(resolved_index, int)
                 and isinstance(selections, dict)
                 and isinstance(collapse_by_coord, dict)
             ):
-                return apply_selection_field_operation(field_index, selections, collapse_by_coord)
+                return apply_selection_field_operation(resolved_index, selections, collapse_by_coord)
             return None
 
         if kind == "regrid":
             config = operation.get("config")
             if isinstance(config, dict):
-                return regrid_fields_operation(json.dumps(config, sort_keys=True))
+                config_copy = dict(config)
+                field_refs = operation.get("field_refs")
+                if isinstance(field_refs, list) and field_refs:
+                    resolved_indices: list[int] = []
+                    for raw_ref in field_refs:
+                        if not isinstance(raw_ref, dict):
+                            continue
+                        resolved = CFVMain._resolve_field_reference_index(self, raw_ref)
+                        if isinstance(resolved, int):
+                            resolved_indices.append(resolved)
+                    if resolved_indices:
+                        config_copy["field_indices"] = resolved_indices
+                return regrid_fields_operation(json.dumps(config_copy, sort_keys=True))
             return None
 
         return None
@@ -2014,8 +2063,131 @@ class CFVMain(CFVCore):
             error = str(payload.get("error") or "Remote open failed")
             raise ValueError(f"Replay remote preload failed for {canonical_uri}: {error}")
 
+    def _load_local_source_for_replay_sync(self, file_path: str, *, append: bool) -> None:
+        """Load one local source via worker and wait for METADATA response."""
+        loader = getattr(self, "_load_selected_file", None)
+        if not callable(loader):
+            return
+
+        self._pending_metadata_received = False
+        self._pending_metadata_error = ""
+        self._pending_metadata_loop = QEventLoop()
+        metadata_loop = self._pending_metadata_loop
+
+        timeout = QTimer(self)
+        timeout.setSingleShot(True)
+        timeout.timeout.connect(metadata_loop.quit)
+        timeout.start(15000)
+
+        loader(file_path, clear_existing=False, append_metadata=append)
+
+        if self._pending_metadata_loop is not None:
+            metadata_loop.exec()
+
+        timed_out = not self._pending_metadata_received and not bool(self._pending_metadata_error)
+        if timeout.isActive():
+            timeout.stop()
+        self._pending_metadata_loop = None
+
+        if self._pending_metadata_error:
+            raise ValueError(f"Replay local preload failed for {file_path}: {self._pending_metadata_error}")
+        if timed_out:
+            raise ValueError(f"Replay local preload timed out for source: {file_path}")
+
+    def _field_reference_for_index(self, index: int) -> dict[str, object] | None:
+        """Build a stable field reference for one current list index."""
+        item = self.field_list_widget.item(index)
+        if item is None:
+            return None
+
+        identity = CFVMain._field_identity_from_item(self, item)
+        if not identity:
+            return None
+
+        source_raw = item.data(Qt.UserRole + 2)
+        source = str(source_raw).strip() if isinstance(source_raw, str) and source_raw.strip() else ""
+        generated_raw = item.data(Qt.UserRole + 5)
+        generated = bool(generated_raw) if isinstance(generated_raw, bool) else False
+
+        occurrence = 0
+        for idx in range(self.field_list_widget.count()):
+            current = self.field_list_widget.item(idx)
+            if current is None:
+                continue
+            if CFVMain._field_identity_from_item(self, current) != identity:
+                continue
+            current_source_raw = current.data(Qt.UserRole + 2)
+            current_source = (
+                str(current_source_raw).strip()
+                if isinstance(current_source_raw, str) and current_source_raw.strip()
+                else ""
+            )
+            current_generated_raw = current.data(Qt.UserRole + 5)
+            current_generated = bool(current_generated_raw) if isinstance(current_generated_raw, bool) else False
+            if current_source == source and current_generated == generated:
+                occurrence += 1
+            if idx == index:
+                break
+
+        return {
+            "identity": identity,
+            "source_file": source,
+            "generated": generated,
+            "occurrence": max(occurrence, 1),
+        }
+
+    def _resolve_field_reference_index(self, field_ref: dict[str, object]) -> int | None:
+        """Resolve a stable field reference to the current list index."""
+        identity_raw = field_ref.get("identity")
+        if not isinstance(identity_raw, str) or not identity_raw.strip():
+            return None
+        identity = identity_raw.strip()
+
+        source_raw = field_ref.get("source_file")
+        source = str(source_raw).strip() if isinstance(source_raw, str) and source_raw.strip() else ""
+
+        generated_raw = field_ref.get("generated")
+        generated_filter = bool(generated_raw) if isinstance(generated_raw, bool) else None
+
+        occurrence_raw = field_ref.get("occurrence")
+        try:
+            occurrence_target = int(occurrence_raw)
+        except (TypeError, ValueError):
+            occurrence_target = 1
+        if occurrence_target < 1:
+            occurrence_target = 1
+
+        seen = 0
+        for idx in range(self.field_list_widget.count()):
+            item = self.field_list_widget.item(idx)
+            if item is None:
+                continue
+            if CFVMain._field_identity_from_item(self, item) != identity:
+                continue
+
+            item_source_raw = item.data(Qt.UserRole + 2)
+            item_source = (
+                str(item_source_raw).strip()
+                if isinstance(item_source_raw, str) and item_source_raw.strip()
+                else ""
+            )
+            if source and item_source != source:
+                continue
+
+            if generated_filter is not None:
+                item_generated_raw = item.data(Qt.UserRole + 5)
+                item_generated = bool(item_generated_raw) if isinstance(item_generated_raw, bool) else False
+                if item_generated != generated_filter:
+                    continue
+
+            seen += 1
+            if seen == occurrence_target:
+                return idx
+
+        return None
+
     def _field_ops_replay_last_operations(self) -> None:
-        """Replay persisted field-creating worker operations from last session state."""
+        """Replay persisted field operations by dispatching a worker control task."""
         payload = self._load_last_operations_payload()
         operations_raw = payload.get("operations", [])
         operations = operations_raw if isinstance(operations_raw, list) else []
@@ -2023,17 +2195,13 @@ class CFVMain(CFVCore):
             self._show_status_message("No replayable field operations found.", is_error=True)
             return
 
-        candidates: list[tuple[str, str, dict[str, object]]] = []
+        candidates: list[dict[str, object]] = []
         skipped = 0
         for raw in operations:
             if not isinstance(raw, dict):
                 skipped += 1
                 continue
-            code = self._worker_code_for_replay_operation(raw)
-            if not isinstance(code, str) or not code.strip():
-                skipped += 1
-                continue
-            candidates.append((code, self._describe_replay_operation(raw), raw))
+            candidates.append(raw)
 
         if not candidates:
             self._show_status_message("No valid replayable operations found in history.", is_error=True)
@@ -2041,7 +2209,7 @@ class CFVMain(CFVCore):
 
         chooser = ReplayOperationsDialog(
             self,
-            operation_labels=[label for _code, label, _operation in candidates],
+            operation_labels=[self._describe_replay_operation(operation) for operation in candidates],
         )
         if chooser.exec() != QDialog.Accepted:
             return
@@ -2052,76 +2220,161 @@ class CFVMain(CFVCore):
             return
 
         selected_operations = [
-            candidates[idx][2]
+            candidates[idx]
             for idx in selected_indices
             if 0 <= idx < len(candidates)
         ]
 
-        code_blocks = [
-            candidates[idx][0]
-            for idx in selected_indices
-            if 0 <= idx < len(candidates)
-        ]
-        skipped += len(candidates) - len(code_blocks)
-
-        if not code_blocks:
+        if not selected_operations:
             self._show_status_message("No valid replayable operations found in history.", is_error=True)
             return
+
+        skipped += len(candidates) - len(selected_operations)
 
         replay_sources: list[str] = []
         for operation in selected_operations:
             for source in self._source_files_for_replay_operation(operation):
+                if source in replay_sources:
+                    continue
+                replay_sources.append(source)
+        remote_builder = getattr(self, "_build_remote_open_requests_for_sources", None)
+        if callable(remote_builder):
+            remote_open_requests = remote_builder(replay_sources)
+        else:
+            remote_open_requests = CFVMain._build_remote_open_requests_for_sources(self, replay_sources)
+
+        self._show_status_message(
+            f"Replaying {len(selected_operations)} field operation(s){f' (skipped {skipped})' if skipped else ''}..."
+        )
+        logger.info("Dispatching replay control task for %d field operations (skipped=%d)", len(selected_operations), skipped)
+        self._send_worker_control_task(
+            "REPLAY_FIELDS",
+            {
+                "operations": selected_operations,
+                "remote_open_requests": remote_open_requests,
+            },
+        )
+
+    def _build_remote_open_requests_for_sources(self, sources: list[str]) -> list[dict[str, object]]:
+        """Build worker remote-open descriptors for a list of replay/provenance sources."""
+        remote_open_requests: list[dict[str, object]] = []
+        for source in sources:
+            if not CFVMain._is_remote_source_uri(source):
+                continue
+
+            config, remote_path, _host_alias, unknown_host = self._resolve_remote_uri(source)
+            if unknown_host or not isinstance(config, dict):
+                continue
+
+            try:
+                from .remote_access import build_remote_filesystem_spec, remote_descriptor_hash, spec_to_descriptor  # noqa: PLC0415
+
+                config_with_cache = CFVMain._with_cache_defaults(self, config)
+                spec = build_remote_filesystem_spec(config_with_cache)
+                descriptor = spec_to_descriptor(
+                    spec,
+                    cache=config_with_cache.get("cache") if isinstance(config_with_cache, dict) else None,
+                )
+                remote_open_requests.append(
+                    {
+                        "uri": source,
+                        "session_id": uuid.uuid4().hex,
+                        "descriptor_hash": remote_descriptor_hash(descriptor),
+                        "descriptor": descriptor,
+                        "paths": [remote_path],
+                    }
+                )
+            except Exception:
+                logger.exception("Failed to prepare remote preload request for %s", source)
+
+        return remote_open_requests
+
+    def _file_ops_save_selected_provenance(self) -> None:
+        """Save field-specific upstream provenance for selected fields."""
+        selected_items = list(self.field_list_widget.selectedItems())
+        if not selected_items:
+            self._show_status_message("Select one or more fields to save provenance.", is_error=True)
+            return
+
+        selected_indices = sorted(
+            {
+                idx
+                for idx in (self.field_list_widget.row(item) for item in selected_items)
+                if idx >= 0
+            }
+        )
+        if not selected_indices:
+            self._show_status_message("No valid selected fields for provenance export.", is_error=True)
+            return
+
+        selected_field_refs: list[dict[str, object]] = []
+        for idx in selected_indices:
+            field_ref = CFVMain._field_reference_for_index(self, idx)
+            if isinstance(field_ref, dict):
+                selected_field_refs.append(field_ref)
+
+        if not selected_field_refs:
+            self._show_status_message("Selected fields could not be resolved for provenance export.", is_error=True)
+            return
+
+        payload = self._load_last_operations_payload()
+        operations_raw = payload.get("operations", [])
+        operations = operations_raw if isinstance(operations_raw, list) else []
+        if not operations:
+            self._show_status_message("No replayable operations available for provenance export.", is_error=True)
+            return
+
+        replay_sources: list[str] = []
+        for operation in operations:
+            if not isinstance(operation, dict):
+                continue
+            for source in self._source_files_for_replay_operation(operation):
                 if source not in replay_sources:
                     replay_sources.append(source)
 
-        remote_sources = [source for source in replay_sources if self._is_remote_source_uri(source)]
-        local_sources = [source for source in replay_sources if source not in remote_sources]
+        remote_builder = getattr(self, "_build_remote_open_requests_for_sources", None)
+        if callable(remote_builder):
+            remote_open_requests = remote_builder(replay_sources)
+        else:
+            remote_open_requests = CFVMain._build_remote_open_requests_for_sources(self, replay_sources)
 
-        if remote_sources:
-            self._show_status_message(f"Preloading {len(remote_sources)} remote source(s) for replay...")
-            prior_mode = str(getattr(self, "file_open_mode", "single"))
-            try:
-                self.file_open_mode = "multi"
-                self._loaded_file_paths = []
-                self._clear_loaded_data_views()
-                for remote_uri in remote_sources:
-                    self._open_remote_uri_for_replay_sync(remote_uri)
-            finally:
-                self.file_open_mode = prior_mode
-
-        preamble = ""
-        if local_sources:
-            replay_read_target: str = (
-                "_cfview_replay_sources[0]" if len(local_sources) == 1 else "_cfview_replay_sources"
-            )
-            preamble = (
-                f"_cfview_replay_sources = {local_sources!r}\n"
-                "_cfview_file_path = _cfview_replay_sources if len(_cfview_replay_sources) != 1 else _cfview_replay_sources[0]\n"
-                "_cfview_field_index = None\n"
-                "try:\n"
-                f"    _cfview_new_fields = cf.read({replay_read_target})\n"
-                "    try:\n"
-                "        f\n"
-                "    except NameError:\n"
-                "        f = []\n"
-                "    f.extend(_cfview_new_fields)\n"
-                "except Exception as _cfview_exc:\n"
-                "    raise ValueError(\n"
-                "        f\"Replay preload failed for source(s): {_cfview_replay_sources}. Error: {_cfview_exc}\"\n"
-                "    )\n"
-                "fields = field_info(f)\n"
-                "send_to_gui('METADATA', fields) #omit4save\n\n"
-            )
-
-        replay_code = preamble + "\n\n".join(code_blocks)
-        self._pending_binary_operation_name = None
-        self._pending_metadata_append = False
-        self._pending_metadata_source = None
-        self._show_status_message(
-            f"Replaying {len(code_blocks)} field operation(s){f' (skipped {skipped})' if skipped else ''}..."
+        default_destination = str(self._settings.get("last_save_data_dir", str(Path.home())))
+        default_filename = f"{self._default_plot_filename()}_selected.prov.json"
+        suggested = str(Path(default_destination).expanduser() / default_filename)
+        destination, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Save Selected Provenance",
+            suggested,
+            "PROV JSON (*.prov.json);;xconv Workflow JSON (*.json)",
         )
-        logger.info("Replaying %d field operations (skipped=%d)", len(code_blocks), skipped)
-        self._send_worker_task(replay_code, emit_image=False)
+        if not destination:
+            return
+
+        destination_path = Path(destination).expanduser()
+        output_format = "prov-json" if destination_path.name.endswith(".prov.json") else "xconv-json"
+
+        if output_format == "prov-json" and destination_path.suffix != ".json":
+            destination_path = destination_path.with_suffix(".prov.json")
+        elif output_format == "xconv-json" and destination_path.suffix != ".json":
+            destination_path = destination_path.with_suffix(".json")
+
+        self._remember_last_save_dir("last_save_data_dir", str(destination_path))
+        self._send_worker_control_task(
+            "SAVE_PROVENANCE",
+            {
+                "schema_version": int(payload.get("schema_version", 1) or 1),
+                "session_id": str(payload.get("session_id", "") or ""),
+                "saved_at": str(payload.get("saved_at", "") or ""),
+                "operations": operations,
+                "selected_field_refs": selected_field_refs,
+                "remote_open_requests": remote_open_requests,
+                "destination": str(destination_path),
+                "output_format": output_format,
+            },
+        )
+        self._show_status_message(
+            f"Saving field-specific provenance for {len(selected_field_refs)} selected field(s)..."
+        )
 
     def _field_identity_from_item(self, item: QListWidgetItem | None) -> str:
         """Return stable field identity text when available, else display text."""
@@ -2176,6 +2429,7 @@ class CFVMain(CFVCore):
             {
                 "kind": "unary_xy",
                 "field_index": field_index,
+                "field_ref": CFVMain._field_reference_for_index(self, field_index),
                 "selected_indices": [field_index],
                 "operation": operation_key,
                 "source_file": source_file,
@@ -2244,6 +2498,8 @@ class CFVMain(CFVCore):
                 "kind": "binary",
                 "index_a": idx_a,
                 "index_b": idx_b,
+                "field_ref_a": CFVMain._field_reference_for_index(self, idx_a),
+                "field_ref_b": CFVMain._field_reference_for_index(self, idx_b),
                 "selected_indices": [idx_a, idx_b],
                 "operation": operation_key,
                 "source_files": source_paths,
@@ -2339,6 +2595,7 @@ class CFVMain(CFVCore):
             {
                 "kind": "apply_selection",
                 "field_index": field_index,
+                "field_ref": CFVMain._field_reference_for_index(self, field_index),
                 "selected_indices": [field_index],
                 "selections": selections,
                 "collapse_by_coord": collapse_by_coord,
@@ -2381,6 +2638,15 @@ class CFVMain(CFVCore):
             {
                 "kind": "regrid",
                 "config": regrid_config,
+                "field_refs": [
+                    ref
+                    for ref in (
+                        CFVMain._field_reference_for_index(self, int(idx))
+                        for idx in selected_indices
+                        if isinstance(idx, int)
+                    )
+                    if isinstance(ref, dict)
+                ],
                 "source_files": sorted_sources,
             }
         )

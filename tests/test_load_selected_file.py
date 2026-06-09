@@ -7,6 +7,7 @@ from pathlib import Path
 import types
 
 import pytest
+from PySide6.QtCore import Qt
 
 from xconv2.cf_templates import coordinate_list
 from xconv2.cf_interface import coordinate_info, field_info
@@ -592,6 +593,7 @@ def test_field_ops_grad_builds_worker_task_for_selected_field() -> None:
         {
             "kind": "unary_xy",
             "field_index": 0,
+            "field_ref": None,
             "selected_indices": [0],
             "operation": "grad",
             "source_file": "/tmp/a.nc",
@@ -707,6 +709,7 @@ def test_field_ops_apply_selection_builds_worker_task() -> None:
         {
             "kind": "apply_selection",
             "field_index": 0,
+            "field_ref": None,
             "selected_indices": [0],
             "selections": {"latitude": (-10, 10)},
             "collapse_by_coord": {"time": "mean"},
@@ -762,9 +765,10 @@ def test_replay_last_operations_builds_single_worker_task(monkeypatch: pytest.Mo
 
     class _DummyReplayWindow:
         def __init__(self) -> None:
-            self.sent_tasks: list[tuple[str, bool]] = []
+            self.sent_control_tasks: list[tuple[str, dict[str, object]]] = []
             self.status_messages: list[tuple[str, bool]] = []
             self._pending_binary_operation_name: str | None = None
+            self._settings: dict[str, object] = {}
 
         def _load_last_operations_payload(self) -> dict[str, object]:
             return {
@@ -795,9 +799,6 @@ def test_replay_last_operations_builds_single_worker_task(monkeypatch: pytest.Mo
                 ],
             }
 
-        def _worker_code_for_replay_operation(self, operation: dict[str, object]) -> str | None:
-            return CFVMain._worker_code_for_replay_operation(self, operation)
-
         def _describe_replay_operation(self, operation: dict[str, object]) -> str:
             return CFVMain._describe_replay_operation(self, operation)
 
@@ -810,21 +811,19 @@ def test_replay_last_operations_builds_single_worker_task(monkeypatch: pytest.Mo
         def _show_status_message(self, message: str, is_error: bool = False) -> None:
             self.status_messages.append((message, is_error))
 
-        def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
-            _ = save_code_path
-            self.sent_tasks.append((code, emit_image))
+        def _send_worker_control_task(self, kind: str, payload: dict[str, object]) -> None:
+            self.sent_control_tasks.append((kind, payload))
 
     window = _DummyReplayWindow()
 
     CFVMain._field_ops_replay_last_operations(window)
 
-    assert len(window.sent_tasks) == 1
-    code, emit_image = window.sent_tasks[0]
-    assert emit_image is False
-    assert "append_unary_xy_field_operation" in code
-    assert "append_binary_field_operation" in code
-    assert "append_selection_field_operation" in code
-    assert "XconvRegridder" in code
+    assert len(window.sent_control_tasks) == 1
+    kind, payload = window.sent_control_tasks[0]
+    assert kind == "REPLAY_FIELDS"
+    operations = payload.get("operations")
+    assert isinstance(operations, list)
+    assert len(operations) == 4
     assert window.status_messages[-1] == ("Replaying 4 field operation(s)...", False)
 
 
@@ -843,7 +842,7 @@ def test_replay_last_operations_respects_unchecked_actions(monkeypatch: pytest.M
 
     class _DummyReplayWindow:
         def __init__(self) -> None:
-            self.sent_tasks: list[tuple[str, bool]] = []
+            self.sent_control_tasks: list[tuple[str, dict[str, object]]] = []
             self.status_messages: list[tuple[str, bool]] = []
             self._pending_binary_operation_name: str | None = None
 
@@ -868,9 +867,6 @@ def test_replay_last_operations_respects_unchecked_actions(monkeypatch: pytest.M
                 ],
             }
 
-        def _worker_code_for_replay_operation(self, operation: dict[str, object]) -> str | None:
-            return CFVMain._worker_code_for_replay_operation(self, operation)
-
         def _describe_replay_operation(self, operation: dict[str, object]) -> str:
             return CFVMain._describe_replay_operation(self, operation)
 
@@ -883,20 +879,19 @@ def test_replay_last_operations_respects_unchecked_actions(monkeypatch: pytest.M
         def _show_status_message(self, message: str, is_error: bool = False) -> None:
             self.status_messages.append((message, is_error))
 
-        def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
-            _ = save_code_path
-            self.sent_tasks.append((code, emit_image))
+        def _send_worker_control_task(self, kind: str, payload: dict[str, object]) -> None:
+            self.sent_control_tasks.append((kind, payload))
 
     window = _DummyReplayWindow()
 
     CFVMain._field_ops_replay_last_operations(window)
 
-    assert len(window.sent_tasks) == 1
-    code, emit_image = window.sent_tasks[0]
-    assert emit_image is False
-    assert "append_unary_xy_field_operation" in code
-    assert "append_selection_field_operation" in code
-    assert "append_binary_field_operation" not in code
+    assert len(window.sent_control_tasks) == 1
+    kind, payload = window.sent_control_tasks[0]
+    assert kind == "REPLAY_FIELDS"
+    operations = payload.get("operations")
+    assert isinstance(operations, list)
+    assert [str(op.get("kind")) for op in operations if isinstance(op, dict)] == ["unary_xy", "apply_selection"]
     assert window.status_messages[-1] == ("Replaying 2 field operation(s) (skipped 1)...", False)
 
 
@@ -915,7 +910,7 @@ def test_replay_last_operations_preloads_required_sources(monkeypatch: pytest.Mo
 
     class _DummyReplayWindow:
         def __init__(self) -> None:
-            self.sent_tasks: list[tuple[str, bool]] = []
+            self.sent_control_tasks: list[tuple[str, dict[str, object]]] = []
             self.status_messages: list[tuple[str, bool]] = []
             self._pending_binary_operation_name: str | None = None
 
@@ -940,9 +935,6 @@ def test_replay_last_operations_preloads_required_sources(monkeypatch: pytest.Mo
                 ],
             }
 
-        def _worker_code_for_replay_operation(self, operation: dict[str, object]) -> str | None:
-            return CFVMain._worker_code_for_replay_operation(self, operation)
-
         def _describe_replay_operation(self, operation: dict[str, object]) -> str:
             return CFVMain._describe_replay_operation(self, operation)
 
@@ -955,25 +947,23 @@ def test_replay_last_operations_preloads_required_sources(monkeypatch: pytest.Mo
         def _show_status_message(self, message: str, is_error: bool = False) -> None:
             self.status_messages.append((message, is_error))
 
-        def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
-            _ = save_code_path
-            self.sent_tasks.append((code, emit_image))
+        def _send_worker_control_task(self, kind: str, payload: dict[str, object]) -> None:
+            self.sent_control_tasks.append((kind, payload))
+
+        def _resolve_remote_uri(self, _uri: str):
+            return None, "", "", True
 
     window = _DummyReplayWindow()
 
     CFVMain._field_ops_replay_last_operations(window)
 
-    assert len(window.sent_tasks) == 1
-    code, emit_image = window.sent_tasks[0]
-    assert emit_image is False
-    assert "_cfview_replay_sources = ['/tmp/a.nc', '/tmp/b.nc']" in code
-    assert "try:" in code
-    assert "_cfview_new_fields = cf.read(_cfview_replay_sources)" in code
-    assert "f.extend(_cfview_new_fields)" in code
-    assert "Replay preload failed for source(s)" in code
-    assert "send_to_gui('METADATA', fields)" in code
-    assert "append_unary_xy_field_operation" in code
-    assert "append_binary_field_operation" in code
+    assert len(window.sent_control_tasks) == 1
+    kind, payload = window.sent_control_tasks[0]
+    assert kind == "REPLAY_FIELDS"
+    assert payload.get("remote_open_requests") == []
+    operations = payload.get("operations")
+    assert isinstance(operations, list)
+    assert len(operations) == 2
 
 
 def test_replay_last_operations_uses_single_path_read_for_single_source(
@@ -993,7 +983,7 @@ def test_replay_last_operations_uses_single_path_read_for_single_source(
 
     class _DummyReplayWindow:
         def __init__(self) -> None:
-            self.sent_tasks: list[tuple[str, bool]] = []
+            self.sent_control_tasks: list[tuple[str, dict[str, object]]] = []
             self.status_messages: list[tuple[str, bool]] = []
             self._pending_binary_operation_name: str | None = None
 
@@ -1011,9 +1001,6 @@ def test_replay_last_operations_uses_single_path_read_for_single_source(
                 ],
             }
 
-        def _worker_code_for_replay_operation(self, operation: dict[str, object]) -> str | None:
-            return CFVMain._worker_code_for_replay_operation(self, operation)
-
         def _describe_replay_operation(self, operation: dict[str, object]) -> str:
             return CFVMain._describe_replay_operation(self, operation)
 
@@ -1026,22 +1013,20 @@ def test_replay_last_operations_uses_single_path_read_for_single_source(
         def _show_status_message(self, message: str, is_error: bool = False) -> None:
             self.status_messages.append((message, is_error))
 
-        def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
-            _ = save_code_path
-            self.sent_tasks.append((code, emit_image))
+        def _send_worker_control_task(self, kind: str, payload: dict[str, object]) -> None:
+            self.sent_control_tasks.append((kind, payload))
+
+        def _resolve_remote_uri(self, _uri: str):
+            return None, "", "", True
 
     window = _DummyReplayWindow()
 
     CFVMain._field_ops_replay_last_operations(window)
 
-    assert len(window.sent_tasks) == 1
-    code, emit_image = window.sent_tasks[0]
-    assert emit_image is False
-    assert "_cfview_replay_sources = ['/tmp/a.nc']" in code
-    assert "try:" in code
-    assert "_cfview_new_fields = cf.read(_cfview_replay_sources[0])" in code
-    assert "f.extend(_cfview_new_fields)" in code
-    assert "f = cf.read(_cfview_replay_sources)" not in code
+    assert len(window.sent_control_tasks) == 1
+    kind, payload = window.sent_control_tasks[0]
+    assert kind == "REPLAY_FIELDS"
+    assert payload.get("remote_open_requests") == []
 
 
 def test_replay_last_operations_uses_remote_preload_helper_for_remote_sources(
@@ -1061,13 +1046,10 @@ def test_replay_last_operations_uses_remote_preload_helper_for_remote_sources(
 
     class _DummyReplayWindow:
         def __init__(self) -> None:
-            self.sent_tasks: list[tuple[str, bool]] = []
+            self.sent_control_tasks: list[tuple[str, dict[str, object]]] = []
             self.status_messages: list[tuple[str, bool]] = []
             self._pending_binary_operation_name: str | None = None
-            self.file_open_mode = "single"
-            self._loaded_file_paths: list[str] = []
-            self.opened_remote: list[str] = []
-            self.cleared = 0
+            self._settings: dict[str, object] = {}
 
         def _load_last_operations_payload(self) -> dict[str, object]:
             return {
@@ -1083,9 +1065,6 @@ def test_replay_last_operations_uses_remote_preload_helper_for_remote_sources(
                 ],
             }
 
-        def _worker_code_for_replay_operation(self, operation: dict[str, object]) -> str | None:
-            return CFVMain._worker_code_for_replay_operation(self, operation)
-
         def _describe_replay_operation(self, operation: dict[str, object]) -> str:
             return CFVMain._describe_replay_operation(self, operation)
 
@@ -1095,31 +1074,41 @@ def test_replay_last_operations_uses_remote_preload_helper_for_remote_sources(
         def _is_remote_source_uri(self, uri: str) -> bool:
             return CFVMain._is_remote_source_uri(uri)
 
-        def _open_remote_uri_for_replay_sync(self, uri: str) -> None:
-            self.opened_remote.append(uri)
-
-        def _clear_loaded_data_views(self) -> None:
-            self.cleared += 1
+        def _resolve_remote_uri(self, uri: str):
+            assert uri == "s3://bnl/CMIP6-test.nc"
+            return {"protocol": "S3", "remote": {"alias": "S3", "details": {}}}, "bnl/CMIP6-test.nc", "S3", False
 
         def _show_status_message(self, message: str, is_error: bool = False) -> None:
             self.status_messages.append((message, is_error))
 
-        def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
-            _ = save_code_path
-            self.sent_tasks.append((code, emit_image))
+        def _send_worker_control_task(self, kind: str, payload: dict[str, object]) -> None:
+            self.sent_control_tasks.append((kind, payload))
+
+    import xconv2.remote_access as _remote_access_mod
+
+    monkeypatch.setattr(
+        _remote_access_mod,
+        "build_remote_filesystem_spec",
+        lambda _config: type("_Spec", (), {"display_name": "S3"})(),
+    )
 
     window = _DummyReplayWindow()
 
+    monkeypatch.setattr(_remote_access_mod, "remote_descriptor_hash", lambda _descriptor: "hash-1")
+    monkeypatch.setattr(
+        _remote_access_mod,
+        "spec_to_descriptor",
+        lambda _spec, cache=None: {"protocol": "s3", "cache": cache},
+    )
+
     CFVMain._field_ops_replay_last_operations(window)
 
-    assert window.opened_remote == ["s3://bnl/CMIP6-test.nc"]
-    assert window.cleared == 1
-    assert len(window.sent_tasks) == 1
-    code, emit_image = window.sent_tasks[0]
-    assert emit_image is False
-    assert "_cfview_replay_sources" not in code
-    assert "cf.read(" not in code
-    assert "append_unary_xy_field_operation" in code
+    assert len(window.sent_control_tasks) == 1
+    kind, payload = window.sent_control_tasks[0]
+    assert kind == "REPLAY_FIELDS"
+    requests = payload.get("remote_open_requests")
+    assert isinstance(requests, list)
+    assert len(requests) == 1
 
 
 def test_record_replayable_operation_resets_when_session_changes(tmp_path: Path) -> None:
@@ -1296,6 +1285,112 @@ def test_file_ops_save_selected_builds_worker_task(monkeypatch: pytest.MonkeyPat
     assert "save_selected_fields(" in code
     assert "_cfview_output_format = 'zarr'" in code
     assert "_cfview_output_chunk_by_index = {0: '(10, 20)', 2: '(5, 5)'}" in code
+
+
+def test_file_ops_save_selected_provenance_dispatches_worker_control_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DummyItem:
+        def __init__(self, identity: str, source_file: str, generated: bool) -> None:
+            self._identity = identity
+            self._source_file = source_file
+            self._generated = generated
+
+        def text(self) -> str:
+            return self._identity
+
+        def data(self, role: object):
+            if role == Qt.UserRole + 2:
+                return self._source_file
+            if role == Qt.UserRole + 4:
+                return self._identity
+            if role == Qt.UserRole + 5:
+                return self._generated
+            return ""
+
+    class _DummyFieldListWidget:
+        def __init__(self) -> None:
+            self._items = [
+                _DummyItem("src-field", "/tmp/a.nc", False),
+                _DummyItem("derived-field", "", True),
+            ]
+
+        def selectedItems(self):
+            return [self._items[1]]
+
+        def row(self, item) -> int:
+            return self._items.index(item)
+
+        def count(self) -> int:
+            return len(self._items)
+
+        def item(self, index: int):
+            return self._items[index]
+
+    class _DummyMain:
+        def __init__(self) -> None:
+            self.field_list_widget = _DummyFieldListWidget()
+            self._settings = {"last_save_data_dir": "/tmp"}
+            self.saved_dirs: list[tuple[str, str]] = []
+            self.control_tasks: list[tuple[str, dict[str, object]]] = []
+            self.status_messages: list[str] = []
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            _ = is_error
+            self.status_messages.append(message)
+
+        def _default_plot_filename(self) -> str:
+            return "cfv_plot"
+
+        def _remember_last_save_dir(self, key: str, path: str) -> None:
+            self.saved_dirs.append((key, path))
+
+        def _load_last_operations_payload(self) -> dict[str, object]:
+            return {
+                "schema_version": 1,
+                "session_id": "session-1",
+                "saved_at": "2026-06-09T00:00:00Z",
+                "operations": [
+                    {
+                        "kind": "unary_xy",
+                        "field_index": 0,
+                        "field_ref": {
+                            "identity": "src-field",
+                            "source_file": "/tmp/a.nc",
+                            "generated": False,
+                            "occurrence": 1,
+                        },
+                        "operation": "grad",
+                        "source_file": "/tmp/a.nc",
+                    }
+                ],
+            }
+
+        def _source_files_for_replay_operation(self, operation: dict[str, object]) -> list[str]:
+            return CFVMain._source_files_for_replay_operation(self, operation)
+
+        def _build_remote_open_requests_for_sources(self, _sources: list[str]) -> list[dict[str, object]]:
+            return []
+
+        def _send_worker_control_task(self, kind: str, payload: dict[str, object]) -> None:
+            self.control_tasks.append((kind, payload))
+
+    monkeypatch.setattr(
+        main_window.QFileDialog,
+        "getSaveFileName",
+        lambda *_args, **_kwargs: ("/tmp/selected.prov.json", "PROV JSON (*.prov.json)"),
+    )
+
+    host = _DummyMain()
+    CFVMain._file_ops_save_selected_provenance(host)
+
+    assert host.saved_dirs == [("last_save_data_dir", "/tmp/selected.prov.json")]
+    assert len(host.control_tasks) == 1
+    kind, payload = host.control_tasks[0]
+    assert kind == "SAVE_PROVENANCE"
+    assert payload["output_format"] == "prov-json"
+    assert isinstance(payload.get("selected_field_refs"), list)
+    assert host.status_messages[-1].startswith("Saving field-specific provenance")
 
 
 def test_update_memory_status_formats_app_and_worker_rss(monkeypatch: pytest.MonkeyPatch) -> None:

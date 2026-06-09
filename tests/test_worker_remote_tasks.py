@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import json
 import logging
 from pathlib import Path
 
@@ -252,3 +253,62 @@ def test_handle_control_task_logging_configure_forwards_runtime_settings(monkeyp
         }
     ]
     assert messages == [("STATUS:Logging configuration updated", None)]
+
+
+def test_handle_save_provenance_task_writes_internal_slice(tmp_path: Path, monkeypatch) -> None:
+    destination = tmp_path / "slice.json"
+
+    monkeypatch.setattr(worker.cf, "read", lambda _source: [{"identity": "src"}])
+    monkeypatch.setattr(
+        worker.cf_interface,
+        "field_info",
+        lambda fields: [{"identity": str(f.get("identity", ""))} for f in fields],
+    )
+
+    def _append_unary(fields, _idx, _op):
+        fields.append({"identity": "derived"})
+        return [{"identity": "derived"}]
+
+    monkeypatch.setattr(worker.cf_interface, "append_unary_xy_field_operation", _append_unary)
+
+    payload = {
+        "schema_version": 1,
+        "session_id": "session-1",
+        "saved_at": "2026-06-09T00:00:00Z",
+        "operations": [
+            {
+                "kind": "unary_xy",
+                "field_index": 0,
+                "field_ref": {
+                    "identity": "src",
+                    "source_file": "/tmp/a.nc",
+                    "generated": False,
+                    "occurrence": 1,
+                },
+                "operation": "grad",
+                "source_file": "/tmp/a.nc",
+            }
+        ],
+        "selected_field_refs": [
+            {
+                "identity": "derived",
+                "source_file": "",
+                "generated": True,
+                "occurrence": 1,
+            }
+        ],
+        "remote_open_requests": [],
+        "destination": str(destination),
+        "output_format": "xconv-json",
+    }
+
+    messages: list[tuple[str, object | None]] = []
+    monkeypatch.setattr(worker, "send_to_gui", lambda prefix, data=None: messages.append((prefix, data)))
+
+    worker._handle_save_provenance_task(payload)
+
+    saved = json.loads(destination.read_text(encoding="utf-8"))
+    assert saved["session_id"] == "session-1"
+    assert len(saved["operations"]) == 1
+    assert saved["operations"][0]["kind"] == "unary_xy"
+    assert messages[-1][0].startswith("STATUS:Saved selected provenance")

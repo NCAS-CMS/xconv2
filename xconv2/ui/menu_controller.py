@@ -149,6 +149,10 @@ class MenuController:
         save_selected_action.triggered.connect(self.host._file_ops_save_selected)
         file_ops_menu.addAction(save_selected_action)
 
+        save_selected_prov_action = QAction("Save Selected Provenance", self.host)
+        save_selected_prov_action.triggered.connect(self.host._file_ops_save_selected_provenance)
+        file_ops_menu.addAction(save_selected_prov_action)
+
         self._setup_help_menu(menu_bar, menu_font_size_px, menu_font_weight)
 
     def _setup_help_menu(self, menu_bar, menu_font_size_px: int, menu_font_weight: int) -> None:

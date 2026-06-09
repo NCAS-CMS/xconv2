@@ -19,6 +19,8 @@ dependencies = [
     "zarr",
     "pandas",
     "setuptools>80",
+    "rdflib",
+    "prov",
     "esmpy"
 ]
 
