@@ -17,6 +17,7 @@ from .metadata_operations import (
     remove_fields_by_index,
     save_selected_field_data,
     save_selected_fields,
+    subset_field_to_reference_xy_domain,
 )
 from .plotting import (
     auto_contour_title,
@@ -41,6 +42,7 @@ __all__ = [
     "regrid_from_config",
     "get_data_for_plotting",
     "save_selected_field_data",
+    "subset_field_to_reference_xy_domain",
     "contour_data_range",
     "auto_contour_title",
     "run_contour_plot",

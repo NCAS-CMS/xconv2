@@ -522,6 +522,10 @@ class CFVCore(QMainWindow):
         self.selected_plot_kind: str | None = None
         self.selected_plot_action: str = "plot"
         self.plot_options_by_kind: dict[str, dict[str, object]] = {}
+        persisted_vector_options = self._settings.get("last_vector_options")
+        if isinstance(persisted_vector_options, dict):
+            self.plot_options_by_kind["vector"] = dict(persisted_vector_options)
+        self._last_contour_plot_context: dict[str, object] | None = None
         self._plot_pixmap_original: QPixmap | None = None
         self.current_selection_info_text = "No selection info available."
         self.slider_scroll_area: QScrollArea | None = None

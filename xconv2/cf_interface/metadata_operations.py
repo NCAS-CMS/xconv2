@@ -579,6 +579,58 @@ def get_data_for_plotting(
     return pfld
 
 
+def subset_field_to_reference_xy_domain(field: cf.Field, reference_field: cf.Field) -> cf.Field:
+    """Subset ``field`` to the X/Y bounds of ``reference_field`` using cf.wi."""
+
+    def _axis_coord(fld: cf.Field, axis: str):
+        coord = fld.dimension_coordinate(filter_by_axis=(axis,), default=None)
+        if coord is None:
+            coord = fld.auxiliary_coordinate(filter_by_axis=(axis,), axis_mode="exact", default=None)
+        return coord
+
+    def _axis_bounds(fld: cf.Field, axis: str) -> tuple[float, float] | None:
+        coord = _axis_coord(fld, axis)
+        if coord is None:
+            return None
+        try:
+            values = np.ma.array(coord.array, dtype=float).compressed()
+        except Exception:
+            return None
+        if values.size == 0:
+            return None
+        lo = float(np.nanmin(values))
+        hi = float(np.nanmax(values))
+        if np.isnan(lo) or np.isnan(hi):
+            return None
+        return (lo, hi) if lo <= hi else (hi, lo)
+
+    subspace_kwargs: dict[str, object] = {}
+    for axis_name in ("X", "Y"):
+        bounds = _axis_bounds(reference_field, axis_name)
+        if bounds is None:
+            continue
+
+        target_coord = _axis_coord(field, axis_name)
+        if target_coord is None:
+            continue
+
+        target_name = str(target_coord.identity(default="")).strip()
+        if not target_name:
+            continue
+
+        lo, hi = bounds
+        subspace_kwargs[target_name] = cf.wi(lo, hi)
+
+    if not subspace_kwargs:
+        return field
+
+    try:
+        return field.subspace(**subspace_kwargs)
+    except Exception:
+        logger.exception("Failed to subset field to reference XY domain; falling back to original field")
+        return field
+
+
 def append_selection_field_operation(
     fields: list,
     field_index: int,

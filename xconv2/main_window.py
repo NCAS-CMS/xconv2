@@ -31,6 +31,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QLabel, QInput
 
 from .cf_templates import (
     add_dimension_coordinate_bounds,
+    build_vector_overplot_command,
     apply_selection_field_operation,
     binary_field_operation,
     contour_range_from_selection,
@@ -3201,6 +3202,19 @@ class CFVMain(CFVCore):
                 plot_options.setdefault("page_title_fontsize", self._page_title_fontsize())
                 plot_options.setdefault("annotation_fontsize", self._annotation_fontsize())
 
+            plot_action = getattr(self, "selected_plot_action", "plot")
+            if plot_action not in {"plot", "overplot"}:
+                plot_action = "plot"
+
+            contour_context: dict[str, object] | None = None
+            if plot_kind == "contour":
+                contour_context = {
+                    "field_index": int(field_index),
+                    "selections": dict(selections),
+                    "collapse_by_coord": dict(collapse_by_coord),
+                    "plot_options": dict(plot_options),
+                }
+
             if plot_kind == "vector" and plot_options.get("v_field_index") is None:
                 self._show_status_message(
                     "Open Vector Options to assign U and V fields before plotting.",
@@ -3208,10 +3222,6 @@ class CFVMain(CFVCore):
                 )
                 self._show_vector_options_dialog(field_index)
                 return
-
-            plot_action = getattr(self, "selected_plot_action", "plot")
-            if plot_action not in {"plot", "overplot"}:
-                plot_action = "plot"
 
             if save_plot_target:
                 plot_options["filename"] = save_plot_target
@@ -3231,6 +3241,36 @@ class CFVMain(CFVCore):
                 self._show_status_message(f"Plot request unavailable: {exc}", is_error=True)
                 logger.warning("Plot template unavailable for kind=%s: %s", plot_kind, exc)
                 return
+
+            if contour_context is not None:
+                stored_options = contour_context.get("plot_options")
+                if isinstance(stored_options, dict):
+                    stored_options.pop("filename", None)
+                self._last_contour_plot_context = contour_context
+
+            if plot_kind == "vector" and plot_action == "overplot":
+                last_contour = getattr(self, "_last_contour_plot_context", None)
+                if isinstance(last_contour, dict):
+                    contour_field_index = last_contour.get("field_index")
+                    contour_selections = last_contour.get("selections")
+                    contour_collapse_by_coord = last_contour.get("collapse_by_coord")
+                    contour_options = last_contour.get("plot_options")
+                    if (
+                        isinstance(contour_field_index, int)
+                        and
+                        isinstance(contour_selections, dict)
+                        and isinstance(contour_collapse_by_coord, dict)
+                    ):
+                        cmd = build_vector_overplot_command(
+                            contour_field_index=contour_field_index,
+                            vector_field_index=int(field_index),
+                            contour_selections=contour_selections,
+                            contour_collapse_by_coord=contour_collapse_by_coord,
+                            contour_options=contour_options if isinstance(contour_options, dict) else None,
+                            vector_selections=selections,
+                            vector_collapse_by_coord=collapse_by_coord,
+                            vector_options=plot_options,
+                        )
 
         cmd = (
             f"_cfview_field_index = {field_index}\n"

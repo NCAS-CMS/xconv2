@@ -259,6 +259,75 @@ def plot_from_selection(
     return "\n".join(parts)
 
 
+def build_vector_overplot_command(
+    contour_field_index: int,
+    vector_field_index: int,
+    contour_selections: dict[str, tuple[object, object]],
+    contour_collapse_by_coord: dict[str, str],
+    contour_options: dict[str, object] | None,
+    vector_selections: dict[str, tuple[object, object]],
+    vector_collapse_by_coord: dict[str, str],
+    vector_options: dict[str, object] | None,
+) -> str:
+    """Build worker code that redraws the base contour before a vector overplot."""
+    contour_code = plot_from_selection(
+        contour_selections,
+        contour_collapse_by_coord,
+        "contour",
+        contour_options,
+        plot_action="plot",
+    )
+    vector_code = textwrap.dedent(
+        f"""
+        vector_options = {vector_options!r}
+        vector_plot_action = 'overplot'
+        selection_spec = {vector_selections!r}
+        collapse_by_coord = {vector_collapse_by_coord!r}
+        _cfview_v_field_index = vector_options.get('v_field_index')
+        if _cfview_v_field_index is None:
+            raise ValueError('vector plot options must include v_field_index; open Vector Options first')
+        fld_v = f[_cfview_v_field_index]
+        _cfview_reference_pfld = globals().get('_cfview_contour_reference_pfld')
+        if _cfview_reference_pfld is not None:
+            pfld = subset_field_to_reference_xy_domain(fld, _cfview_reference_pfld)
+            pfld_v = subset_field_to_reference_xy_domain(fld_v, _cfview_reference_pfld)
+        else:
+            pfld = get_data_for_plotting(fld, selection_spec, collapse_by_coord)
+            pfld_v = get_data_for_plotting(fld_v, selection_spec, collapse_by_coord)
+        mapset_options = {{
+            'map_projection': vector_options.get('map_projection') if vector_options else None,
+            'bbox': vector_options.get('bbox') if vector_options else None,
+            'boundinglat': vector_options.get('boundinglat') if vector_options else None,
+            'map_resolution': vector_options.get('map_resolution') if vector_options else None,
+            'lat_0': vector_options.get('lat_0') if vector_options else None,
+            'lon_0': vector_options.get('lon_0') if vector_options else None,
+        }}
+        run_vector_plot(
+            pfld_u=pfld,
+            pfld_v=pfld_v,
+            options=vector_options,
+            plot_action=vector_plot_action,
+            mapset=mapset_options,
+            selection_spec=selection_spec,
+            collapse_by_coord=collapse_by_coord,
+        )
+        if vector_options and 'filename' in vector_options:  #omit4save
+            send_to_gui(f"STATUS:Saved plot to {{vector_options['filename']}}")  #omit4save
+        """
+    ).lstrip()
+    return "\n".join(
+        [
+            f"_cfview_contour_field_index = {contour_field_index}",
+            "fld = f[_cfview_contour_field_index]",
+            contour_code,
+            "_cfview_contour_reference_pfld = pfld",
+            f"_cfview_vector_field_index = {vector_field_index}",
+            "fld = f[_cfview_vector_field_index]",
+            vector_code,
+        ]
+    )
+
+
 def save_data_from_selection(
     selections: dict[str, tuple[object, object]],
     collapse_by_coord: dict[str, str],

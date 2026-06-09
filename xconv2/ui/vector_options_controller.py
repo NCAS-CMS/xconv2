@@ -180,6 +180,11 @@ class VectorOptionsController:
                 options["title"] = title
 
             self.host.plot_options_by_kind["vector"] = options
+            self.host._settings["last_vector_options"] = dict(options)
+            try:
+                self.host._save_settings()
+            except OSError:
+                self.host.status.showMessage("Failed to persist vector options")
             self.host.status.showMessage("Updated vector options")
             self.host._request_plot_update()
             return True

@@ -396,8 +396,6 @@ def run_vector_plot(
     if filename is not None:
         mycanvas.savefig(str(filename))
         plt.close(mycanvas)
-    else:
-        cfp.gclose()
 
 
 def auto_contour_title(

@@ -6,7 +6,11 @@ import pytest
 import xconv2.cf_interface.maths as maths_ops
 import xconv2.cf_interface.metadata_operations as metadata_ops
 import xconv2.cf_interface.plotting as plotting
-from xconv2.cf_templates import apply_selection_field_operation, regrid_fields_operation
+from xconv2.cf_templates import (
+    apply_selection_field_operation,
+    build_vector_overplot_command,
+    regrid_fields_operation,
+)
 
 from xconv2.cf_interface import (
     add_dimension_coordinate_bounds,
@@ -22,6 +26,7 @@ from xconv2.cf_interface import (
     remove_fields_by_index,
     run_contour_plot,
     run_line_plot,
+    run_vector_plot,
     save_selected_field_data,
     save_selected_fields,
 )
@@ -1083,6 +1088,7 @@ class _FakeCFPlot:
     def __init__(self) -> None:
         self.levs_calls: list[dict[str, object]] = []
         self.con_calls: list[dict[str, object]] = []
+        self.vect_calls: list[dict[str, object]] = []
         self.lineplot_calls: list[dict[str, object]] = []
         self.cscale_calls: list[dict[str, object]] = []
         self.gopen_calls: list[dict[str, object]] = []
@@ -1095,6 +1101,9 @@ class _FakeCFPlot:
 
     def con(self, _field: object, **kwargs: object) -> None:
         self.con_calls.append(kwargs)
+
+    def vect(self, _ufield: object, _vfield: object, **kwargs: object) -> None:
+        self.vect_calls.append(kwargs)
 
     def lineplot(self, _field: object, **kwargs: object) -> None:
         self.lineplot_calls.append(kwargs)
@@ -1320,6 +1329,28 @@ def test_run_line_plot_uses_canonical_axes_and_wraps_file_output() -> None:
     assert captured["rendered"] is True
 
 
+def test_build_vector_overplot_command_replays_contour_then_vector() -> None:
+    command = build_vector_overplot_command(
+        contour_field_index=1,
+        vector_field_index=4,
+        contour_selections={"lat": (-1.0, 1.0)},
+        contour_collapse_by_coord={},
+        contour_options={"title": "Base contour"},
+        vector_selections={"lat": (-1.0, 1.0)},
+        vector_collapse_by_coord={},
+        vector_options={"v_field_index": 3, "stride": 2},
+    )
+
+    assert command.index("contour_options =") < command.index("vector_options =")
+    assert "fld = f[_cfview_contour_field_index]" in command
+    assert "fld = f[_cfview_vector_field_index]" in command
+    assert "_cfview_contour_reference_pfld = pfld" in command
+    assert "subset_field_to_reference_xy_domain(fld, _cfview_reference_pfld)" in command
+    assert "subset_field_to_reference_xy_domain(fld_v, _cfview_reference_pfld)" in command
+    assert "contour_plot_action = 'plot'" in command
+    assert "vector_plot_action = 'overplot'" in command
+
+
 def test_run_contour_plot_skips_gopen_for_overplot_when_figure_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1338,6 +1369,28 @@ def test_run_contour_plot_skips_gopen_for_overplot_when_figure_exists(
 
     assert cfp.gopen_calls == []
     assert cfp.con_calls
+
+
+def test_run_vector_plot_keeps_interactive_figure_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfp = _FakeCFPlot()
+    plt_obj = _FakePlt()
+    plt_obj._fignums = [1]
+
+    monkeypatch.setattr(plotting, "cfp", cfp)
+    monkeypatch.setattr(plotting, "plt", plt_obj)
+
+    run_vector_plot(
+        pfld_u=object(),
+        pfld_v=object(),
+        options={"title": "winds", "stride": 2},
+        plot_action="overplot",
+    )
+
+    assert cfp.gopen_calls == []
+    assert cfp.vect_calls
+    assert cfp.gclose_calls == 0
 
 
 def test_save_selected_field_data_uses_cf_write(monkeypatch: pytest.MonkeyPatch) -> None:
