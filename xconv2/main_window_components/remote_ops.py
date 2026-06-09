@@ -13,7 +13,7 @@ def resolve_remote_uri(
     canonical_remote_uri: Callable[[str], str],
 ) -> tuple[dict[str, object] | None, str, str, bool]:
     """Resolve URI into (config, remote_path, host_alias, unknown_host)."""
-    from .ui.dialogs import RemoteConfigurationDialog  # noqa: PLC0415
+    from ..ui.dialogs import RemoteConfigurationDialog  # noqa: PLC0415
 
     canonical_uri = canonical_remote_uri(uri)
     parsed = urlparse(canonical_uri)

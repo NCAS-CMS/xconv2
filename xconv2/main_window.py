@@ -45,12 +45,12 @@ from .cf_templates import (
 )
 from .core_window import CFVCore
 from .cf_interface import parse_coordinate_subspace_commands
-from .main_window_plot_ops import build_plot_context as _build_plot_context_helper
-from .main_window_plot_ops import request_plot_task as _request_plot_task_helper
-from .main_window_remote_ops import resolve_remote_uri as _resolve_remote_uri_helper
-from .main_window_replay_ops import field_ops_replay_last_operations as _field_ops_replay_last_operations_helper
-from .main_window_replay_ops import file_ops_save_selected_provenance as _file_ops_save_selected_provenance_helper
-from .main_window_replay_ops import input_load_and_run_prov as _input_load_and_run_prov_helper
+from .main_window_components.plot_ops import build_plot_context as _build_plot_context_helper
+from .main_window_components.plot_ops import request_plot_task as _request_plot_task_helper
+from .main_window_components.remote_ops import resolve_remote_uri as _resolve_remote_uri_helper
+from .main_window_components.replay_ops import field_ops_replay_last_operations as _field_ops_replay_last_operations_helper
+from .main_window_components.replay_ops import file_ops_save_selected_provenance as _file_ops_save_selected_provenance_helper
+from .main_window_components.replay_ops import input_load_and_run_prov as _input_load_and_run_prov_helper
 from .worker_message_router import WorkerMessageRouter
 # Remote-access helpers are imported lazily (inside the methods that use them)
 # so that p5rem/paramiko are not loaded at GUI startup.

@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 def field_ops_replay_last_operations(host: object, *, replay_dialog_cls: type[object]) -> None:
     """Replay persisted field operations by dispatching a worker control task."""
-    from .main_window import CFVMain  # noqa: PLC0415
+    from ..main_window import CFVMain  # noqa: PLC0415
 
     payload = host._load_last_operations_payload()
     operations_raw = payload.get("operations", [])
@@ -84,7 +84,7 @@ def field_ops_replay_last_operations(host: object, *, replay_dialog_cls: type[ob
 
 def file_ops_save_selected_provenance(host: object, *, file_dialog_cls: type[object]) -> None:
     """Save field-specific upstream provenance for selected fields."""
-    from .main_window import CFVMain  # noqa: PLC0415
+    from ..main_window import CFVMain  # noqa: PLC0415
 
     selected_items = list(host.field_list_widget.selectedItems())
     if not selected_items:
@@ -183,7 +183,7 @@ def input_load_and_run_prov(
     workflow_payload_from_provenance_document: object,
 ) -> None:
     """Load internal/PROV workflow JSON and replay it through worker control messaging."""
-    from .main_window import CFVMain  # noqa: PLC0415
+    from ..main_window import CFVMain  # noqa: PLC0415
 
     default_dir = str(host._settings.get("last_open_data_dir", str(Path.home())))
     selected_path, _selected_filter = file_dialog_cls.getOpenFileName(
