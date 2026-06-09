@@ -905,20 +905,18 @@ def test_worker_remote_open_disk_cache_survives_release_recreate(minio_service, 
 def test_worker_remote_open_large_logged_s3_key_cache_hits_on_second_open(minio_service, temp_bucket, tmp_path) -> None:
     """Mirror the app's logged S3 path and verify wire bytes collapse on second open.
 
-    Uses the same URI/key shape seen in app logs (s3://bnl/da193a_25_3hr__198808-198808.nc),
+    Uses the same URI/key shape seen in app logs (s3://bnl/da193a_25_3hr__198807_2days.nc),
     but against the test MinIO endpoint and a local representative file payload.
     """
     import time
 
     data_dir = Path(__file__).resolve().parents[1] / "data"
-    # Prefer exact filename when present; fall back to the similar local sample.
-    source_file = data_dir / "da193a_25_3hr__198808-198808.nc"
-    if not source_file.is_file():
-        source_file = data_dir / "da193a_25_3hr__198807-198807.nc"
+    source_file = data_dir / "da193a_25_3hr__198807_2days.nc"
+    
 
     assert source_file.is_file(), "Expected a local da193a sample in data/ for this integration test"
 
-    object_name = "da193a_25_3hr__198808-198808.nc"
+    object_name = "da193a_25_3hr__198807_2days.nc"
     minio_service.fput_object(temp_bucket, object_name, str(source_file))
 
     cache_dir = tmp_path / "worker-large-da193a-blockcache"
@@ -1031,13 +1029,12 @@ def test_large_logged_s3_key_direct_read_cache_hits_on_second_open(minio_service
     from xconv2.remote_access import RemoteFilesystemSpec, create_filesystem
 
     data_dir = Path(__file__).resolve().parents[1] / "data"
-    source_file = data_dir / "da193a_25_3hr__198808-198808.nc"
-    if not source_file.is_file():
-        source_file = data_dir / "da193a_25_3hr__198807-198807.nc"
+    source_file = data_dir / "da193a_25_3hr__198807_2days.nc"
+   
 
     assert source_file.is_file(), "Expected a local da193a sample in data/ for this integration test"
 
-    object_name = "da193a_25_3hr__198808-198808.nc"
+    object_name = "da193a_25_3hr__198807_2days.nc"
     minio_service.fput_object(temp_bucket, object_name, str(source_file))
     remote_path = f"{temp_bucket}/{object_name}"
 
@@ -1111,13 +1108,11 @@ def test_worker_prepared_filesystem_large_key_direct_read_cache_hits_on_second_o
     import time
 
     data_dir = Path(__file__).resolve().parents[1] / "data"
-    source_file = data_dir / "da193a_25_3hr__198808-198808.nc"
-    if not source_file.is_file():
-        source_file = data_dir / "da193a_25_3hr__198807-198807.nc"
+    source_file = data_dir / "da193a_25_3hr__198807_2days.nc"
 
     assert source_file.is_file(), "Expected a local da193a sample in data/ for this integration test"
 
-    object_name = "da193a_25_3hr__198808-198808.nc"
+    object_name = "da193a_25_3hr__198807_2days.nc"
     minio_service.fput_object(temp_bucket, object_name, str(source_file))
     remote_path = f"{temp_bucket}/{object_name}"
 
@@ -1208,13 +1203,11 @@ def test_cf_read_large_logged_key_dataset_form_matrix_uses_disk_cache_on_second_
     from xconv2.remote_access import RemoteFilesystemSpec, create_filesystem
 
     data_dir = Path(__file__).resolve().parents[1] / "data"
-    source_file = data_dir / "da193a_25_3hr__198808-198808.nc"
-    if not source_file.is_file():
-        source_file = data_dir / "da193a_25_3hr__198807-198807.nc"
+    source_file = data_dir / "da193a_25_3hr__198807_2days.nc"
 
     assert source_file.is_file(), "Expected a local da193a sample in data/ for this integration test"
 
-    object_name = "da193a_25_3hr__198808-198808.nc"
+    object_name = "da193a_25_3hr__198807_2days.nc"
     minio_service.fput_object(temp_bucket, object_name, str(source_file))
     remote_path = f"{temp_bucket}/{object_name}"
     remote_uri = f"s3://{remote_path}"
