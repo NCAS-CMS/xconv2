@@ -19,7 +19,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
 import sys
 
 import psutil
@@ -45,6 +45,12 @@ from .cf_templates import (
 )
 from .core_window import CFVCore
 from .cf_interface import parse_coordinate_subspace_commands
+from .main_window_plot_ops import build_plot_context as _build_plot_context_helper
+from .main_window_plot_ops import request_plot_task as _request_plot_task_helper
+from .main_window_remote_ops import resolve_remote_uri as _resolve_remote_uri_helper
+from .main_window_replay_ops import field_ops_replay_last_operations as _field_ops_replay_last_operations_helper
+from .main_window_replay_ops import file_ops_save_selected_provenance as _file_ops_save_selected_provenance_helper
+from .main_window_replay_ops import input_load_and_run_prov as _input_load_and_run_prov_helper
 from .worker_message_router import WorkerMessageRouter
 # Remote-access helpers are imported lazily (inside the methods that use them)
 # so that p5rem/paramiko are not loaded at GUI startup.
@@ -724,172 +730,11 @@ class CFVMain(CFVCore):
 
     def _resolve_remote_uri(self, uri: str) -> tuple[dict[str, object] | None, str, str, bool]:
         """Resolve URI into (config, remote_path, host_alias, unknown_host)."""
-        canonical_uri = CFVCore._canonical_remote_uri(uri)
-        parsed = urlparse(canonical_uri)
-        scheme = parsed.scheme.lower()
-
-        if scheme == "s3":
-            locations = RemoteConfigurationDialog._load_s3_locations()
-
-            endpoint_to_alias: dict[str, str] = {}
-            for alias_name, details in locations.items():
-                if not isinstance(alias_name, str) or not isinstance(details, dict):
-                    continue
-                endpoint_url = str(details.get("url", "")).strip()
-                endpoint_host = urlparse(endpoint_url).netloc.strip()
-                if endpoint_host:
-                    endpoint_to_alias[endpoint_host] = alias_name
-
-            netloc = parsed.netloc.strip()
-            endpoint_alias = endpoint_to_alias.get(netloc, "")
-            if endpoint_alias:
-                path = parsed.path.lstrip("/")
-            else:
-                path = f"{parsed.netloc}{parsed.path}".lstrip("/")
-
-            aliases = self._settings.get("recent_uri_aliases")
-            alias_map = aliases if isinstance(aliases, dict) else {}
-            preferred_alias = alias_map.get(canonical_uri) or alias_map.get(uri)
-            if not isinstance(preferred_alias, str):
-                preferred_alias = ""
-            preferred_alias = preferred_alias.strip()
-
-            if endpoint_alias:
-                preferred_alias = endpoint_alias
-
-            if not preferred_alias:
-                raw_state = self._settings.get("last_remote_configuration")
-                state = raw_state if isinstance(raw_state, dict) else {}
-                candidate = state.get("s3_existing_alias")
-                if isinstance(candidate, str) and candidate.strip():
-                    preferred_alias = candidate.strip()
-
-            chosen_alias = preferred_alias if preferred_alias in locations else ""
-            if not chosen_alias and len(locations) == 1:
-                chosen_alias = next(iter(locations.keys()))
-
-            details = dict(locations.get(chosen_alias, {})) if chosen_alias else {}
-            config: dict[str, object] = {
-                "protocol": "S3",
-                "remote": {
-                    "mode": "Select from existing",
-                    "alias": chosen_alias or "S3",
-                    "details": details,
-                },
-            }
-            return config, path, chosen_alias or "S3", False
-
-        if scheme == "ssh":
-            host = (parsed.hostname or parsed.netloc or "").strip()
-            user = (parsed.username or "").strip()
-            remote_path = unquote(parsed.path or "").lstrip("/")
-            if not remote_path:
-                remote_path = "."
-            hosts = RemoteConfigurationDialog._load_ssh_hosts()
-
-            runtime_preferences: dict[str, object] = {}
-            configured_state = self._settings.get("last_remote_configuration")
-            if isinstance(configured_state, dict):
-                configured_prefs = configured_state.get("ssh_runtime_preferences")
-                if isinstance(configured_prefs, dict):
-                    runtime_preferences.update(configured_prefs)
-            open_state = self._settings.get("last_remote_open")
-            if isinstance(open_state, dict):
-                open_prefs = open_state.get("ssh_runtime_preferences")
-                if isinstance(open_prefs, dict):
-                    runtime_preferences.update(open_prefs)
-
-            matched_alias = ""
-            matched_details: dict[str, object] | None = None
-            for alias, details in hosts.items():
-                if alias == host or str(details.get("hostname", "")) == host:
-                    matched_alias = alias
-                    matched_details = dict(details)
-                    break
-
-            if matched_details is None:
-                return None, remote_path, host or "SSH", True
-
-            if user and not matched_details.get("user"):
-                matched_details["user"] = user
-
-            alias_prefs = runtime_preferences.get(matched_alias)
-            if isinstance(alias_prefs, dict):
-                remote_python = alias_prefs.get("remote_python")
-                if isinstance(remote_python, str) and remote_python.strip():
-                    matched_details["remote_python"] = remote_python.strip()
-
-                remote_python_options = alias_prefs.get("remote_python_options")
-                if isinstance(remote_python_options, dict):
-                    cleaned_options = {
-                        str(label): str(command)
-                        for label, command in remote_python_options.items()
-                        if str(label).strip() and str(command).strip()
-                    }
-                    if cleaned_options:
-                        matched_details["remote_python_options"] = cleaned_options
-                elif isinstance(remote_python_options, list):
-                    cleaned_options = {
-                        str(item): str(item)
-                        for item in remote_python_options
-                        if str(item).strip()
-                    }
-                    if cleaned_options:
-                        matched_details["remote_python_options"] = cleaned_options
-
-                if "login_shell" in alias_prefs:
-                    login_shell_value = alias_prefs.get("login_shell")
-                    if isinstance(login_shell_value, str):
-                        matched_details["login_shell"] = login_shell_value.strip().lower() in {"1", "true", "yes", "on"}
-                    else:
-                        matched_details["login_shell"] = bool(login_shell_value)
-
-            config = {
-                "protocol": "SSH",
-                "remote": {
-                    "mode": "Select from existing",
-                    "alias": matched_alias,
-                    "details": matched_details,
-                },
-            }
-            return config, remote_path, matched_alias, False
-
-        if scheme in {"http", "https"}:
-            https_locations = self._settings.get("remote_https_locations")
-            locations = dict(https_locations) if isinstance(https_locations, dict) else {}
-            if not locations:
-                cfg_state = self._settings.get("last_remote_configuration")
-                if isinstance(cfg_state, dict):
-                    raw = cfg_state.get("https_locations")
-                    if isinstance(raw, dict):
-                        locations = dict(raw)
-
-            matched_alias = ""
-            matched_url = ""
-            for alias, details in locations.items():
-                if not isinstance(details, dict):
-                    continue
-                base_url = str(details.get("url") or details.get("base_url") or "").strip()
-                if base_url and uri.startswith(base_url):
-                    if len(base_url) > len(matched_url):
-                        matched_alias = str(alias)
-                        matched_url = base_url
-
-            remote_path = unquote(parsed.path or "/")
-            if not matched_alias:
-                return None, remote_path, (parsed.hostname or "HTTPS"), True
-
-            config = {
-                "protocol": "HTTPS",
-                "remote": {
-                    "mode": "Select from existing",
-                    "alias": matched_alias,
-                    "details": locations.get(matched_alias, {}),
-                },
-            }
-            return config, remote_path, matched_alias, False
-
-        return None, "", "", False
+        return _resolve_remote_uri_helper(
+            self,
+            uri,
+            canonical_remote_uri=CFVCore._canonical_remote_uri,
+        )
 
     def _with_cache_defaults(self, config: dict[str, object]) -> dict[str, object]:
         """Attach persisted cache settings when a remote config omits cache."""
@@ -1954,71 +1799,9 @@ class CFVMain(CFVCore):
 
     def _field_ops_replay_last_operations(self) -> None:
         """Replay persisted field operations by dispatching a worker control task."""
-        payload = self._load_last_operations_payload()
-        operations_raw = payload.get("operations", [])
-        operations = operations_raw if isinstance(operations_raw, list) else []
-        if not operations:
-            self._show_status_message("No replayable field operations found.", is_error=True)
-            return
-
-        candidates: list[dict[str, object]] = []
-        skipped = 0
-        for raw in operations:
-            if not isinstance(raw, dict):
-                skipped += 1
-                continue
-            candidates.append(raw)
-
-        if not candidates:
-            self._show_status_message("No valid replayable operations found in history.", is_error=True)
-            return
-
-        chooser = ReplayOperationsDialog(
+        _field_ops_replay_last_operations_helper(
             self,
-            operation_labels=[self._describe_replay_operation(operation) for operation in candidates],
-        )
-        if chooser.exec() != QDialog.Accepted:
-            return
-
-        selected_indices = chooser.selected_indices()
-        if not selected_indices:
-            self._show_status_message("No operations selected for replay.", is_error=True)
-            return
-
-        selected_operations = [
-            candidates[idx]
-            for idx in selected_indices
-            if 0 <= idx < len(candidates)
-        ]
-
-        if not selected_operations:
-            self._show_status_message("No valid replayable operations found in history.", is_error=True)
-            return
-
-        skipped += len(candidates) - len(selected_operations)
-
-        replay_sources: list[str] = []
-        for operation in selected_operations:
-            for source in self._source_files_for_replay_operation(operation):
-                if source in replay_sources:
-                    continue
-                replay_sources.append(source)
-        remote_builder = getattr(self, "_build_remote_open_requests_for_sources", None)
-        if callable(remote_builder):
-            remote_open_requests = remote_builder(replay_sources)
-        else:
-            remote_open_requests = CFVMain._build_remote_open_requests_for_sources(self, replay_sources)
-
-        self._show_status_message(
-            f"Replaying {len(selected_operations)} field operation(s){f' (skipped {skipped})' if skipped else ''}..."
-        )
-        logger.info("Dispatching replay control task for %d field operations (skipped=%d)", len(selected_operations), skipped)
-        self._send_worker_control_task(
-            "REPLAY_FIELDS",
-            {
-                "operations": selected_operations,
-                "remote_open_requests": remote_open_requests,
-            },
+            replay_dialog_cls=ReplayOperationsDialog,
         )
 
     def _build_remote_open_requests_for_sources(self, sources: list[str]) -> list[dict[str, object]]:
@@ -2057,89 +1840,9 @@ class CFVMain(CFVCore):
 
     def _file_ops_save_selected_provenance(self) -> None:
         """Save field-specific upstream provenance for selected fields."""
-        selected_items = list(self.field_list_widget.selectedItems())
-        if not selected_items:
-            self._show_status_message("Select one or more fields to save provenance.", is_error=True)
-            return
-
-        selected_indices = sorted(
-            {
-                idx
-                for idx in (self.field_list_widget.row(item) for item in selected_items)
-                if idx >= 0
-            }
-        )
-        if not selected_indices:
-            self._show_status_message("No valid selected fields for provenance export.", is_error=True)
-            return
-
-        selected_field_refs: list[dict[str, object]] = []
-        for idx in selected_indices:
-            field_ref = CFVMain._field_reference_for_index(self, idx)
-            if isinstance(field_ref, dict):
-                selected_field_refs.append(field_ref)
-
-        if not selected_field_refs:
-            self._show_status_message("Selected fields could not be resolved for provenance export.", is_error=True)
-            return
-
-        payload = self._load_last_operations_payload()
-        operations_raw = payload.get("operations", [])
-        operations = operations_raw if isinstance(operations_raw, list) else []
-        if not operations:
-            self._show_status_message("No replayable operations available for provenance export.", is_error=True)
-            return
-
-        replay_sources: list[str] = []
-        for operation in operations:
-            if not isinstance(operation, dict):
-                continue
-            for source in self._source_files_for_replay_operation(operation):
-                if source not in replay_sources:
-                    replay_sources.append(source)
-
-        remote_builder = getattr(self, "_build_remote_open_requests_for_sources", None)
-        if callable(remote_builder):
-            remote_open_requests = remote_builder(replay_sources)
-        else:
-            remote_open_requests = CFVMain._build_remote_open_requests_for_sources(self, replay_sources)
-
-        default_destination = str(self._settings.get("last_save_data_dir", str(Path.home())))
-        default_filename = f"{self._default_plot_filename()}_selected.prov.json"
-        suggested = str(Path(default_destination).expanduser() / default_filename)
-        destination, _selected_filter = QFileDialog.getSaveFileName(
+        _file_ops_save_selected_provenance_helper(
             self,
-            "Save Selected Provenance",
-            suggested,
-            "PROV JSON (*.prov.json);;xconv Workflow JSON (*.json)",
-        )
-        if not destination:
-            return
-
-        destination_path = Path(destination).expanduser()
-        output_format = "prov-json" if destination_path.name.endswith(".prov.json") else "xconv-json"
-
-        if output_format == "prov-json" and destination_path.suffix != ".json":
-            destination_path = destination_path.with_suffix(".prov.json")
-        elif output_format == "xconv-json" and destination_path.suffix != ".json":
-            destination_path = destination_path.with_suffix(".json")
-
-        self._remember_last_save_dir("last_save_data_dir", str(destination_path))
-        self._send_worker_control_task(
-            "SAVE_PROVENANCE",
-            {
-                "schema_version": int(payload.get("schema_version", 1) or 1),
-                "session_id": str(payload.get("session_id", "") or ""),
-                "saved_at": str(payload.get("saved_at", "") or ""),
-                "operations": operations,
-                "selected_field_refs": selected_field_refs,
-                "remote_open_requests": remote_open_requests,
-                "destination": str(destination_path),
-                "output_format": output_format,
-            },
-        )
-        self._show_status_message(
-            f"Saving field-specific provenance for {len(selected_field_refs)} selected field(s)..."
+            file_dialog_cls=QFileDialog,
         )
 
     @staticmethod
@@ -2173,70 +1876,11 @@ class CFVMain(CFVCore):
 
     def _input_load_and_run_prov(self) -> None:
         """Load internal/PROV workflow JSON and replay it through worker control messaging."""
-        default_dir = str(self._settings.get("last_open_data_dir", str(Path.home())))
-        selected_path, _selected_filter = QFileDialog.getOpenFileName(
+        _input_load_and_run_prov_helper(
             self,
-            "Load & Run Prov",
-            default_dir,
-            "Workflow/PROV JSON (*.json *.prov.json)",
+            file_dialog_cls=QFileDialog,
+            workflow_payload_from_provenance_document=CFVMain._workflow_payload_from_provenance_document,
         )
-        if not selected_path:
-            return
-
-        path = Path(selected_path).expanduser()
-        try:
-            raw_payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            self._show_status_message(f"Failed to load provenance file: {exc}", is_error=True)
-            return
-
-        workflow_payload = CFVMain._workflow_payload_from_provenance_document(raw_payload)
-        if workflow_payload is None:
-            self._show_status_message(
-                "Loaded file is not recognized as xconv workflow JSON or PROV-JSON.",
-                is_error=True,
-            )
-            return
-
-        operations_raw = workflow_payload.get("operations", [])
-        operations = operations_raw if isinstance(operations_raw, list) else []
-        if not operations:
-            self._show_status_message("No replayable operations found in provenance file.", is_error=True)
-            return
-
-        replay_sources: list[str] = []
-        for operation in operations:
-            if not isinstance(operation, dict):
-                continue
-            for source in self._source_files_for_replay_operation(operation):
-                if source not in replay_sources:
-                    replay_sources.append(source)
-
-        remote_builder = getattr(self, "_build_remote_open_requests_for_sources", None)
-        if callable(remote_builder):
-            remote_open_requests = remote_builder(replay_sources)
-        else:
-            remote_open_requests = CFVMain._build_remote_open_requests_for_sources(self, replay_sources)
-
-        if replay_sources:
-            mode_setter = getattr(self, "_set_file_open_mode", None)
-            if callable(mode_setter):
-                mode_setter("multi")
-            else:
-                self.file_open_mode = "multi"
-            self._loaded_file_paths = list(replay_sources)
-            refresh_menu = getattr(self, "_refresh_open_files_menu", None)
-            if callable(refresh_menu):
-                refresh_menu()
-
-        self._send_worker_control_task(
-            "REPLAY_FIELDS",
-            {
-                "operations": operations,
-                "remote_open_requests": remote_open_requests,
-            },
-        )
-        self._show_status_message(f"Running provenance workflow from {path.name} ({len(operations)} operation(s))...")
 
     def _field_identity_from_item(self, item: QListWidgetItem | None) -> str:
         """Return stable field identity text when available, else display text."""
@@ -2801,92 +2445,10 @@ class CFVMain(CFVCore):
 
     def _build_plot_context(self) -> tuple[dict[str, tuple[object, object]], dict[str, str], str] | None:
         """Collect current selections/collapse state and infer plot type."""
-        if getattr(self, "selection_mode", "single") == "multi":
-            selected_field_indices = list(getattr(self, "_selected_field_indices", []))
-            if len(selected_field_indices) > 1:
-                self._show_status_message(
-                    "Multi-field plotting is not enabled yet. Keep fields selected for upcoming Field Ops.",
-                    is_error=True,
-                )
-                return None
-
-            command_text = self._coordinate_subspace_command_text()
-            if not command_text:
-                self._show_status_message(
-                    "Enter coordinate bounds commands before requesting a plot.",
-                    is_error=True,
-                )
-                return None
-
-            try:
-                selections = parse_coordinate_subspace_commands(command_text)
-            except ValueError as exc:
-                self._show_status_message(str(exc), is_error=True)
-                return None
-
-            if not selections:
-                self._show_status_message(
-                    "No coordinate bounds commands were parsed.",
-                    is_error=True,
-                )
-                return None
-
-            return selections, {}, "contour"
-
-        if not self.controls:
-            return None
-
-        selections: dict[str, tuple[object, object]] = {}
-        collapse_by_coord: dict[str, str] = {}
-        dims: list[int] = []
-
-        for name, control in self.controls.items():
-            values = control["values"]
-            start_idx, end_idx = control["range_slider"].value()
-            lo_idx = int(min(start_idx, end_idx))
-            hi_idx = int(max(start_idx, end_idx))
-            is_singleton = (hi_idx - lo_idx) <= 1
-
-            if is_singleton:
-                if lo_idx == 0:
-                    singleton_idx = lo_idx
-                elif hi_idx == (len(values) - 1):
-                    singleton_idx = hi_idx
-                else:
-                    singleton_idx = lo_idx
-                lo = values[singleton_idx]
-                hi = values[singleton_idx]
-            else:
-                lo = values[lo_idx]
-                hi = values[hi_idx]
-            selections[name] = (lo, hi)
-
-            collapse_method = self.selected_collapse_methods.get(name)
-            if collapse_method:
-                collapse_by_coord[name] = collapse_method
-                dims.append(1)
-            else:
-                dims.append(1 if is_singleton else 2)
-
-        varying_dims = sum(1 for dim in dims if dim != 1)
-        available_kinds = getattr(self, "available_plot_kinds", [])
-        selected_kind = getattr(self, "selected_plot_kind", None)
-
-        if varying_dims == 0:
-            plot_kind = "collapsed"
-        elif varying_dims > 2:
-            plot_kind = "unsupported"
-        elif isinstance(selected_kind, str) and selected_kind in available_kinds:
-            plot_kind = selected_kind
-        elif varying_dims == 1:
-            plot_kind = "lineplot"
-        elif varying_dims == 2:
-            # Keep contour as a sensible default in 2D when no explicit selection exists.
-            plot_kind = "contour"
-        else:
-            plot_kind = "unsupported"
-
-        return selections, collapse_by_coord, plot_kind
+        return _build_plot_context_helper(
+            self,
+            parse_coordinate_subspace_commands_fn=parse_coordinate_subspace_commands,
+        )
 
     def _request_plot_task(
         self,
@@ -2896,172 +2458,16 @@ class CFVMain(CFVCore):
         emit_image_override: bool | None = None,
     ) -> None:
         """Build and send a plot/data task with optional save targets."""
-        context = self._build_plot_context()
-        if context is None:
-            logger.info("PLOT_DIAG gui_plot_skip reason=no_controls")
-            return
-        selections, collapse_by_coord, plot_kind = context
-
-        if plot_kind in {"collapsed", "unsupported"}:
-            logger.info(
-                "PLOT_DIAG gui_plot_skip reason=dimensionality kind=%s coords=%d collapses=%d",
-                plot_kind,
-                len(selections),
-                len(collapse_by_coord),
-            )
-            return
-
-        field_index = self._selected_field_index_for_operation("Plot")
-        if field_index is None:
-            return
-
-        selected_item = self.field_list_widget.item(field_index)
-        selected_field_label = (
-            CFVMain._field_identity_from_item(self, selected_item)
-            if selected_item is not None
-            else f"field[{field_index}]"
+        _request_plot_task_helper(
+            self,
+            save_code_path=save_code_path,
+            save_plot_path=save_plot_path,
+            save_data_path=save_data_path,
+            emit_image_override=emit_image_override,
+            save_data_from_selection_fn=save_data_from_selection,
+            plot_from_selection_fn=plot_from_selection,
+            build_vector_overplot_command_fn=build_vector_overplot_command,
         )
-
-        save_target = None
-        if save_code_path:
-            save_target = str(Path(save_code_path).expanduser())
-
-        save_plot_target = str(Path(save_plot_path).expanduser()) if save_plot_path else None
-        save_data_target = str(Path(save_data_path).expanduser()) if save_data_path else None
-
-        if save_data_target and not save_plot_target:
-            if save_code_path:
-                self._show_status_message(
-                    "Save Code + Save Data requires a plot target. Use Save All.",
-                    is_error=True,
-                )
-                return
-            cmd = save_data_from_selection(selections, collapse_by_coord, save_data_target)
-        else:
-            plot_options = dict(self.plot_options_by_kind.get(plot_kind, {}))
-            if plot_kind == "contour":
-                plot_options.setdefault("contour_title_fontsize", self._contour_title_fontsize())
-                plot_options.setdefault("page_title_fontsize", self._page_title_fontsize())
-                plot_options.setdefault("annotation_fontsize", self._annotation_fontsize())
-
-            plot_action = getattr(self, "selected_plot_action", "plot")
-            if plot_action not in {"plot", "overplot"}:
-                plot_action = "plot"
-
-            contour_context: dict[str, object] | None = None
-            if plot_kind == "contour":
-                contour_context = {
-                    "field_index": int(field_index),
-                    "selections": dict(selections),
-                    "collapse_by_coord": dict(collapse_by_coord),
-                    "plot_options": dict(plot_options),
-                }
-
-            if plot_kind == "vector" and plot_options.get("v_field_index") is None:
-                self._show_status_message(
-                    "Open Vector Options to assign U and V fields before plotting.",
-                    is_error=False,
-                )
-                self._show_vector_options_dialog(field_index)
-                return
-
-            if save_plot_target:
-                plot_options["filename"] = save_plot_target
-            elif not plot_options:
-                plot_options = None
-
-            try:
-                cmd = plot_from_selection(
-                    selections,
-                    collapse_by_coord,
-                    plot_kind,
-                    plot_options,
-                    plot_action=plot_action,
-                    save_data_path=save_data_target,
-                )
-            except (ValueError, NotImplementedError) as exc:
-                self._show_status_message(f"Plot request unavailable: {exc}", is_error=True)
-                logger.warning("Plot template unavailable for kind=%s: %s", plot_kind, exc)
-                return
-
-            if contour_context is not None:
-                stored_options = contour_context.get("plot_options")
-                if isinstance(stored_options, dict):
-                    stored_options.pop("filename", None)
-                self._last_contour_plot_context = contour_context
-
-            if plot_kind == "vector" and plot_action == "overplot":
-                last_contour = getattr(self, "_last_contour_plot_context", None)
-                if isinstance(last_contour, dict):
-                    contour_field_index = last_contour.get("field_index")
-                    contour_selections = last_contour.get("selections")
-                    contour_collapse_by_coord = last_contour.get("collapse_by_coord")
-                    contour_options = last_contour.get("plot_options")
-                    if (
-                        isinstance(contour_field_index, int)
-                        and
-                        isinstance(contour_selections, dict)
-                        and isinstance(contour_collapse_by_coord, dict)
-                    ):
-                        cmd = build_vector_overplot_command(
-                            contour_field_index=contour_field_index,
-                            vector_field_index=int(field_index),
-                            contour_selections=contour_selections,
-                            contour_collapse_by_coord=contour_collapse_by_coord,
-                            contour_options=contour_options if isinstance(contour_options, dict) else None,
-                            vector_selections=selections,
-                            vector_collapse_by_coord=collapse_by_coord,
-                            vector_options=plot_options,
-                        )
-
-        cmd = (
-            f"_cfview_field_index = {field_index}\n"
-            f"fld = f[{field_index}]\n"
-            + cmd
-        )
-
-        if emit_image_override is not None:
-            emit_image = emit_image_override
-        else:
-            emit_image = save_plot_target is None and save_data_target is None
-
-        logger.debug(
-            "Requesting plot update kind=%s coords=%d collapses=%d save_code=%s save_plot=%s",
-            plot_kind,
-            len(selections),
-            len(collapse_by_coord),
-            bool(save_target),
-            bool(save_plot_target),
-        )
-        logger.info(
-            "PLOT_DIAG gui_plot_request pid=%s worker_pid=%s field_index=%s kind=%s emit_image=%s",
-            os.getpid(),
-            self.worker.processId(),
-            field_index,
-            plot_kind,
-            emit_image,
-        )
-
-        if save_target and save_plot_target and save_data_target:
-            loading_message = "Saving plot, data, and code..."
-        elif save_plot_target and save_data_target:
-            loading_message = "Rendering and saving plot/data..."
-        elif save_plot_target:
-            loading_message = "Rendering and saving plot..."
-        elif save_data_target:
-            loading_message = "Saving selected data..."
-        elif save_code_path:
-            loading_message = "Rendering plot and saving code..."
-        else:
-            loading_message = "Rendering plot..."
-
-        loading_message = f"{loading_message} Field {field_index}: {selected_field_label}"
-
-        self._plot_request_in_flight = True
-        self._plot_request_expects_image = emit_image
-        self._suppress_stale_error_status = False
-        self._set_plot_loading(True, loading_message)
-        self._send_worker_task(cmd, save_code_path=save_target, emit_image=emit_image)
 
     def _send_worker_task(
         self,
