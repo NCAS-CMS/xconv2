@@ -8,15 +8,19 @@ dependencies:
   - python >=3.12
   - pip !=21.3
   - cartopy  # no pip wheel
-  - udunits2  # no pip wheel; required by cf-python/cf-units
   - cf-plot
+  - fsspec
   - pandas
+  - paramiko
   - pyside6
+  - s3fs
   - setuptools >80  # cfplot imports distutils
   - superqt
+  - udunits2  # no pip wheel; required by cf-python/cf-units
   - zarr
   # testing
   - pytest
+  # move these to conda-forge deps when released
   - pip:
       - "git+https://github.com/ncas-cms/cfdm.git@main"
       - "git+https://github.com/ncas-cms/cf-python.git@main"
