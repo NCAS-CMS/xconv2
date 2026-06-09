@@ -14,6 +14,7 @@ import resource
 from io import BytesIO
 from pathlib import Path
 from typing import Any, NamedTuple
+from urllib.parse import urlparse
 
 import matplotlib
 import numpy as np
@@ -578,7 +579,16 @@ def _handle_replay_fields_task(payload: dict[str, Any]) -> None:
     worker_globals["f"] = fields
     worker_globals["_cfview_file_path"] = replay_sources[-1] if replay_sources else ""
     worker_globals["_cfview_field_index"] = None
-    send_to_gui("METADATA", cf_interface.field_info(fields))
+    initial_rows = cf_interface.field_info(fields)
+    for idx, row in enumerate(initial_rows):
+        if not isinstance(row, dict):
+            continue
+        prov = provenance[idx] if idx < len(provenance) else {}
+        source_file = prov.get("source_file") if isinstance(prov, dict) else ""
+        generated = bool(prov.get("generated", False)) if isinstance(prov, dict) else False
+        row["source_file"] = source_file if isinstance(source_file, str) else ""
+        row["generated"] = generated
+    send_to_gui("METADATA", initial_rows)
 
     applied = 0
     skipped = 0
@@ -668,6 +678,10 @@ def _handle_replay_fields_task(payload: dict[str, Any]) -> None:
                 metadata_rows = cf_interface.regrid_from_config(fields, json.dumps(config_copy, sort_keys=True))
 
         if isinstance(metadata_rows, list) and metadata_rows:
+            for row in metadata_rows:
+                if isinstance(row, dict):
+                    row["source_file"] = ""
+                    row["generated"] = True
             send_to_gui("METADATA_APPEND", metadata_rows)
             provenance.extend({"source_file": "", "generated": True} for _ in metadata_rows)
             applied += 1
@@ -893,6 +907,56 @@ def _build_fields_provenance_slice(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _shareable_provenance_source_overrides(payload: dict[str, Any]) -> dict[str, str]:
+    """Return export-time source URI overrides for portable provenance records."""
+    remote_open_requests_raw = payload.get("remote_open_requests")
+    if not isinstance(remote_open_requests_raw, list):
+        return {}
+
+    overrides: dict[str, str] = {}
+    for request in remote_open_requests_raw:
+        if not isinstance(request, dict):
+            continue
+
+        uri_raw = request.get("uri")
+        source_uri = uri_raw.strip() if isinstance(uri_raw, str) else ""
+        if not source_uri:
+            continue
+
+        parsed_source = urlparse(source_uri)
+        if parsed_source.scheme.lower() != "s3":
+            continue
+
+        descriptor = request.get("descriptor")
+        if not isinstance(descriptor, dict):
+            continue
+
+        storage_options = descriptor.get("storage_options")
+        if not isinstance(storage_options, dict):
+            continue
+
+        client_kwargs = storage_options.get("client_kwargs")
+        if not isinstance(client_kwargs, dict):
+            continue
+
+        endpoint_url = str(client_kwargs.get("endpoint_url", "") or "").strip()
+        if not endpoint_url:
+            continue
+
+        normalized_endpoint = endpoint_url if "://" in endpoint_url else f"https://{endpoint_url}"
+        endpoint_host = urlparse(normalized_endpoint).netloc.strip()
+        if not endpoint_host:
+            continue
+
+        path = f"{parsed_source.netloc}{parsed_source.path}".lstrip("/")
+        if not path:
+            continue
+
+        overrides[source_uri] = f"s3://{endpoint_host}/{path}"
+
+    return overrides
+
+
 def _handle_save_provenance_task(payload: dict[str, Any]) -> None:
     """Build field-specific provenance and save to disk in requested format."""
     destination_raw = payload.get("destination")
@@ -908,7 +972,10 @@ def _handle_save_provenance_task(payload: dict[str, Any]) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     if output_format == "prov-json":
-        prov_payload = workflow_to_prov_json_dict(workflow_slice)
+        prov_payload = workflow_to_prov_json_dict(
+            workflow_slice,
+            source_uri_overrides=_shareable_provenance_source_overrides(payload),
+        )
         destination.write_text(json.dumps(prov_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         send_to_gui(f"STATUS:Saved selected provenance to {destination} (prov-json)")
         return

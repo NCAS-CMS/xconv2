@@ -92,6 +92,10 @@ class MenuController:
         open_uris_action.triggered.connect(self.host._choose_uris)
         file_menu.addAction(open_uris_action)
 
+        load_run_prov_action = QAction("Load & Run Prov", self.host)
+        load_run_prov_action.triggered.connect(self.host._input_load_and_run_prov)
+        file_menu.addAction(load_run_prov_action)
+
         self.host.recent_menu = file_menu.addMenu("Recent")
         self.refresh_recent_menu()
 

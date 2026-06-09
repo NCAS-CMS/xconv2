@@ -312,3 +312,109 @@ def test_handle_save_provenance_task_writes_internal_slice(tmp_path: Path, monke
     assert len(saved["operations"]) == 1
     assert saved["operations"][0]["kind"] == "unary_xy"
     assert messages[-1][0].startswith("STATUS:Saved selected provenance")
+
+
+def test_handle_save_provenance_task_writes_shareable_s3_uri_in_prov_json(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    destination = tmp_path / "slice.prov.json"
+
+    monkeypatch.setattr(
+        worker,
+        "_prepare_remote_session",
+        lambda **_kwargs: worker.RemoteSessionEntry(
+            session_id="session-remote",
+            descriptor_hash="hash-remote",
+            descriptor={"protocol": "s3"},
+            filesystem=_FakeFilesystem(),
+        ),
+    )
+    monkeypatch.setattr(worker, "_read_remote_fields", lambda **_kwargs: [{"identity": "src"}])
+    monkeypatch.setattr(
+        worker.cf_interface,
+        "field_info",
+        lambda fields: [{"identity": str(f.get("identity", ""))} for f in fields],
+    )
+
+    def _append_unary(fields, _idx, _op):
+        fields.append({"identity": "derived"})
+        return [{"identity": "derived"}]
+
+    monkeypatch.setattr(worker.cf_interface, "append_unary_xy_field_operation", _append_unary)
+
+    payload = {
+        "schema_version": 1,
+        "session_id": "session-1",
+        "saved_at": "2026-06-09T00:00:00Z",
+        "operations": [
+            {
+                "kind": "unary_xy",
+                "field_index": 0,
+                "field_ref": {
+                    "identity": "src",
+                    "source_file": "s3://bnl/CMIP6-test.nc",
+                    "generated": False,
+                    "occurrence": 1,
+                },
+                "operation": "grad",
+                "source_file": "s3://bnl/CMIP6-test.nc",
+            }
+        ],
+        "selected_field_refs": [
+            {
+                "identity": "derived",
+                "source_file": "",
+                "generated": True,
+                "occurrence": 1,
+            }
+        ],
+        "remote_open_requests": [
+            {
+                "uri": "s3://bnl/CMIP6-test.nc",
+                "session_id": "session-remote",
+                "descriptor_hash": "hash-remote",
+                "descriptor": {
+                    "protocol": "s3",
+                    "storage_options": {
+                        "client_kwargs": {
+                            "endpoint_url": "https://object.example.org",
+                        },
+                    },
+                    "root_path": "",
+                    "display_name": "S3",
+                    "uri_scheme": "s3",
+                    "uri_authority": "",
+                    "proxy_jump": None,
+                },
+                "paths": ["bnl/CMIP6-test.nc"],
+            }
+        ],
+        "destination": str(destination),
+        "output_format": "prov-json",
+    }
+
+    messages: list[tuple[str, object | None]] = []
+    monkeypatch.setattr(worker, "send_to_gui", lambda prefix, data=None: messages.append((prefix, data)))
+
+    worker._handle_save_provenance_task(payload)
+
+    saved = json.loads(destination.read_text(encoding="utf-8"))
+    entities = saved["entity"]
+    assert isinstance(entities, dict)
+    source_entities = [
+        attrs
+        for entity_id, attrs in entities.items()
+        if isinstance(entity_id, str)
+        and entity_id.startswith("xconv:source_")
+        and isinstance(attrs, dict)
+    ]
+    assert len(source_entities) == 1
+    assert source_entities[0]["xconv:uri"] == "s3://object.example.org/bnl/CMIP6-test.nc"
+
+    activities = saved["activity"]
+    assert isinstance(activities, dict)
+    workflow_blob = activities["xconv:session_session-1"]["xconv:workflow_json"]
+    assert isinstance(workflow_blob, str)
+    assert '"source_file": "s3://bnl/CMIP6-test.nc"' in workflow_blob
+    assert messages[-1][0].startswith("STATUS:Saved selected provenance")

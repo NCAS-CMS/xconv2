@@ -185,7 +185,6 @@ class FieldMetadataController:
             setattr(self.host, "_field_source_color_by_path", {})
             setattr(self.host, "_field_source_color_index", 0)
 
-        color = QColor("#ffffff") if generated else (self._source_color(source_file) if source_file else None)
         added_count = 0
 
         for field in fields:
@@ -202,17 +201,28 @@ class FieldMetadataController:
             if not isinstance(properties, Mapping):
                 raise TypeError("Field metadata 'properties' must be a mapping")
 
+            row_generated_raw = field.get("generated")
+            row_generated = bool(row_generated_raw) if isinstance(row_generated_raw, bool) else bool(generated)
+            row_source_raw = field.get("source_file")
+            if isinstance(row_source_raw, str) and row_source_raw.strip():
+                row_source = row_source_raw.strip()
+            elif source_file and not row_generated:
+                row_source = source_file
+            else:
+                row_source = ""
+            row_color = QColor("#ffffff") if row_generated else (self._source_color(row_source) if row_source else None)
+
             item = QListWidgetItem(identity)
             item.setData(Qt.UserRole, detail)
             item.setData(Qt.UserRole + 1, properties)
             item.setData(Qt.UserRole + 3, chunk_shape)
             item.setData(Qt.UserRole + 4, identity)
-            item.setData(Qt.UserRole + 5, bool(generated))
-            if source_file and not generated:
-                item.setData(Qt.UserRole + 2, source_file)
-            if color is not None:
-                item.setBackground(color)
-            if generated:
+            item.setData(Qt.UserRole + 5, row_generated)
+            if row_source and not row_generated:
+                item.setData(Qt.UserRole + 2, row_source)
+            if row_color is not None:
+                item.setBackground(row_color)
+            if row_generated:
                 item.setForeground(QColor("#b00020"))
             self.host.field_list_widget.addItem(item)
             added_count += 1

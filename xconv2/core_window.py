@@ -2071,6 +2071,10 @@ class CFVCore(QMainWindow):
         """Placeholder action for File Ops -> Save Selected."""
         self._show_not_implemented_dialog("File Ops: Save Selected")
 
+    def _input_load_and_run_prov(self) -> None:
+        """Placeholder action for Input -> Load & Run Prov."""
+        self._show_not_implemented_dialog("Input: Load & Run Prov")
+
     def _file_ops_save_selected_provenance(self) -> None:
         """Placeholder action for File Ops -> Save Selected Provenance."""
         self._show_not_implemented_dialog("File Ops: Save Selected Provenance")

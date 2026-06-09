@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
 import types
@@ -15,6 +16,7 @@ from xconv2.gui import CFVMain
 import xconv2.main_window as main_window
 import xconv2.remote_access as _remote_access_mod
 import xconv2.ui.remote_file_navigator as _remote_file_nav_mod
+from xconv2.workflow.xconv_workflow_to_prov import workflow_to_prov_json_dict
 
 
 @dataclass
@@ -1391,6 +1393,229 @@ def test_file_ops_save_selected_provenance_dispatches_worker_control_task(
     assert payload["output_format"] == "prov-json"
     assert isinstance(payload.get("selected_field_refs"), list)
     assert host.status_messages[-1].startswith("Saving field-specific provenance")
+
+
+def test_input_load_and_run_prov_dispatches_replay_for_internal_json(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    payload_path = tmp_path / "workflow.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "session_id": "session-1",
+                "saved_at": "2026-06-09T00:00:00Z",
+                "operations": [
+                    {
+                        "kind": "unary_xy",
+                        "field_index": 0,
+                        "operation": "grad",
+                        "source_file": "/tmp/a.nc",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _DummyMain:
+        def __init__(self) -> None:
+            self._settings = {"last_open_data_dir": str(tmp_path)}
+            self.control_tasks: list[tuple[str, dict[str, object]]] = []
+            self.status_messages: list[tuple[str, bool]] = []
+            self.file_open_mode = "single"
+            self._loaded_file_paths: list[str] = []
+            self.refresh_menu_calls = 0
+            self.mode_changes: list[str] = []
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.status_messages.append((message, is_error))
+
+        def _source_files_for_replay_operation(self, operation: dict[str, object]) -> list[str]:
+            return CFVMain._source_files_for_replay_operation(self, operation)
+
+        def _build_remote_open_requests_for_sources(self, _sources: list[str]) -> list[dict[str, object]]:
+            return []
+
+        def _send_worker_control_task(self, kind: str, payload: dict[str, object]) -> None:
+            self.control_tasks.append((kind, payload))
+
+        def _refresh_open_files_menu(self) -> None:
+            self.refresh_menu_calls += 1
+
+        def _set_file_open_mode(self, mode: str) -> None:
+            self.mode_changes.append(mode)
+            self.file_open_mode = mode
+
+    monkeypatch.setattr(
+        main_window.QFileDialog,
+        "getOpenFileName",
+        lambda *_args, **_kwargs: (str(payload_path), "Workflow/PROV JSON (*.json *.prov.json)"),
+    )
+
+    host = _DummyMain()
+    CFVMain._input_load_and_run_prov(host)
+
+    assert len(host.control_tasks) == 1
+    kind, replay_payload = host.control_tasks[0]
+    assert kind == "REPLAY_FIELDS"
+    operations = replay_payload.get("operations")
+    assert isinstance(operations, list)
+    assert len(operations) == 1
+    assert host.file_open_mode == "multi"
+    assert host.mode_changes == ["multi"]
+    assert host._loaded_file_paths == ["/tmp/a.nc"]
+    assert host.refresh_menu_calls == 1
+    assert host.status_messages[-1][0].startswith("Running provenance workflow")
+
+
+def test_input_load_and_run_prov_dispatches_replay_for_prov_json(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workflow_payload = {
+        "schema_version": 1,
+        "session_id": "session-prov",
+        "saved_at": "2026-06-09T00:00:00Z",
+        "operations": [
+            {
+                "kind": "unary_xy",
+                "field_index": 0,
+                "operation": "grad",
+                "source_file": "/tmp/a.nc",
+            }
+        ],
+    }
+    prov_path = tmp_path / "workflow.prov.json"
+    prov_path.write_text(json.dumps(workflow_to_prov_json_dict(workflow_payload)), encoding="utf-8")
+
+    class _DummyMain:
+        def __init__(self) -> None:
+            self._settings = {"last_open_data_dir": str(tmp_path)}
+            self.control_tasks: list[tuple[str, dict[str, object]]] = []
+            self.status_messages: list[tuple[str, bool]] = []
+            self.file_open_mode = "single"
+            self._loaded_file_paths: list[str] = []
+            self.refresh_menu_calls = 0
+            self.mode_changes: list[str] = []
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.status_messages.append((message, is_error))
+
+        def _source_files_for_replay_operation(self, operation: dict[str, object]) -> list[str]:
+            return CFVMain._source_files_for_replay_operation(self, operation)
+
+        def _build_remote_open_requests_for_sources(self, _sources: list[str]) -> list[dict[str, object]]:
+            return []
+
+        def _send_worker_control_task(self, kind: str, payload: dict[str, object]) -> None:
+            self.control_tasks.append((kind, payload))
+
+        def _refresh_open_files_menu(self) -> None:
+            self.refresh_menu_calls += 1
+
+        def _set_file_open_mode(self, mode: str) -> None:
+            self.mode_changes.append(mode)
+            self.file_open_mode = mode
+
+    monkeypatch.setattr(
+        main_window.QFileDialog,
+        "getOpenFileName",
+        lambda *_args, **_kwargs: (str(prov_path), "Workflow/PROV JSON (*.json *.prov.json)"),
+    )
+
+    host = _DummyMain()
+    CFVMain._input_load_and_run_prov(host)
+
+    assert len(host.control_tasks) == 1
+    kind, replay_payload = host.control_tasks[0]
+    assert kind == "REPLAY_FIELDS"
+    operations = replay_payload.get("operations")
+    assert isinstance(operations, list)
+    assert len(operations) == 1
+    assert host.file_open_mode == "multi"
+    assert host.mode_changes == ["multi"]
+    assert host._loaded_file_paths == ["/tmp/a.nc"]
+    assert host.refresh_menu_calls == 1
+
+
+def test_handle_worker_output_metadata_rows_with_source_files_set_multi_file_state() -> None:
+    metadata_payload = [
+        {"identity": "a", "detail": "", "properties": {}, "chunk_shape": "", "source_file": "/tmp/a.nc"},
+        {"identity": "b", "detail": "", "properties": {}, "chunk_shape": "", "source_file": "/tmp/b.nc"},
+    ]
+    encoded = base64.b64encode(pickle.dumps(metadata_payload)).decode()
+
+    class _FakeLine:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def data(self) -> bytes:
+            return self._text.encode()
+
+    class _FakeWorker:
+        def __init__(self, lines: list[str]) -> None:
+            self._lines = [_FakeLine(line) for line in lines]
+
+        def canReadLine(self) -> bool:
+            return bool(self._lines)
+
+        def readLine(self):
+            return self._lines.pop(0)
+
+    class _DummyFieldList:
+        def count(self) -> int:
+            return 0
+
+        def setCurrentRow(self, _row: int) -> None:
+            return None
+
+    class _DummyMain:
+        def __init__(self) -> None:
+            self.worker = _FakeWorker([f"METADATA:{encoded}\n"])
+            self.file_open_mode = "single"
+            self._loaded_file_paths: list[str] = []
+            self._pending_metadata_append = False
+            self._pending_metadata_source = None
+            self._pending_reselect_field_index = None
+            self._pending_metadata_loop = None
+            self._pending_metadata_received = False
+            self.field_list_widget = _DummyFieldList()
+            self._pending_binary_operation_name = None
+            self._plot_request_in_flight = False
+            self._plot_request_expects_image = False
+            self._suppress_stale_error_status = False
+            self.populated_args: list[tuple[object, bool, object]] = []
+            self.mode_changes: list[str] = []
+
+        def populate_field_list(self, metadata, *, append=False, source_file=None):
+            self.populated_args.append((metadata, append, source_file))
+
+        def _show_status_message(self, _message: str, is_error: bool = False) -> None:
+            _ = is_error
+
+        def _set_plot_loading(self, _is_loading: bool, message: str = "Rendering plot...") -> None:
+            _ = message
+
+        def _clear_plot_canvas(self, message: str = "Plot unavailable") -> None:
+            _ = message
+
+        def build_dynamic_sliders(self, metadata: dict[str, object]) -> None:
+            _ = metadata
+
+        def _set_file_open_mode(self, mode: str) -> None:
+            self.mode_changes.append(mode)
+            self.file_open_mode = mode
+
+    host = _DummyMain()
+
+    CFVMain.handle_worker_output(host)
+
+    assert host.file_open_mode == "multi"
+    assert host.mode_changes == ["multi"]
+    assert host._loaded_file_paths == ["/tmp/a.nc", "/tmp/b.nc"]
+    assert len(host.populated_args) == 1
 
 
 def test_update_memory_status_formats_app_and_worker_rss(monkeypatch: pytest.MonkeyPatch) -> None:

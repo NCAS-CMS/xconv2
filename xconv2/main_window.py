@@ -19,6 +19,7 @@ import socket
 import time
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlparse
 import sys
 
@@ -54,6 +55,11 @@ from .ui.dialogs import (
     RemoteOpenDialog,
     SaveSelectedFieldsDialog,
 )
+from .workflow.xconv_workflow_to_prov import prov_json_dict_to_workflow
+
+if TYPE_CHECKING:
+    from .remote_access import RemoteEntry
+    from .ui.remote_file_navigator import RemoteLoginLogDialog
 
 logger = logging.getLogger(__name__)
 
@@ -438,6 +444,23 @@ class CFVMain(CFVCore):
                         )
                         continue
                     logger.info("Received metadata for %d fields", len(metadata))
+                    row_sources: list[str] = []
+                    for row in metadata:
+                        source_raw = row.get("source_file") if isinstance(row, dict) else None
+                        if not isinstance(source_raw, str) or not source_raw.strip():
+                            continue
+                        source = source_raw.strip()
+                        if source not in row_sources:
+                            row_sources.append(source)
+                    if row_sources:
+                        self._loaded_file_paths = list(row_sources)
+                        if len(row_sources) > 1:
+                            mode_setter = getattr(self, "_set_file_open_mode", None)
+                            if callable(mode_setter):
+                                mode_setter("multi")
+                            else:
+                                self.file_open_mode = "multi"
+
                     append = bool(getattr(self, "_pending_metadata_append", False))
                     source_file = getattr(self, "_pending_metadata_source", None)
                     self.populate_field_list(
@@ -2376,6 +2399,102 @@ class CFVMain(CFVCore):
             f"Saving field-specific provenance for {len(selected_field_refs)} selected field(s)..."
         )
 
+    @staticmethod
+    def _workflow_payload_from_provenance_document(payload: object) -> dict[str, object] | None:
+        """Normalize either internal workflow JSON or PROV-JSON into replay workflow payload."""
+        if not isinstance(payload, dict):
+            return None
+
+        operations = payload.get("operations")
+        if isinstance(operations, list):
+            return {
+                "schema_version": int(payload.get("schema_version", 1) or 1),
+                "session_id": str(payload.get("session_id", "") or ""),
+                "saved_at": str(payload.get("saved_at", "") or ""),
+                "operations": operations,
+            }
+
+        try:
+            workflow = prov_json_dict_to_workflow(payload)
+        except ValueError:
+            return None
+
+        return {
+            "schema_version": int(workflow.get("schema_version", 1) or 1),
+            "session_id": str(workflow.get("session_id", "") or ""),
+            "saved_at": str(workflow.get("saved_at", "") or ""),
+            "operations": list(workflow.get("operations", []))
+            if isinstance(workflow.get("operations", []), list)
+            else [],
+        }
+
+    def _input_load_and_run_prov(self) -> None:
+        """Load internal/PROV workflow JSON and replay it through worker control messaging."""
+        default_dir = str(self._settings.get("last_open_data_dir", str(Path.home())))
+        selected_path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Load & Run Prov",
+            default_dir,
+            "Workflow/PROV JSON (*.json *.prov.json)",
+        )
+        if not selected_path:
+            return
+
+        path = Path(selected_path).expanduser()
+        try:
+            raw_payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            self._show_status_message(f"Failed to load provenance file: {exc}", is_error=True)
+            return
+
+        workflow_payload = CFVMain._workflow_payload_from_provenance_document(raw_payload)
+        if workflow_payload is None:
+            self._show_status_message(
+                "Loaded file is not recognized as xconv workflow JSON or PROV-JSON.",
+                is_error=True,
+            )
+            return
+
+        operations_raw = workflow_payload.get("operations", [])
+        operations = operations_raw if isinstance(operations_raw, list) else []
+        if not operations:
+            self._show_status_message("No replayable operations found in provenance file.", is_error=True)
+            return
+
+        replay_sources: list[str] = []
+        for operation in operations:
+            if not isinstance(operation, dict):
+                continue
+            for source in self._source_files_for_replay_operation(operation):
+                if source not in replay_sources:
+                    replay_sources.append(source)
+
+        remote_builder = getattr(self, "_build_remote_open_requests_for_sources", None)
+        if callable(remote_builder):
+            remote_open_requests = remote_builder(replay_sources)
+        else:
+            remote_open_requests = CFVMain._build_remote_open_requests_for_sources(self, replay_sources)
+
+        if replay_sources:
+            mode_setter = getattr(self, "_set_file_open_mode", None)
+            if callable(mode_setter):
+                mode_setter("multi")
+            else:
+                self.file_open_mode = "multi"
+            self._loaded_file_paths = list(replay_sources)
+            refresh_menu = getattr(self, "_refresh_open_files_menu", None)
+            if callable(refresh_menu):
+                refresh_menu()
+
+        self._send_worker_control_task(
+            "REPLAY_FIELDS",
+            {
+                "operations": operations,
+                "remote_open_requests": remote_open_requests,
+            },
+        )
+        self._show_status_message(f"Running provenance workflow from {path.name} ({len(operations)} operation(s))...")
+
     def _field_identity_from_item(self, item: QListWidgetItem | None) -> str:
         """Return stable field identity text when available, else display text."""
         if item is None:
@@ -3240,8 +3359,6 @@ class CFVMain(CFVCore):
         filename = Path(file_path).name
         self.setWindowTitle(f"{self.base_window_title}: {filename}{remote_tag}")
 
-    def closeEvent(self, event: QCloseEvent) -> None:
-        """Ensure worker process is shut down cleanly when GUI exits."""
     def _shutdown_worker(self) -> None:
         """Shut down the worker process cleanly, suppressing the crash error signal."""
         if self.worker.state() == QProcess.NotRunning:

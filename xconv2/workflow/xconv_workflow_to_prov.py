@@ -55,7 +55,11 @@ def _source_qname(uri: str) -> str:
     return f"xconv:source_{abs(hash(Path(uri).as_posix()))}"
 
 
-def workflow_to_prov_json_dict(workflow: dict[str, object]) -> dict[str, object]:
+def workflow_to_prov_json_dict(
+    workflow: dict[str, object],
+    *,
+    source_uri_overrides: dict[str, str] | None = None,
+) -> dict[str, object]:
     """Convert xconv internal replay workflow JSON into a PROV-JSON mapping."""
     schema_version = int(workflow.get("schema_version", 1) or 1)
     session_id = str(workflow.get("session_id", "") or "")
@@ -126,16 +130,22 @@ def workflow_to_prov_json_dict(workflow: dict[str, object]) -> dict[str, object]
     prior_generated_ids: list[str] = []
 
     def _ensure_source_entity(uri: str) -> str:
-        entity_id = source_entities.get(uri)
+        effective_uri = uri
+        if isinstance(source_uri_overrides, dict):
+            override = source_uri_overrides.get(uri)
+            if isinstance(override, str) and override.strip():
+                effective_uri = override.strip()
+
+        entity_id = source_entities.get(effective_uri)
         if entity_id:
             return entity_id
-        entity_id = _source_qname(uri)
+        entity_id = _source_qname(effective_uri)
         entities[entity_id] = {
             "prov:type": "prov:Collection",
-            "prov:label": Path(uri).name if uri else "source",
-            "xconv:uri": uri,
+            "prov:label": Path(effective_uri).name if effective_uri else "source",
+            "xconv:uri": effective_uri,
         }
-        source_entities[uri] = entity_id
+        source_entities[effective_uri] = entity_id
         return entity_id
 
     for seq, operation in enumerate(operations):

@@ -56,3 +56,47 @@ def test_workflow_to_prov_json_embeds_session_and_workflow_blob() -> None:
     session_activity = activities["xconv:session_session-x"]
     assert session_activity["xconv:session_id"] == "session-x"
     assert isinstance(session_activity.get("xconv:workflow_json"), str)
+
+
+def test_workflow_to_prov_json_applies_source_uri_overrides_only_to_entities() -> None:
+    workflow = {
+        "schema_version": 1,
+        "session_id": "session-x",
+        "saved_at": "",
+        "operations": [
+            {
+                "kind": "unary_xy",
+                "field_index": 0,
+                "field_ref": {
+                    "identity": "tas",
+                    "source_file": "s3://bnl/CMIP6-test.nc",
+                    "generated": False,
+                    "occurrence": 1,
+                },
+                "operation": "grad",
+                "source_file": "s3://bnl/CMIP6-test.nc",
+            }
+        ],
+    }
+
+    prov_json = workflow_to_prov_json_dict(
+        workflow,
+        source_uri_overrides={
+            "s3://bnl/CMIP6-test.nc": "s3://object.example.org/bnl/CMIP6-test.nc",
+        },
+    )
+
+    entities = prov_json["entity"]
+    assert isinstance(entities, dict)
+    source_entities = [
+        attrs
+        for entity_id, attrs in entities.items()
+        if isinstance(entity_id, str)
+        and entity_id.startswith("xconv:source_")
+        and isinstance(attrs, dict)
+    ]
+    assert len(source_entities) == 1
+    assert source_entities[0]["xconv:uri"] == "s3://object.example.org/bnl/CMIP6-test.nc"
+
+    recovered = prov_json_dict_to_workflow(prov_json)
+    assert recovered == workflow
