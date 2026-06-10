@@ -18,12 +18,25 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install PlantUML
+      - name: Install Graphviz and Java
         run: |
           sudo apt-get update
-          sudo apt-get install -y plantuml
+          sudo apt-get install -y graphviz default-jre-headless curl
+
+      - name: Install latest PlantUML
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/plantuml.jar" \
+            "https://github.com/plantuml/plantuml/releases/latest/download/plantuml.jar"
+          cat > "$RUNNER_TEMP/plantuml" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          exec java -Djava.awt.headless=true -jar "$RUNNER_TEMP/plantuml.jar" "$@"
+          EOF
+          chmod +x "$RUNNER_TEMP/plantuml"
 
       - name: Regenerate UML SVG diagrams
+        env:
+          PLANTUML_BIN: ${{ runner.temp }}/plantuml
         run: ./tools/generate_uml_svgs.sh
 
       - name: Fail on out-of-sync UML SVGs
