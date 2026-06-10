@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from xconv2.aaa.aaa_config import get_locations
-from xconv2.cf_interface import (
+from xconv2.cf_interface.filtering import (
     BASIC_MOVING_OPERATIONS,
     BASIC_WINDOWS,
     CONVOLUTION_DOCS_URL,
