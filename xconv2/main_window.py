@@ -49,7 +49,6 @@ from .cf_interface import parse_coordinate_subspace_commands
 from .main_window_components import plot_ops as _plot_ops
 from .main_window_components import remote_auth_ops as _remote_auth_ops
 from .main_window_components import remote_flow_ops as _remote_flow_ops
-from .main_window_components import remote_ops as _remote_ops
 from .main_window_components import replay_ops as _replay_ops
 from .worker_message_router import WorkerMessageRouter
 # Remote-access helpers are imported lazily (inside the methods that use them)
@@ -538,7 +537,7 @@ class CFVMain(CFVCore):
 
     def _resolve_remote_uri(self, uri: str) -> tuple[dict[str, object] | None, str, str, bool]:
         """Resolve URI into (config, remote_path, host_alias, unknown_host)."""
-        return _remote_ops.resolve_remote_uri(
+        return _remote_flow_ops.resolve_remote_uri(
             self,
             uri,
             canonical_remote_uri=CFVCore._canonical_remote_uri,

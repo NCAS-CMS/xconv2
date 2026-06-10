@@ -1,18 +1,12 @@
-@startuml RemoteAccessModule
+@startuml RemoteAccessModuleCurrent
 skinparam classAttributeIconSize 0
 hide empty methods
 hide empty fields
-skinparam NoteBackgroundColor #FFFFE0
-skinparam NoteBorderColor black
 
 package "xconv2.remote_access" {
   class RemoteLoggingConfiguration {
-    level: int
-    trace_filesystem: bool
-    trace_file_io: bool
+    scope_levels: dict[str,int]
   }
-
-  
 
   class RemoteEntry {
     path: str
@@ -33,47 +27,36 @@ package "xconv2.remote_access" {
   }
 
   class RemoteAccessSession {
+    +list_entries(path)
+    +read_fields(descriptor, datasets, reader)
+    +close()
     +configure_logging(...)
     +logging_configuration()
-    +list_entries(path)
-    +read_fields(...)
-    +close()
   }
 
-  note left of RemoteAccessSession
-  Primary facade used by the worker.
-  Holds no network state itself;
-  it operates on a prepared filesystem.
-  end note
-
-  class _ConfiguredRemoteFileSystem
-  class _LoggingFileHandleProxy
-  class _XconvHostKeyPolicy
-
-  class "Descriptor + URI helpers" as DescriptorHelpers <<utility>>
-  class "Entry + dataset normalization" as NormalizationHelpers <<utility>>
-  class "Cache + logging wrappers" as CacheHelpers <<utility>>
-  class "Filesystem construction" as FilesystemHelpers <<utility>>
-
-  note right of FilesystemHelpers
-  build_remote_filesystem_spec()
-  create_filesystem()
-  _create_sftp_via_jump()
-end note
-
-  RemoteAccessSession --> RemoteLoggingConfiguration : shared runtime config
-  RemoteAccessSession --> RemoteEntry : returns
-  RemoteAccessSession ..> NormalizationHelpers : uses
-  DescriptorHelpers --> RemoteFilesystemSpec : build / parse
-  NormalizationHelpers --> RemoteEntry : normalize / filter
-  FilesystemHelpers --> RemoteFilesystemSpec : consumes
-  FilesystemHelpers ..> CacheHelpers : wraps
-  FilesystemHelpers ..> _XconvHostKeyPolicy : ProxyJump SSH
-  CacheHelpers ..> _ConfiguredRemoteFileSystem : memory cache defaults
-  CacheHelpers ..> _LoggingFileHandleProxy : file I/O tracing
+  class "Descriptor helpers" as DescriptorHelpers <<utility>>
+  class "Entry helpers" as EntryHelpers <<utility>>
+  class "Dataset normalization" as DatasetHelpers <<utility>>
+  class "Filesystem builders" as FilesystemHelpers <<utility>>
 }
 
+package "xconv2" {
+  class RemoteFileSystemFactory
+  class cache_utils <<module>>
+}
 
+RemoteAccessSession --> RemoteLoggingConfiguration
+RemoteAccessSession --> RemoteEntry : returns
+DescriptorHelpers --> RemoteFilesystemSpec
+EntryHelpers --> RemoteEntry
+FilesystemHelpers --> RemoteFilesystemSpec
+FilesystemHelpers ..> RemoteFileSystemFactory : create_filesystem(...)
+FilesystemHelpers ..> cache_utils : prune_disk_cache()\nparse_disk_expiry_seconds()
+DatasetHelpers ..> RemoteFilesystemSpec
 
+note right of FilesystemHelpers
+create_filesystem() applies disk cache pruning before
+building protocol-specific filesystems.
+end note
 
 @enduml

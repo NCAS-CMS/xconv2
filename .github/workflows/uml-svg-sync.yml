@@ -1,0 +1,37 @@
+name: UML SVG Sync Check
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  verify-uml-svgs:
+    name: Verify UML SVGs are up to date
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install PlantUML
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y plantuml
+
+      - name: Regenerate UML SVG diagrams
+        run: ./tools/generate_uml_svgs.sh
+
+      - name: Fail on out-of-sync UML SVGs
+        run: |
+          if [[ -n "$(git status --porcelain -- docs/uml/svg)" ]]; then
+            echo "UML SVG diagrams are out of sync with their PlantUML sources."
+            echo "Run ./tools/generate_uml_svgs.sh and commit the updated docs/uml/svg files."
+            git status --short -- docs/uml/svg
+            git diff -- docs/uml/svg || true
+            exit 1
+          fi

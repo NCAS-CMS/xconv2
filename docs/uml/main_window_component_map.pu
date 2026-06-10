@@ -1,0 +1,62 @@
+@startuml MainWindowComponentMap
+skinparam classAttributeIconSize 0
+hide empty methods
+hide empty fields
+left to right direction
+
+package xconv2 {
+
+
+package "main_window" {
+  class CFVMain {
+    _open_remote_from_config()
+    _open_remote_uri_direct()
+    _resolve_remote_uri()
+    _prepare_ssh_config_for_auth()
+    _field_ops_replay_last_operations()
+    _request_plot_task()
+  }
+}
+
+package "main_window_components" {
+  class plot_ops {
+    build_plot_context()
+    request_plot_task()
+  }
+
+  class remote_flow_ops {
+    resolve_remote_uri()
+    open_remote_from_config()
+    open_remote_uri_direct()
+    configure_remote_for_uri()
+    browse_remote()
+    choose_uris()
+  }
+
+  class remote_auth_ops {
+    with_cache_defaults()
+    prepare_ssh_config_for_auth()
+    maybe_retry_ssh_authentication()
+  }
+
+  class replay_ops {
+    record_replayable_operation()
+    field_ops_replay_last_operations()
+    file_ops_save_selected_provenance()
+    workflow_payload_from_provenance_document()
+  }
+}
+
+CFVMain ..> plot_ops
+CFVMain ..> remote_flow_ops
+CFVMain ..> remote_auth_ops
+CFVMain ..> replay_ops
+
+note right of CFVMain
+CFVMain keeps stable host method names and delegates
+feature logic to modules for readability and test seams.
+end note
+
+}
+
+@enduml

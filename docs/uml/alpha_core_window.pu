@@ -1,0 +1,95 @@
+@startuml CoreWindowCurrentClass
+skinparam classAttributeIconSize 0
+hide empty methods
+hide empty fields
+skinparam CircleCharacterFontColor black
+skinparam CircleBackgroundColor white
+skinparam NoteBackgroundColor #FFFFE0
+skinparam NoteBorderColor black
+skinparam ranksep 10
+
+package "xconv2" {
+  class CFVCore
+  class CFVMain
+  class WorkerMessageRouter
+  class WorkerStatusHandler
+
+  note top of CFVCore
+  Presentation-focused host:
+  - widget/layout composition
+  - menu + settings plumbing
+  - cache manager UI
+  end note
+
+  note top of CFVMain
+  Worker-backed orchestration host:
+  - submits worker tasks
+  - owns remote session state
+  - delegates specialist logic to
+    main_window_components modules
+  end note
+
+  package "main_window_components" {
+    class plot_ops
+    class remote_flow_ops
+    class remote_auth_ops
+    class replay_ops
+
+    plot_ops -[hidden]- remote_flow_ops
+    remote_flow_ops -[hidden]- remote_auth_ops
+    remote_auth_ops -[hidden]- replay_ops
+  }
+
+  package "ui" {
+    class MenuController
+    class SettingsStore
+    class SelectionController
+    class FieldMetadataController
+    class PlotViewController
+    class ContourOptionsController
+    class LineplotOptionsController
+    class VectorOptionsController
+
+    MenuController -[hidden]- SettingsStore
+    SettingsStore -[hidden]- SelectionController
+    SelectionController -[hidden]- FieldMetadataController
+    FieldMetadataController -[hidden]- PlotViewController
+    PlotViewController -[hidden]- ContourOptionsController
+    ContourOptionsController -[hidden]- LineplotOptionsController
+    LineplotOptionsController -[hidden]- VectorOptionsController
+  }
+
+  class "cf-worker\n(worker.py)" as Worker
+
+  note top of Worker
+  The worker process is a separate
+  Python process launched by CFVMain
+  via QProcess. It runs all the science
+  code using cf-python and cf-plot.
+  end note
+}
+
+CFVMain --|> CFVCore
+CFVMain ..> plot_ops
+CFVMain ..> remote_flow_ops
+CFVMain ..> remote_auth_ops
+CFVMain ..> replay_ops
+
+CFVMain <-> Worker : QProcess stdin/stdout protocol
+
+CFVCore o-- MenuController
+CFVCore o-- SettingsStore
+CFVCore o-- SelectionController
+CFVCore o-- FieldMetadataController
+CFVCore o-- PlotViewController
+CFVCore o-- ContourOptionsController
+CFVCore o-- LineplotOptionsController
+CFVCore o-- VectorOptionsController
+
+CFVMain o-- WorkerMessageRouter
+WorkerMessageRouter o-- WorkerStatusHandler
+
+Worker -[hidden]- WorkerMessageRouter
+CFVCore -[hidden]- plot_ops
+
+@enduml

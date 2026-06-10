@@ -1,5 +1,5 @@
 @startuml RemoteWorkerWarmupSequence
-title Remote Login and Navigation Sequence (Worker-Only Login)
+title Remote Login and Navigation Sequence (Current)
 
 actor User
 participant "CFVCore/CFVMain\n(UI process)" as UI
@@ -53,11 +53,11 @@ end
 User -> Nav : select file + Open
 Nav --> UI : selected_uri + selected_path
 UI -> Pipe : #TASK_KIND:REMOTE_OPEN
-UI -> Pipe : #TASK_PAYLOAD_B64:{session_id, descriptor_hash, descriptor, uri, path}
+UI -> Pipe : #TASK_PAYLOAD_B64:{session_id, descriptor_hash, descriptor, uri, paths[]}
 Pipe -> Worker : parse task
 Worker -> Pool : get(descriptor_hash) [reuse warm session]
 Pool --> Worker : session (guaranteed warm from navigation)
-Worker -> Worker : open/read metadata for uri
+Worker -> Worker : read_fields(descriptor, datasets)
 Worker -> Pipe : METADATA {field list payload}
 Pipe -> UI : populate field list
 Worker -> Pipe : REMOTE_OPEN_RESULT {ok=true, uri=...}
@@ -75,8 +75,8 @@ Pipe -> UI : status line
 note right of Pool
 Implemented pool policy:
 - Key by descriptor_hash
-- TTL idle eviction
-- LRU cap
+- TTL idle eviction (180s)
+- LRU cap (max 4 sessions)
 - Most-recent session_id wins
 end note
 

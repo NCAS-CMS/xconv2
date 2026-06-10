@@ -50,11 +50,29 @@ limited to the following:
 
 #### UML Diagrams
 
-- `docs/uml/alpha_core_window.puml`
+Rendered diagrams (GitHub-friendly):
+
+- `docs/uml/svg/CoreWindowCurrentClass.svg`
+- `docs/uml/svg/MainWindowComponentMap.svg`
+- `docs/uml/svg/CoreWindowGuiWorkerSignals.svg`
+- `docs/uml/svg/CoreWindowPhase3OptionsSequence.svg`
+- `docs/uml/svg/RemoteWorkerWarmupSequence.svg`
+- `docs/uml/svg/RemoteAccessModuleCurrent.svg`
+
+PlantUML sources:
+
+- `docs/uml/alpha_core_window.pu`
+- `docs/uml/main_window_component_map.pu`
 - `docs/uml/core_window_gui_worker_signals.puml`
 - `docs/uml/core_window_options_sequence.puml`
 - `docs/uml/remote_worker_warmup_sequence.puml`
 - `docs/uml/remote_access_module.puml`
+
+Regenerate SVGs after editing source diagrams:
+
+```bash
+./tools/generate_uml_svgs.sh
+```
 
 #### Architecture Notes
 
