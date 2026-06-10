@@ -43,41 +43,11 @@ from .cf_templates import (
 )
 from .core_window import CFVCore
 from .cf_interface import parse_coordinate_subspace_commands
-from .main_window_components.plot_ops import build_plot_context as _build_plot_context_helper
-from .main_window_components.plot_ops import request_plot_task as _request_plot_task_helper
-from .main_window_components.remote_flow_ops import browse_remote as _browse_remote_helper
-from .main_window_components.remote_flow_ops import choose_remote as _choose_remote_helper
-from .main_window_components.remote_flow_ops import choose_uris as _choose_uris_helper
-from .main_window_components.remote_flow_ops import configure_remote as _configure_remote_helper
-from .main_window_components.remote_flow_ops import configure_remote_for_uri as _configure_remote_for_uri_helper
-from .main_window_components.remote_flow_ops import make_worker_list_callback as _make_worker_list_callback_helper
-from .main_window_components.remote_flow_ops import open_recent_file as _open_recent_file_helper
-from .main_window_components.remote_flow_ops import open_remote_from_config as _open_remote_from_config_helper
-from .main_window_components.remote_flow_ops import open_remote_uri_direct as _open_remote_uri_direct_helper
-from .main_window_components.remote_flow_ops import open_uri_entry as _open_uri_entry_helper
-from .main_window_components.remote_auth_ops import clear_ssh_cached_secrets_for_config as _clear_ssh_cached_secrets_for_config_helper
-from .main_window_components.remote_auth_ops import is_ssh_auth_failure_message as _is_ssh_auth_failure_message_helper
-from .main_window_components.remote_auth_ops import maybe_retry_ssh_authentication as _maybe_retry_ssh_authentication_helper
-from .main_window_components.remote_auth_ops import parse_proxy_jump_target as _parse_proxy_jump_target_helper
-from .main_window_components.remote_auth_ops import prepare_ssh_config_for_auth as _prepare_ssh_config_for_auth_helper
-from .main_window_components.remote_auth_ops import probe_ssh_auth_methods as _probe_ssh_auth_methods_helper
-from .main_window_components.remote_auth_ops import prompt_ssh_secret as _prompt_ssh_secret_helper
-from .main_window_components.remote_auth_ops import resolve_ssh_alias as _resolve_ssh_alias_helper
-from .main_window_components.remote_auth_ops import validate_ssh_secret as _validate_ssh_secret_helper
-from .main_window_components.remote_auth_ops import with_cache_defaults as _with_cache_defaults_helper
-from .main_window_components.remote_ops import resolve_remote_uri as _resolve_remote_uri_helper
-from .main_window_components.replay_ops import build_remote_open_requests_for_sources as _build_remote_open_requests_for_sources_helper
-from .main_window_components.replay_ops import describe_replay_operation as _describe_replay_operation_helper
-from .main_window_components.replay_ops import field_ops_replay_last_operations as _field_ops_replay_last_operations_helper
-from .main_window_components.replay_ops import file_ops_save_selected_provenance as _file_ops_save_selected_provenance_helper
-from .main_window_components.replay_ops import input_load_and_run_prov as _input_load_and_run_prov_helper
-from .main_window_components.replay_ops import is_remote_source_uri as _is_remote_source_uri_helper
-from .main_window_components.replay_ops import json_safe_operation_payload as _json_safe_operation_payload_helper
-from .main_window_components.replay_ops import last_operations_path as _last_operations_path_helper
-from .main_window_components.replay_ops import load_last_operations_payload as _load_last_operations_payload_helper
-from .main_window_components.replay_ops import record_replayable_operation as _record_replayable_operation_helper
-from .main_window_components.replay_ops import source_files_for_replay_operation as _source_files_for_replay_operation_helper
-from .main_window_components.replay_ops import workflow_payload_from_provenance_document as _workflow_payload_from_provenance_document_helper
+from .main_window_components import plot_ops as _plot_ops
+from .main_window_components import remote_auth_ops as _remote_auth_ops
+from .main_window_components import remote_flow_ops as _remote_flow_ops
+from .main_window_components import remote_ops as _remote_ops
+from .main_window_components import replay_ops as _replay_ops
 from .worker_message_router import WorkerMessageRouter
 # Remote-access helpers are imported lazily (inside the methods that use them)
 # so that p5rem/paramiko are not loaded at GUI startup.
@@ -518,7 +488,7 @@ class CFVMain(CFVCore):
 
     def _open_remote_from_config(self, config: dict[str, object]) -> None:
         """Perform remote login once in the worker, then navigate via IPC using a nested QEventLoop."""
-        _open_remote_from_config_helper(
+        _remote_flow_ops.open_remote_from_config(
             self,
             config,
             with_cache_defaults_fn=lambda payload: CFVMain._with_cache_defaults(self, payload),
@@ -537,7 +507,7 @@ class CFVMain(CFVCore):
         host_alias: str,
     ) -> None:
         """Open a specific remote URI directly without launching the navigator dialog."""
-        _open_remote_uri_direct_helper(
+        _remote_flow_ops.open_remote_uri_direct(
             self,
             uri=uri,
             remote_path=remote_path,
@@ -551,7 +521,7 @@ class CFVMain(CFVCore):
 
     def _resolve_remote_uri(self, uri: str) -> tuple[dict[str, object] | None, str, str, bool]:
         """Resolve URI into (config, remote_path, host_alias, unknown_host)."""
-        return _resolve_remote_uri_helper(
+        return _remote_ops.resolve_remote_uri(
             self,
             uri,
             canonical_remote_uri=CFVCore._canonical_remote_uri,
@@ -559,11 +529,11 @@ class CFVMain(CFVCore):
 
     def _with_cache_defaults(self, config: dict[str, object]) -> dict[str, object]:
         """Attach persisted cache settings when a remote config omits cache."""
-        return _with_cache_defaults_helper(self, config)
+        return _remote_auth_ops.with_cache_defaults(self, config)
 
     def _configure_remote_for_uri(self, uri: str) -> None:
         """Open Configure Remote pre-populated for URI-driven add-new workflows."""
-        _configure_remote_for_uri_helper(
+        _remote_flow_ops.configure_remote_for_uri(
             self,
             uri,
             remote_configuration_dialog_cls=RemoteConfigurationDialog,
@@ -578,7 +548,7 @@ class CFVMain(CFVCore):
         timeout: float = 6.0,
     ) -> set[str] | None:
         """Probe SSH server auth methods quickly without waiting for filesystem auth timeout."""
-        return _probe_ssh_auth_methods_helper(
+        return _remote_auth_ops.probe_ssh_auth_methods(
             hostname,
             username,
             port=port,
@@ -595,7 +565,7 @@ class CFVMain(CFVCore):
         timeout: float = 6.0,
     ) -> bool | None:
         """Validate an SSH password/secret; returns None when validation is inconclusive."""
-        return _validate_ssh_secret_helper(
+        return _remote_auth_ops.validate_ssh_secret(
             hostname,
             username,
             secret,
@@ -606,12 +576,12 @@ class CFVMain(CFVCore):
     @staticmethod
     def _parse_proxy_jump_target(proxy_jump: str) -> tuple[str | None, str, int]:
         """Parse first ProxyJump hop into (user, host-or-alias, port)."""
-        return _parse_proxy_jump_target_helper(proxy_jump)
+        return _remote_auth_ops.parse_proxy_jump_target(proxy_jump)
 
     @staticmethod
     def _resolve_ssh_alias(alias: str) -> tuple[str, str | None]:
         """Resolve SSH config alias to concrete hostname/user when available."""
-        return _resolve_ssh_alias_helper(alias)
+        return _remote_auth_ops.resolve_ssh_alias(alias)
 
     def _prompt_ssh_secret(
         self,
@@ -620,7 +590,7 @@ class CFVMain(CFVCore):
         prompt: str,
     ) -> tuple[str, bool]:
         """Prompt the user for an SSH secret/response."""
-        return _prompt_ssh_secret_helper(
+        return _remote_auth_ops.prompt_ssh_secret(
             self,
             title=title,
             prompt=prompt,
@@ -630,7 +600,7 @@ class CFVMain(CFVCore):
 
     def _prepare_ssh_config_for_auth(self, config: dict[str, object]) -> dict[str, object] | None:
         """Inject transient SSH password credentials when preflight indicates a challenge."""
-        return _prepare_ssh_config_for_auth_helper(
+        return _remote_auth_ops.prepare_ssh_config_for_auth(
             self,
             config,
             default_probe_ssh_auth_methods_fn=CFVMain._probe_ssh_auth_methods,
@@ -644,11 +614,11 @@ class CFVMain(CFVCore):
     @staticmethod
     def _is_ssh_auth_failure_message(message: str) -> bool:
         """Return True when a worker prepare failure message looks like SSH auth failure."""
-        return _is_ssh_auth_failure_message_helper(message)
+        return _remote_auth_ops.is_ssh_auth_failure_message(message)
 
     def _clear_ssh_cached_secrets_for_config(self, config: dict[str, object]) -> None:
         """Forget cached SSH secrets for target and bastion hosts in a config."""
-        _clear_ssh_cached_secrets_for_config_helper(
+        _remote_auth_ops.clear_ssh_cached_secrets_for_config(
             self,
             config,
             parse_proxy_jump_target_fn=CFVMain._parse_proxy_jump_target,
@@ -657,7 +627,7 @@ class CFVMain(CFVCore):
 
     def _maybe_retry_ssh_authentication(self, config: dict[str, object], failure_message: str) -> bool:
         """Offer auth retry for SSH prepare failures that look like authentication problems."""
-        return _maybe_retry_ssh_authentication_helper(
+        return _remote_auth_ops.maybe_retry_ssh_authentication(
             self,
             config,
             failure_message,
@@ -667,7 +637,7 @@ class CFVMain(CFVCore):
 
     def _open_uri_entry(self, uri: str, *, from_uri_dialog: bool) -> None:
         """Open a URI from user input or recent list."""
-        _open_uri_entry_helper(
+        _remote_flow_ops.open_uri_entry(
             self,
             uri,
             from_uri_dialog=from_uri_dialog,
@@ -677,14 +647,14 @@ class CFVMain(CFVCore):
 
     def _configure_remote(self) -> None:
         """Open the full remote configuration dialog non-modally; Open proceeds to worker-backed navigation."""
-        _configure_remote_helper(
+        _remote_flow_ops.configure_remote(
             self,
             remote_configuration_dialog_cls=RemoteConfigurationDialog,
         )
 
     def _choose_remote(self) -> None:
         """Open using existing short names via a streamlined protocol picker dialog."""
-        _choose_remote_helper(
+        _remote_flow_ops.choose_remote(
             self,
             remote_open_dialog_cls=RemoteOpenDialog,
             with_cache_defaults_fn=lambda payload: CFVMain._with_cache_defaults(self, payload),
@@ -698,7 +668,7 @@ class CFVMain(CFVCore):
         previous tree state.  A "New Remote..." button in the navigator lets the user
         switch to a different remote at any time.
         """
-        _browse_remote_helper(
+        _remote_flow_ops.browse_remote(
             self,
             qdialog_accepted_value=QDialog.Accepted,
             qmessagebox_cls=QMessageBox,
@@ -706,14 +676,14 @@ class CFVMain(CFVCore):
 
     def _choose_uris(self) -> None:
         """Show URI dialog and open supported URIs directly through the worker."""
-        _choose_uris_helper(
+        _remote_flow_ops.choose_uris(
             self,
             open_uri_dialog_cls=OpenURIDialog,
         )
 
     def _open_recent_file(self, file_path: str) -> None:
         """Open a recent entry, routing remote URIs through URI resolution flow."""
-        _open_recent_file_helper(
+        _remote_flow_ops.open_recent_file(
             self,
             file_path,
             super_open_recent_file=super()._open_recent_file,
@@ -721,7 +691,7 @@ class CFVMain(CFVCore):
 
     def _make_worker_list_callback(self):
         """Return a callable that lists a remote directory via worker IPC using a nested QEventLoop."""
-        return _make_worker_list_callback_helper(
+        return _remote_flow_ops.make_worker_list_callback(
             self,
             qeventloop_cls=QEventLoop,
         )
@@ -735,19 +705,19 @@ class CFVMain(CFVCore):
     @staticmethod
     def _json_safe_operation_payload(value: object) -> object:
         """Return a JSON-compatible copy of operation payload data."""
-        return _json_safe_operation_payload_helper(value)
+        return _replay_ops.json_safe_operation_payload(value)
 
     def _last_operations_path(self) -> Path:
         """Return path to the replayable operations history file."""
-        return _last_operations_path_helper()
+        return _replay_ops.last_operations_path()
 
     def _load_last_operations_payload(self) -> dict[str, object]:
         """Load replay payload from disk, returning an empty schema when absent/invalid."""
-        return _load_last_operations_payload_helper(self)
+        return _replay_ops.load_last_operations_payload(self)
 
     def _record_replayable_operation(self, operation: dict[str, object]) -> None:
         """Append one replayable field operation to disk."""
-        _record_replayable_operation_helper(self, operation)
+        _replay_ops.record_replayable_operation(self, operation)
 
     def _worker_code_for_replay_operation(self, operation: dict[str, object]) -> str | None:
         """Build worker task code for one replayable operation payload."""
@@ -835,15 +805,15 @@ class CFVMain(CFVCore):
 
     def _describe_replay_operation(self, operation: dict[str, object]) -> str:
         """Build a short, user-facing description for one replayable operation."""
-        return _describe_replay_operation_helper(operation)
+        return _replay_ops.describe_replay_operation(operation)
 
     def _source_files_for_replay_operation(self, operation: dict[str, object]) -> list[str]:
         """Return ordered source-file hints associated with one replay operation."""
-        return _source_files_for_replay_operation_helper(operation)
+        return _replay_ops.source_files_for_replay_operation(operation)
 
     @staticmethod
     def _is_remote_source_uri(uri: str) -> bool:
-        return _is_remote_source_uri_helper(uri)
+        return _replay_ops.is_remote_source_uri(uri)
 
     def _open_remote_uri_for_replay_sync(self, uri: str) -> None:
         """Open one remote URI via the normal remote-control path and wait for REMOTE_OPEN_RESULT."""
@@ -1015,14 +985,14 @@ class CFVMain(CFVCore):
 
     def _field_ops_replay_last_operations(self) -> None:
         """Replay persisted field operations by dispatching a worker control task."""
-        _field_ops_replay_last_operations_helper(
+        _replay_ops.field_ops_replay_last_operations(
             self,
             replay_dialog_cls=ReplayOperationsDialog,
         )
 
     def _build_remote_open_requests_for_sources(self, sources: list[str]) -> list[dict[str, object]]:
         """Build worker remote-open descriptors for a list of replay/provenance sources."""
-        return _build_remote_open_requests_for_sources_helper(
+        return _replay_ops.build_remote_open_requests_for_sources(
             self,
             sources,
             is_remote_source_uri_fn=CFVMain._is_remote_source_uri,
@@ -1031,7 +1001,7 @@ class CFVMain(CFVCore):
 
     def _file_ops_save_selected_provenance(self) -> None:
         """Save field-specific upstream provenance for selected fields."""
-        _file_ops_save_selected_provenance_helper(
+        _replay_ops.file_ops_save_selected_provenance(
             self,
             file_dialog_cls=QFileDialog,
         )
@@ -1039,11 +1009,11 @@ class CFVMain(CFVCore):
     @staticmethod
     def _workflow_payload_from_provenance_document(payload: object) -> dict[str, object] | None:
         """Normalize either internal workflow JSON or PROV-JSON into replay workflow payload."""
-        return _workflow_payload_from_provenance_document_helper(payload)
+        return _replay_ops.workflow_payload_from_provenance_document(payload)
 
     def _input_load_and_run_prov(self) -> None:
         """Load internal/PROV workflow JSON and replay it through worker control messaging."""
-        _input_load_and_run_prov_helper(
+        _replay_ops.input_load_and_run_prov(
             self,
             file_dialog_cls=QFileDialog,
             workflow_payload_from_provenance_document=CFVMain._workflow_payload_from_provenance_document,
@@ -1612,7 +1582,7 @@ class CFVMain(CFVCore):
 
     def _build_plot_context(self) -> tuple[dict[str, tuple[object, object]], dict[str, str], str] | None:
         """Collect current selections/collapse state and infer plot type."""
-        return _build_plot_context_helper(
+        return _plot_ops.build_plot_context(
             self,
             parse_coordinate_subspace_commands_fn=parse_coordinate_subspace_commands,
         )
@@ -1625,7 +1595,7 @@ class CFVMain(CFVCore):
         emit_image_override: bool | None = None,
     ) -> None:
         """Build and send a plot/data task with optional save targets."""
-        _request_plot_task_helper(
+        _plot_ops.request_plot_task(
             self,
             save_code_path=save_code_path,
             save_plot_path=save_plot_path,
