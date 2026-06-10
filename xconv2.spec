@@ -286,6 +286,9 @@ if sys.platform == "darwin":
             # PyInstaller defaults this to True for windowed apps, which
             # produces a background-agent app with no Dock icon.
             "LSUIElement": False,
+            # Must be False for normal Finder double-click behavior.
+            # True makes macOS treat the app as background-only.
+            "LSBackgroundOnly": False,
             # Human-readable name shown in Dock / About This Mac.
             "CFBundleName": "xconv2",
             "CFBundleDisplayName": "xconv2",

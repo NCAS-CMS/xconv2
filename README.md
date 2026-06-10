@@ -1,6 +1,6 @@
 # xconv2
 
-xconv2 provides (or will provide) a graphical interface to local and remote weather and climate data.  It is a replacement for the venerable [xconv](https://ncas-cms.github.io/xconv-doc/html/index.html) package that has been supported by NCAS CMS for decades.
+xconv2 provides a graphical interface to local and remote weather and climate data.  It is a replacement for the venerable [xconv](https://ncas-cms.github.io/xconv-doc/html/index.html) package that has been supported by NCAS CMS for decades.
 
 <table>
   <tr>
@@ -20,18 +20,21 @@ xconv2 provides (or will provide) a graphical interface to local and remote weat
 We intend to release this as a standalone executable for linux and macos, but for the moment you should use a Python 3.12 (or later) environment with
 udunits2 and cartopy installed (from conda-forge), then you can pip install from the source using one of these:
 
-### Alpha
+### Beta V3
 
-We intend to release this as a standalone application (an "app") eventually, but meanwhile, you will likely need a dedicated (or up-to-date) mamba environment with a Python 3.12 (or later) environment with `cartopy` and `udunits2` installed, then you can pip install from PyPI. Here's an example:
+We haven't quite got a conda package up yet, so meanwhile the following should work:
+
 
 ```bash
-conda create -n xconv2
+git clone https://github.com/NCAS-CMS/xconv2.git
+cd xconv2
+mamba env create -f environment.yml
 conda activate xconv2
-mamba install -c conda-forge pip cartopy udunits2
-pip install xconv2
+
 ```
 
-and then you should have `xconv2` available on your command line in that environment.  You could of course pip install into your own environment, but you will need to ensure it has cartopy and udunits2 in it (both via conda or mamba).
+and then you should have `xconv2` available on your command line in that environment.  You could of course pip install into your own environment, but you will need to ensure it has the
+appropriate dependencies.
 
 ### Conda Environments
 
@@ -78,6 +81,10 @@ Regenerate SVGs after editing source diagrams:
 
 - `docs/architecture/core_window_refactor.md`
 - `docs/architecture/remote_navigation_and_worker_warmup.md`
+
+#### Packaging and Build Notes
+
+- `docs/mac-app.md`
 
 ## License
 
