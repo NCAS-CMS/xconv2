@@ -225,8 +225,8 @@ def test_on_file_selected_multi_mode_accumulates_paths() -> None:
     CFVMain.on_file_selected(host, "/tmp/new.nc")
 
     assert host._loaded_file_paths == ["/tmp/old.nc", "/tmp/new.nc"]
-    assert host.single_calls == []
-    assert host.multi_calls == [["/tmp/old.nc", "/tmp/new.nc"]]
+    assert host.single_calls == [("/tmp/new.nc", {"clear_existing": False, "append_metadata": True})]
+    assert host.multi_calls == []
     assert host.titles[-1] == "xconv2 (test): 2 files"
 
 
@@ -253,9 +253,22 @@ def test_on_file_selected_multi_mode_first_file_clears_placeholder() -> None:
     CFVMain.on_file_selected(host, "/tmp/first.nc")
 
     assert host._loaded_file_paths == ["/tmp/first.nc"]
-    assert host.single_calls == []
-    assert host.multi_calls == [["/tmp/first.nc"]]
+    assert host.single_calls == [("/tmp/first.nc", {"clear_existing": True, "append_metadata": False})]
+    assert host.multi_calls == []
     assert host.titles[-1] == "xconv2 (test): 1 files"
+
+
+def test_load_selected_files_preserves_remote_uri_slashes() -> None:
+    """Mixed source lists should keep URI forms intact when building worker task code."""
+    window = _DummyWindow()
+    file_paths = ["https://example.org/archive/test1.nc", "~/mock-b.nc"]
+
+    CFVMain._load_selected_files(window, file_paths)
+
+    code = window.sent_tasks[0]
+    assert "https://example.org/archive/test1.nc" in code
+    assert "https:/example.org/archive/test1.nc" not in code
+    assert str(Path("~/mock-b.nc").expanduser()) in code
 
 
 def test_load_selected_file_append_builds_worker_append_task() -> None:
@@ -631,6 +644,78 @@ def test_field_ops_grad_requires_exactly_one_selected_field() -> None:
 
     assert window.sent_tasks == []
     assert window.status_messages[-1] == ("Grad requires exactly one selected field.", True)
+
+
+def test_run_filter_field_operation_builds_worker_task_for_selected_field() -> None:
+    class _DummyOpsWindow:
+        def __init__(self) -> None:
+            self._pending_field_op_source = None
+            self._pending_binary_operation_name = None
+            self.field_list_widget = _DummyFieldListWidgetForOps(_DummyFieldItem("/tmp/a.nc"))
+            self.sent_tasks: list[tuple[str, bool]] = []
+            self.status_messages: list[str] = []
+            self.replay_operations: list[dict[str, object]] = []
+
+        def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
+            _ = save_code_path
+            self.sent_tasks.append((code, emit_image))
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            _ = is_error
+            self.status_messages.append(message)
+
+        def _record_replayable_operation(self, operation: dict[str, object]) -> None:
+            self.replay_operations.append(operation)
+
+    window = _DummyOpsWindow()
+    config = {
+        "method": "convolution",
+        "window": "boxcar",
+        "axis": "X",
+        "size": 3,
+    }
+
+    CFVMain._run_filter_field_operation(window, 0, config)
+
+    assert window._pending_field_op_source == "/tmp/a.nc"
+    assert len(window.sent_tasks) == 1
+    code, emit_image = window.sent_tasks[0]
+    assert emit_image is False
+    assert "append_filter_field_operation" in code
+    assert "_cfview_filter_config" in code
+    assert window.replay_operations == [
+        {
+            "kind": "filter",
+            "field_index": 0,
+            "field_ref": None,
+            "selected_indices": [0],
+            "config": config,
+            "source_file": "/tmp/a.nc",
+        }
+    ]
+
+
+def test_worker_code_for_replay_operation_supports_filter_kind() -> None:
+    class _DummyReplayWindow:
+        def _resolve_field_reference_index(self, _field_ref: dict[str, object]) -> int | None:
+            return None
+
+    operation = {
+        "kind": "filter",
+        "field_index": 2,
+        "config": {
+            "method": "moving_window",
+            "moving_method": "mean",
+            "axis": "Y",
+            "size": 5,
+        },
+    }
+
+    code = CFVMain._worker_code_for_replay_operation(_DummyReplayWindow(), operation)
+
+    assert isinstance(code, str)
+    assert "append_filter_field_operation" in code
+    assert "_cfview_field_index = 2" in code
 
 
 def test_field_ops_add_bounds_builds_worker_task_for_selected_field() -> None:

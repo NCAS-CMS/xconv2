@@ -105,6 +105,14 @@ def describe_replay_operation(operation: dict[str, object]) -> str:
         idx_b = operation.get("index_b")
         return f"Maths {op} on field indices {idx_a} and {idx_b}"
 
+    if kind == "filter":
+        idx = operation.get("field_index")
+        config = operation.get("config")
+        method = "unknown"
+        if isinstance(config, dict):
+            method = str(config.get("method", "unknown"))
+        return f"Maths filter ({method}) on field index {idx}"
+
     if kind == "apply_selection":
         idx = operation.get("field_index")
         return f"Apply Selection on field index {idx}"
@@ -126,7 +134,7 @@ def source_files_for_replay_operation(operation: dict[str, object]) -> list[str]
     """Return ordered source-file hints associated with one replay operation."""
     kind = str(operation.get("kind", "")).strip().lower()
 
-    if kind in {"unary_xy", "apply_selection"}:
+    if kind in {"unary_xy", "apply_selection", "filter"}:
         source_file = operation.get("source_file")
         if isinstance(source_file, str) and source_file.strip():
             return [source_file.strip()]

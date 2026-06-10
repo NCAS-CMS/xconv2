@@ -140,13 +140,9 @@ class MenuController:
         laplacian_action.triggered.connect(self.host._field_ops_maths_laplacian)
         maths_menu.addAction(laplacian_action)
 
-        convolution_action = QAction("Convolution", self.host)
-        convolution_action.triggered.connect(self.host._field_ops_maths_convolution)
-        maths_menu.addAction(convolution_action)
-
-        moving_window_action = QAction("Moving Window", self.host)
-        moving_window_action.triggered.connect(self.host._field_ops_maths_moving_window)
-        maths_menu.addAction(moving_window_action)
+        filter_action = QAction("Filter", self.host)
+        filter_action.triggered.connect(self.host._field_ops_maths_filter)
+        maths_menu.addAction(filter_action)
 
         file_ops_menu = menu_bar.addMenu("Output")
         save_selected_action = QAction("Save Selected", self.host)

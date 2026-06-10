@@ -7,6 +7,18 @@ from xconv2.cf_interface.plot_layout_helpers import (
 )
 
 from .maths import append_binary_field_operation, append_unary_xy_field_operation
+from .filtering import (
+    BASIC_MOVING_OPERATIONS,
+    BASIC_WINDOWS,
+    CONVOLUTION_DOCS_URL,
+    MOVING_WINDOW_DOCS_URL,
+    WINDOW_DOCS_URL,
+    WINDOW_MODES,
+    available_filter_axes,
+    append_filter_field_operation,
+    apply_moving_window_to_field,
+    apply_window_to_field,
+)
 from .metadata_operations import (
     add_dimension_coordinate_bounds,
     append_selection_field_operation,
@@ -38,6 +50,16 @@ __all__ = [
     "append_selection_field_operation",
     "append_unary_xy_field_operation",
     "append_binary_field_operation",
+    "append_filter_field_operation",
+    "apply_window_to_field",
+    "apply_moving_window_to_field",
+    "BASIC_WINDOWS",
+    "BASIC_MOVING_OPERATIONS",
+    "WINDOW_MODES",
+    "WINDOW_DOCS_URL",
+    "MOVING_WINDOW_DOCS_URL",
+    "CONVOLUTION_DOCS_URL",
+    "available_filter_axes",
     "XconvRegridder",
     "regrid_from_config",
     "get_data_for_plotting",

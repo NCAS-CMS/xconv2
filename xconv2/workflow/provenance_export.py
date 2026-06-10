@@ -198,6 +198,22 @@ def build_fields_provenance_slice(
             else:
                 added = 0
 
+        elif kind == "filter":
+            resolved_index = resolve_field_reference_index(
+                fields,
+                provenance,
+                operation.get("field_ref") if isinstance(operation.get("field_ref"), dict) else {},
+                operation.get("field_index"),
+            )
+            config = operation.get("config")
+            if isinstance(resolved_index, int) and isinstance(config, dict):
+                input_indices = [resolved_index]
+                before = len(fields)
+                metadata_rows = cf_interface.append_filter_field_operation(fields, resolved_index, config)
+                added = max(0, len(fields) - before)
+            else:
+                added = 0
+
         elif kind == "apply_selection":
             resolved_index = resolve_field_reference_index(
                 fields,

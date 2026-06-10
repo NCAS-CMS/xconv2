@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import base64
+import pickle
 
 from xconv2.worker_message_router import WorkerMessageRouter, WorkerStatusHandler
 
@@ -50,6 +52,8 @@ class _DummyStatusHost:
 
 @dataclass
 class _DummyRouterHost(_DummyStatusHost):
+    _pending_filter_axes_result: list[str] | None = None
+    _pending_filter_axes_loop: _DummyLoop | None = None
     pass
 
 
@@ -109,3 +113,16 @@ def test_router_delegates_status_lines_to_status_handler() -> None:
 
     assert host.saved_statuses == ["Task Complete (2.50s)"]
     assert host.shown_statuses == [("Task Complete (2.50s)", False)]
+
+
+def test_router_handles_filter_axes_payload_and_quits_loop() -> None:
+    loop = _DummyLoop()
+    host = _DummyRouterHost(_pending_filter_axes_loop=loop)
+    router = WorkerMessageRouter(host)
+
+    payload = base64.b64encode(pickle.dumps(["t", "x"])).decode("ascii")
+    router.handle_line(f"FILTER_AXES:{payload}")
+
+    assert host._pending_filter_axes_result == ["T", "X"]
+    assert host._pending_filter_axes_loop is None
+    assert loop.quit_called is True

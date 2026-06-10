@@ -31,7 +31,7 @@ def _source_files_for_operation(operation: dict[str, object]) -> list[str]:
     """Extract ordered source-file hints from one replay operation."""
     kind = str(operation.get("kind", "")).strip().lower()
 
-    if kind in {"unary_xy", "apply_selection"}:
+    if kind in {"unary_xy", "apply_selection", "filter"}:
         source_file = operation.get("source_file")
         if isinstance(source_file, str) and source_file.strip():
             return [source_file.strip()]

@@ -432,7 +432,7 @@ def _replay_source_files_for_operation(operation: dict[str, Any]) -> list[str]:
     """Return ordered source URIs/paths referenced by one replay operation."""
     kind = str(operation.get("kind", "")).strip().lower()
 
-    if kind in {"unary_xy", "apply_selection"}:
+    if kind in {"unary_xy", "apply_selection", "filter"}:
         source_file = operation.get("source_file")
         if isinstance(source_file, str) and source_file.strip():
             return [source_file.strip()]
@@ -635,6 +635,21 @@ def _handle_replay_fields_task(payload: dict[str, Any]) -> None:
                     resolved_b,
                     operation_key,
                     source_files=source_files,
+                )
+
+        elif kind == "filter":
+            resolved_index = _replay_resolve_field_reference_index(
+                fields,
+                provenance,
+                operation.get("field_ref") if isinstance(operation.get("field_ref"), dict) else {},
+                operation.get("field_index"),
+            )
+            config = operation.get("config")
+            if isinstance(resolved_index, int) and isinstance(config, dict):
+                metadata_rows = cf_interface.append_filter_field_operation(
+                    fields,
+                    resolved_index,
+                    config,
                 )
 
         elif kind == "apply_selection":

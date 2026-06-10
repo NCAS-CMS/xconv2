@@ -89,6 +89,35 @@ def unary_xy_field_operation(index: int, operation: str) -> str:
     ).lstrip()
 
 
+def filter_field_operation(index: int, config: dict[str, object]) -> str:
+    """Generate worker code for configurable field filtering and metadata append."""
+    return textwrap.dedent(
+        f"""
+        _cfview_field_index = {index}
+        _cfview_filter_config = {config!r}
+        metadata_rows = append_filter_field_operation(f, _cfview_field_index, _cfview_filter_config)
+        send_to_gui('METADATA_APPEND', metadata_rows) #omit4save
+        _cfview_added_count = len(metadata_rows)
+        _cfview_first_id = metadata_rows[0].get('identity', 'unknown') if metadata_rows else 'unknown'
+        _cfview_method = str(_cfview_filter_config.get('method', 'unknown'))
+        send_to_gui(
+            f"STATUS:Added {{_cfview_added_count}} field(s) via filter ({{_cfview_method}}); first: {{_cfview_first_id}}"
+        ) #omit4save
+        """
+    ).lstrip()
+
+
+def filter_axes_for_field(index: int) -> str:
+    """Generate worker code that reports valid filter axes for one field."""
+    return textwrap.dedent(
+        f"""
+        _cfview_field_index = {index}
+        _cfview_filter_axes = available_filter_axes(f[_cfview_field_index])
+        send_to_gui('FILTER_AXES', _cfview_filter_axes) #omit4save
+        """
+    ).lstrip()
+
+
 def binary_field_operation(
     index_a: int,
     index_b: int,

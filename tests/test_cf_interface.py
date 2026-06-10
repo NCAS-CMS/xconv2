@@ -13,6 +13,8 @@ from xconv2.cf_templates import (
 )
 
 from xconv2.cf_interface import (
+    append_filter_field_operation,
+    available_filter_axes,
     add_dimension_coordinate_bounds,
     append_selection_field_operation,
     append_binary_field_operation,
@@ -216,6 +218,65 @@ def test_append_unary_xy_field_operation_appends_grad_row(monkeypatch: pytest.Mo
     assert len(rows) == 1
     assert "identity" in rows[0]
     assert seen["kwargs"] == {"radius": "earth"}
+
+
+def test_append_filter_field_operation_appends_convolution_result() -> None:
+    fields = [cf.example_field(0)]
+
+    rows = append_filter_field_operation(
+        fields,
+        0,
+        {
+            "method": "convolution",
+            "window": "boxcar",
+            "axis": "X",
+            "size": 3,
+        },
+    )
+
+    assert len(fields) == 2
+    assert isinstance(rows, list)
+    assert len(rows) == 1
+    assert isinstance(rows[0], dict)
+    history = str(fields[-1].get_property("history", ""))
+    assert "filter method=convolution" in history
+
+
+def test_append_filter_field_operation_appends_moving_window_result() -> None:
+    fields = [cf.example_field(0)]
+
+    rows = append_filter_field_operation(
+        fields,
+        0,
+        {
+            "method": "moving_window",
+            "moving_method": "mean",
+            "axis": "X",
+            "size": 3,
+            "mode": "nearest",
+        },
+    )
+
+    assert len(fields) == 2
+    assert isinstance(rows, list)
+    assert len(rows) == 1
+    assert isinstance(rows[0], dict)
+    history = str(fields[-1].get_property("history", ""))
+    assert "filter method=moving_window" in history
+
+
+def test_available_filter_axes_excludes_singletons_and_includes_time_axis() -> None:
+    field = cf.example_field(2)
+    axes = available_filter_axes(field)
+
+    assert axes == ["T", "Y", "X"]
+
+
+def test_available_filter_axes_excludes_singleton_time_axis() -> None:
+    field = cf.example_field(0)
+    axes = available_filter_axes(field)
+
+    assert axes == ["Y", "X"]
 
 
 def test_append_unary_xy_field_operation_applies_laplacian_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

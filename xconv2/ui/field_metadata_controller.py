@@ -6,12 +6,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Mapping, Sequence
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QTextCursor
 from PySide6.QtWidgets import (
     QDialog,
     QHeaderView,
     QHBoxLayout,
     QListWidgetItem,
+    QPlainTextEdit,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -100,6 +101,18 @@ class FieldMetadataController:
         header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         header.setStretchLastSection(False)
 
+        table.itemClicked.connect(
+            lambda item: self._show_full_property_text(
+                parent=dialog,
+                title=(
+                    f"Property Key: {selected_field}"
+                    if item.column() == 0
+                    else f"Property Value: {selected_field}"
+                ),
+                content=item.text(),
+            )
+        )
+
         controls_row = QHBoxLayout()
         controls_row.addStretch(1)
         save_button = QPushButton("Save CSV...")
@@ -114,6 +127,29 @@ class FieldMetadataController:
         layout.addWidget(table)
         layout.addLayout(controls_row)
         dialog.setWindowModality(Qt.ApplicationModal)
+        dialog.open()
+
+    def _show_full_property_text(self, *, parent: QWidget, title: str, content: str) -> None:
+        """Show a read-only popup containing full property text."""
+        dialog = QDialog(parent)
+        dialog.setWindowTitle(title)
+        dialog.resize(760, 420)
+
+        layout = QVBoxLayout(dialog)
+        viewer = QPlainTextEdit(dialog)
+        viewer.setReadOnly(True)
+        viewer.setLineWrapMode(QPlainTextEdit.NoWrap)
+        viewer.setPlainText(content)
+        viewer.moveCursor(QTextCursor.MoveOperation.Start)
+
+        controls_row = QHBoxLayout()
+        controls_row.addStretch(1)
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.accept)
+        controls_row.addWidget(close_button)
+
+        layout.addWidget(viewer)
+        layout.addLayout(controls_row)
         dialog.open()
 
     def save_properties_to_csv(

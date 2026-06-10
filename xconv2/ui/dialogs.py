@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 import shlex
@@ -35,6 +36,16 @@ from PySide6.QtWidgets import (
 )
 
 from xconv2.aaa.aaa_config import get_locations
+from xconv2.cf_interface import (
+    BASIC_MOVING_OPERATIONS,
+    BASIC_WINDOWS,
+    CONVOLUTION_DOCS_URL,
+    MOVING_WINDOW_DOCS_URL,
+    WINDOW_DOCS_URL,
+    WINDOW_MODES,
+    apply_moving_window_to_field,
+    apply_window_to_field,
+)
 from xconv2.tooltips import REMOTE_CONFIGURATION
 # p5rem is imported lazily inside _discover_ssh_remote_python to avoid loading
 # paramiko at GUI startup.
@@ -2496,4 +2507,142 @@ class RegridDialog(QDialog):
             return
 
         QMessageBox.information(self, "Regrid configuration", json.dumps(config, indent=2))
+
+
+class FilterDialog(QDialog):
+    """Dialog for configuring and running one field filtering operation."""
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        *,
+        field_label: str,
+        available_axes: list[str],
+        on_submit: Callable[[dict[str, object]], None] | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setWindowTitle("Filter")
+        self.setMinimumWidth(560)
+
+        self._on_submit = on_submit
+
+        layout = QVBoxLayout(self)
+
+        header = QLabel(f"Configure filter for field: {field_label}")
+        header.setWordWrap(True)
+        header.setStyleSheet("font-weight: 600;")
+        layout.addWidget(header)
+
+        form = QFormLayout()
+        self._method_combo = QComboBox()
+        self._method_combo.addItem("Convolution", "convolution")
+        self._method_combo.addItem("Moving Window", "moving_window")
+        form.addRow("Method:", self._method_combo)
+
+        self._axis_combo = QComboBox()
+        self._axis_combo.addItems(available_axes)
+        form.addRow("Axis:", self._axis_combo)
+
+        self._size_spin = QSpinBox()
+        self._size_spin.setRange(1, 999)
+        self._size_spin.setValue(3)
+        form.addRow("Size:", self._size_spin)
+        layout.addLayout(form)
+
+        self._method_doc_label = QLabel()
+        self._method_doc_label.setWordWrap(True)
+        self._method_doc_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self._method_doc_label.setOpenExternalLinks(True)
+        layout.addWidget(self._method_doc_label)
+
+        self._method_behavior_label = QLabel()
+        self._method_behavior_label.setWordWrap(True)
+        self._method_behavior_label.setStyleSheet("color: #444; font-style: italic;")
+        layout.addWidget(self._method_behavior_label)
+
+        self._detail_stack = QStackedWidget()
+        layout.addWidget(self._detail_stack)
+
+        convolution_page = QWidget()
+        convolution_form = QFormLayout(convolution_page)
+        self._window_combo = QComboBox()
+        self._window_combo.addItems(list(BASIC_WINDOWS))
+        convolution_form.addRow("Window:", self._window_combo)
+        self._detail_stack.addWidget(convolution_page)
+
+        moving_page = QWidget()
+        moving_form = QFormLayout(moving_page)
+        self._moving_method_combo = QComboBox()
+        self._moving_method_combo.addItems(list(BASIC_MOVING_OPERATIONS))
+        moving_form.addRow("Operation:", self._moving_method_combo)
+        self._moving_mode_combo = QComboBox()
+        self._moving_mode_combo.addItem("(none)", "")
+        for mode in WINDOW_MODES:
+            self._moving_mode_combo.addItem(mode, mode)
+        moving_form.addRow("Mode:", self._moving_mode_combo)
+        self._weights_checkbox = QCheckBox("Use weights")
+        moving_form.addRow("Weights:", self._weights_checkbox)
+        self._detail_stack.addWidget(moving_page)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._method_combo.currentIndexChanged.connect(self._sync_method_ui)
+        self._sync_method_ui()
+
+    def _sync_method_ui(self) -> None:
+        method = str(self._method_combo.currentData())
+        if method == "moving_window":
+            self._detail_stack.setCurrentIndex(1)
+            doc = inspect.getdoc(apply_moving_window_to_field) or ""
+            docs = (
+                f'<a href="{MOVING_WINDOW_DOCS_URL}">cf-python moving_window docs</a>'
+            )
+            behavior = (
+                "Behavior: moving window does not update coordinate bounds; "
+                "it should record the operation in cell methods."
+            )
+        else:
+            self._detail_stack.setCurrentIndex(0)
+            doc = inspect.getdoc(apply_window_to_field) or ""
+            docs = (
+                f'<a href="{CONVOLUTION_DOCS_URL}">cf-python convolution_filter docs</a> | '
+                f'<a href="{WINDOW_DOCS_URL}">scipy.signal windows docs</a>'
+            )
+            behavior = (
+                "Behavior: convolution updates relevant coordinate bounds to reflect "
+                "filter width."
+            )
+
+        self._method_doc_label.setText(f"<b>Description</b><br>{doc}<br><br><b>References</b><br>{docs}")
+        self._method_behavior_label.setText(behavior)
+
+    def _on_accept(self) -> None:
+        method = str(self._method_combo.currentData())
+        config: dict[str, object] = {
+            "method": method,
+            "axis": self._axis_combo.currentText(),
+            "size": int(self._size_spin.value()),
+        }
+
+        if method == "moving_window":
+            config["moving_method"] = self._moving_method_combo.currentText()
+            mode = str(self._moving_mode_combo.currentData() or "")
+            if mode:
+                config["mode"] = mode
+            if self._weights_checkbox.isChecked():
+                config["weights"] = True
+        else:
+            config["window"] = self._window_combo.currentText()
+
+        if self._on_submit is not None:
+            self._on_submit(config)
+            self.accept()
+            return
+
+        QMessageBox.information(self, "Filter configuration", json.dumps(config, indent=2))
+        self.accept()
 

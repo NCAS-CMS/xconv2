@@ -31,6 +31,17 @@ def test_workflow_to_prov_json_roundtrip_preserves_internal_payload() -> None:
                 "operation": "difference_ab",
                 "source_files": ["/tmp/a.nc", "/tmp/b.nc"],
             },
+            {
+                "kind": "filter",
+                "field_index": 2,
+                "config": {
+                    "method": "convolution",
+                    "window": "hann",
+                    "axis": "X",
+                    "size": 5,
+                },
+                "source_file": "/tmp/b.nc",
+            },
         ],
     }
 

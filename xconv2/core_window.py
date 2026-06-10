@@ -2065,13 +2065,9 @@ class CFVCore(QMainWindow):
         """Placeholder action for Field Ops -> Maths -> Laplacian."""
         self._show_not_implemented_dialog("Field Ops: Maths -> Laplacian")
 
-    def _field_ops_maths_convolution(self) -> None:
-        """Placeholder action for Field Ops -> Maths -> Convolution."""
-        self._show_not_implemented_dialog("Field Ops: Maths -> Convolution")
-
-    def _field_ops_maths_moving_window(self) -> None:
-        """Placeholder action for Field Ops -> Maths -> Moving Window."""
-        self._show_not_implemented_dialog("Field Ops: Maths -> Moving Window")
+    def _field_ops_maths_filter(self) -> None:
+        """Placeholder action for Field Ops -> Maths -> Filter."""
+        self._show_not_implemented_dialog("Field Ops: Maths -> Filter")
 
     def _file_ops_save_selected(self) -> None:
         """Placeholder action for File Ops -> Save Selected."""

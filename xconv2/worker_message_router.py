@@ -132,6 +132,8 @@ class WorkerMessageRouter:
             self._handle_coord(line)
         elif line.startswith("CONTOUR_RANGE:"):
             self._handle_contour_range(line)
+        elif line.startswith("FILTER_AXES:"):
+            self._handle_filter_axes(line)
 
     def _handle_remote_status(self, line: str) -> None:
         payload = self._decode_payload(line)
@@ -330,3 +332,14 @@ class WorkerMessageRouter:
             )
         else:
             logger.warning("Unexpected CONTOUR_RANGE payload type: %s", type(payload).__name__)
+
+    def _handle_filter_axes(self, line: str) -> None:
+        payload = self._decode_payload(line)
+        if isinstance(payload, list):
+            self._host._pending_filter_axes_result = [str(item).strip().upper() for item in payload if str(item).strip()]
+            loop = getattr(self._host, "_pending_filter_axes_loop", None)
+            if loop is not None:
+                self._host._pending_filter_axes_loop = None
+                loop.quit()
+        else:
+            logger.warning("Unexpected FILTER_AXES payload type: %s", type(payload).__name__)

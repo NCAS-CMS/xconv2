@@ -19,6 +19,7 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 import sys
+from urllib.parse import urlparse
 
 import psutil
 
@@ -39,6 +40,8 @@ from .cf_templates import (
     remove_selected_fields,
     save_data_from_selection,
     save_selected_fields_task,
+    filter_axes_for_field,
+    filter_field_operation,
     unary_xy_field_operation,
 )
 from .core_window import CFVCore
@@ -52,6 +55,7 @@ from .worker_message_router import WorkerMessageRouter
 # Remote-access helpers are imported lazily (inside the methods that use them)
 # so that p5rem/paramiko are not loaded at GUI startup.
 from .ui.dialogs import (
+    FilterDialog,
     OpenURIDialog,
     ReplayOperationsDialog,
     RegridDialog,
@@ -64,6 +68,14 @@ if TYPE_CHECKING:
     from .ui.remote_file_navigator import RemoteLoginLogDialog
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_source_path_or_uri(source: str) -> str:
+    """Return expanded local paths while preserving URI forms."""
+    text = str(source).strip()
+    if urlparse(text).scheme:
+        return CFVCore._canonical_remote_uri(text)
+    return str(Path(text).expanduser())
 
 def _get_worker_path() -> str:
     """Find the worker executable, supporting both dev and frozen (PyInstaller) environments.
@@ -191,17 +203,22 @@ class CFVMain(CFVCore):
 
     def on_file_selected(self, file_path: str) -> None:
         """Handle file selection by requesting worker metadata."""
-        normalized_path = str(Path(file_path).expanduser())
+        normalized_path = _normalize_source_path_or_uri(file_path)
         if getattr(self, "file_open_mode", "single") == "multi":
             if normalized_path in self._loaded_file_paths:
                 self._show_status_message(f"File already loaded: {normalized_path}")
                 return
 
+            had_existing_sources = bool(self._loaded_file_paths)
             self._loaded_file_paths.append(normalized_path)
             refresh_menu = getattr(self, "_refresh_open_files_menu", None)
             if callable(refresh_menu):
                 refresh_menu()
-            self._load_selected_files(list(self._loaded_file_paths))
+            self._load_selected_file(
+                normalized_path,
+                clear_existing=not had_existing_sources,
+                append_metadata=had_existing_sources,
+            )
             self.setWindowTitle(f"{self.base_window_title}: {len(self._loaded_file_paths)} files")
             return
 
@@ -213,7 +230,7 @@ class CFVMain(CFVCore):
 
     def on_files_selected(self, file_paths: list[str]) -> None:
         """Handle multi-file selection by requesting combined worker metadata."""
-        normalized = [str(Path(path).expanduser()) for path in file_paths]
+        normalized = [_normalize_source_path_or_uri(path) for path in file_paths]
         if not normalized:
             return
 
@@ -424,7 +441,7 @@ class CFVMain(CFVCore):
         if not file_paths:
             return
 
-        expanded_paths = [str(Path(path).expanduser()) for path in file_paths]
+        expanded_paths = [_normalize_source_path_or_uri(path) for path in file_paths]
         self._clear_loaded_data_views()
         self._pending_metadata_append = False
         self._pending_metadata_source = None
@@ -734,6 +751,19 @@ class CFVMain(CFVCore):
                 resolved_index = field_index
             if isinstance(resolved_index, int) and isinstance(operation_key, str) and operation_key.strip():
                 return unary_xy_field_operation(resolved_index, operation_key)
+            return None
+
+        if kind == "filter":
+            field_index = operation.get("field_index")
+            field_ref = operation.get("field_ref")
+            config = operation.get("config")
+            resolved_index = None
+            if isinstance(field_ref, dict):
+                resolved_index = CFVMain._resolve_field_reference_index(self, field_ref)
+            if resolved_index is None and isinstance(field_index, int):
+                resolved_index = field_index
+            if isinstance(resolved_index, int) and isinstance(config, dict):
+                return filter_field_operation(resolved_index, config)
             return None
 
         if kind == "binary":
@@ -1317,6 +1347,93 @@ class CFVMain(CFVCore):
     def _field_ops_maths_laplacian(self) -> None:
         """Create and append laplacian field via cf.Field.laplacian_xy."""
         self._run_unary_xy_field_operation("Laplacian", "laplacian")
+
+    def _field_ops_maths_filter(self) -> None:
+        """Open filter options dialog for one selected field."""
+        field_index = self._selected_field_index_for_operation("Filter")
+        if field_index is None:
+            return
+
+        axes = self._request_filter_axes_for_field(field_index)
+        if not axes:
+            self._show_status_message(
+                "No filterable axes are available for this field (all candidate axes have size 1).",
+                is_error=True,
+            )
+            return
+
+        selected_item = self.field_list_widget.item(field_index)
+        field_label = self._field_identity_from_item(selected_item) or f"field index {field_index}"
+
+        dialog = FilterDialog(
+            self,
+            field_label=field_label,
+            available_axes=axes,
+            on_submit=lambda config: self._run_filter_field_operation(field_index, config),
+        )
+        dialog.show()
+
+    def _request_filter_axes_for_field(self, field_index: int) -> list[str]:
+        """Request filterable non-singleton axes from worker for one field index."""
+        self._pending_filter_axes_result = None
+        self._pending_filter_axes_loop = QEventLoop()
+        loop = self._pending_filter_axes_loop
+
+        timeout = QTimer(self)
+        timeout.setSingleShot(True)
+        timeout.timeout.connect(loop.quit)
+        timeout.start(8000)
+
+        code = filter_axes_for_field(field_index)
+        self._send_worker_task(code, emit_image=False)
+
+        if self._pending_filter_axes_loop is not None:
+            loop.exec()
+
+        if timeout.isActive():
+            timeout.stop()
+        self._pending_filter_axes_loop = None
+
+        axes_raw = self._pending_filter_axes_result
+        self._pending_filter_axes_result = None
+        if not isinstance(axes_raw, list):
+            return []
+
+        ordered: list[str] = []
+        for axis in ("T", "Z", "Y", "X"):
+            if axis in axes_raw and axis not in ordered:
+                ordered.append(axis)
+        return ordered
+
+    def _run_filter_field_operation(self, field_index: int, config: dict[str, object]) -> None:
+        """Dispatch configurable filter operation using one selected field."""
+        self._pending_binary_operation_name = None
+
+        source_file = None
+        selected_item = self.field_list_widget.item(field_index)
+        if selected_item is not None:
+            raw_source = selected_item.data(Qt.UserRole + 2)
+            if isinstance(raw_source, str) and raw_source.strip():
+                source_file = raw_source
+        self._pending_field_op_source = source_file
+
+        method = str(config.get("method", "filter")).strip() or "filter"
+        self._show_status_message(f"Running Filter ({method}) on field index {field_index}...")
+        logger.info("Running filter op method=%s on field index %d", method, field_index)
+
+        self._record_replayable_operation(
+            {
+                "kind": "filter",
+                "field_index": field_index,
+                "field_ref": CFVMain._field_reference_for_index(self, field_index),
+                "selected_indices": [field_index],
+                "config": config,
+                "source_file": source_file,
+            }
+        )
+
+        code = filter_field_operation(field_index, config)
+        self._send_worker_task(code, emit_image=False)
 
     def _remove_selected_fields(self) -> None:
         """Remove selected fields from both the UI list and worker field list."""
