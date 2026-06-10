@@ -32,6 +32,14 @@ Expected successful ending includes:
 - `Building BUNDLE ... completed successfully`
 - `Build complete! The results are available in: .../dist`
 
+
+Testing can use (from repo root):
+
+```
+alias xconv2dist='./dist/xconv2.app/Contents/MacOS/xconv2'
+QT_DEBUG_PLUGINS=1 xconv2dist 2>&1 | tee /tmp/xconv2-app-debug.log
+```
+
 ## Build artifacts
 
 After a successful build, expect:

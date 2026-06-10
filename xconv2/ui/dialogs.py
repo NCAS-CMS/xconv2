@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import json
 from pathlib import Path
 import shlex
@@ -36,19 +35,35 @@ from PySide6.QtWidgets import (
 )
 
 from xconv2.aaa.aaa_config import get_locations
-from xconv2.cf_interface.filtering import (
-    BASIC_MOVING_OPERATIONS,
-    BASIC_WINDOWS,
-    CONVOLUTION_DOCS_URL,
-    MOVING_WINDOW_DOCS_URL,
-    WINDOW_DOCS_URL,
-    WINDOW_MODES,
-    apply_moving_window_to_field,
-    apply_window_to_field,
-)
 from xconv2.tooltips import REMOTE_CONFIGURATION
 # p5rem is imported lazily inside _discover_ssh_remote_python to avoid loading
 # paramiko at GUI startup.
+
+BASIC_MOVING_OPERATIONS = ("mean", "sum", "integral")
+WINDOW_MODES = ("reflect", "constant", "nearest", "mirror", "wrap")
+BASIC_WINDOWS = (
+    "barthann",
+    "bartlett",
+    "blackman",
+    "boxcar",
+    "flattop",
+    "hamming",
+    "hann",
+    "parzen",
+    "taylor",
+    "triang",
+    "tukey",
+)
+
+WINDOW_DOCS_URL = "https://docs.scipy.org/doc/scipy/reference/signal.windows.html#module-scipy.signal.windows"
+MOVING_WINDOW_DOCS_URL = (
+    "https://ncas-cms.github.io/cf-python/method/cf.Field.moving_window.html#cf.Field.moving_window"
+)
+CONVOLUTION_DOCS_URL = (
+    "https://ncas-cms.github.io/cf-python/method/cf.Field.convolution_filter.html#cf.Field.convolution_filter"
+)
+APPLY_WINDOW_DOC_SUMMARY = "Apply a scipy window via cf-python convolution_filter along one axis."
+APPLY_MOVING_WINDOW_DOC_SUMMARY = "Apply a moving-window reduction using cf-python moving_window."
 
 
 class InfoMessageDialog(QDialog):
@@ -2597,7 +2612,7 @@ class FilterDialog(QDialog):
         method = str(self._method_combo.currentData())
         if method == "moving_window":
             self._detail_stack.setCurrentIndex(1)
-            doc = inspect.getdoc(apply_moving_window_to_field) or ""
+            doc = APPLY_MOVING_WINDOW_DOC_SUMMARY
             docs = (
                 f'<a href="{MOVING_WINDOW_DOCS_URL}">cf-python moving_window docs</a>'
             )
@@ -2607,7 +2622,7 @@ class FilterDialog(QDialog):
             )
         else:
             self._detail_stack.setCurrentIndex(0)
-            doc = inspect.getdoc(apply_window_to_field) or ""
+            doc = APPLY_WINDOW_DOC_SUMMARY
             docs = (
                 f'<a href="{CONVOLUTION_DOCS_URL}">cf-python convolution_filter docs</a> | '
                 f'<a href="{WINDOW_DOCS_URL}">scipy.signal windows docs</a>'

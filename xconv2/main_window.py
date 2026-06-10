@@ -45,7 +45,7 @@ from .cf_templates import (
     unary_xy_field_operation,
 )
 from .core_window import CFVCore
-from .cf_interface import parse_coordinate_subspace_commands
+from .coordinate_subspace import parse_coordinate_subspace_commands
 from .main_window_components import plot_ops as _plot_ops
 from .main_window_components import remote_auth_ops as _remote_auth_ops
 from .main_window_components import remote_flow_ops as _remote_flow_ops
