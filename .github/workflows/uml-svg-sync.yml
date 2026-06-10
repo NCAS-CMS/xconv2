@@ -18,28 +18,63 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Detect UML source changes
+        id: changed
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base_ref="origin/${{ github.base_ref }}"
+            git fetch origin "${{ github.base_ref }}" --depth=1
+            diff_range="$base_ref...${{ github.sha }}"
+          else
+            before_sha="${{ github.event.before }}"
+            if [[ -z "$before_sha" || "$before_sha" == "0000000000000000000000000000000000000000" ]]; then
+              echo "uml_sources_changed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            diff_range="$before_sha...${{ github.sha }}"
+          fi
+
+          changed_files="$(git diff --name-only "$diff_range" || true)"
+          if echo "$changed_files" | grep -Eq '^docs/uml/.*\.(pu|puml)$'; then
+            echo "uml_sources_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "uml_sources_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip note
+        if: steps.changed.outputs.uml_sources_changed != 'true'
+        run: echo "No .pu/.puml source changes detected; skipping UML SVG sync check."
+
       - name: Install Graphviz and Java
+        if: steps.changed.outputs.uml_sources_changed == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y graphviz default-jre-headless curl
 
       - name: Install latest PlantUML
+        if: steps.changed.outputs.uml_sources_changed == 'true'
         run: |
-          curl -fsSL -o "$RUNNER_TEMP/plantuml.jar" \
+          jar_path="$RUNNER_TEMP/plantuml.jar"
+          bin_path="$RUNNER_TEMP/plantuml"
+
+          curl -fsSL -o "$jar_path" \
             "https://github.com/plantuml/plantuml/releases/latest/download/plantuml.jar"
-          cat > "$RUNNER_TEMP/plantuml" <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          exec java -Djava.awt.headless=true -jar "$RUNNER_TEMP/plantuml.jar" "$@"
-          EOF
-          chmod +x "$RUNNER_TEMP/plantuml"
+          printf '%s\n' '#!/usr/bin/env bash' > "$bin_path"
+          printf '%s\n' 'set -euo pipefail' >> "$bin_path"
+          printf 'exec java -Djava.awt.headless=true -jar %q "$@"\n' "$jar_path" >> "$bin_path"
+          chmod +x "$bin_path"
+          "$bin_path" -version
 
       - name: Regenerate UML SVG diagrams
+        if: steps.changed.outputs.uml_sources_changed == 'true'
         env:
           PLANTUML_BIN: ${{ runner.temp }}/plantuml
         run: ./tools/generate_uml_svgs.sh
 
       - name: Fail on out-of-sync UML SVGs
+        if: steps.changed.outputs.uml_sources_changed == 'true'
         run: |
           if [[ -n "$(git status --porcelain -- docs/uml/svg)" ]]; then
             echo "UML SVG diagrams are out of sync with their PlantUML sources."
