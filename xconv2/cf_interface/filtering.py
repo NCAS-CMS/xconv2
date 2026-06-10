@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import logging
 
+from .metadata_operations import field_info
+
 logger = logging.getLogger(__name__)
 
 BASIC_MOVING_OPERATIONS = ("mean", "sum", "integral")
@@ -173,8 +175,6 @@ def append_filter_field_operation(
     filtered_field.set_property("history", history)
 
     fields.append(filtered_field)
-    from .metadata_operations import field_info
-
     rows = field_info([filtered_field])
     logger.debug("Appended filtered field method=%s axis=%s size=%s", method, axis, size)
     return rows

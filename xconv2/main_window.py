@@ -13,31 +13,68 @@ from collections import deque
 import json
 import logging
 import os
-import pickle
-import socket
+import re
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from typing import TYPE_CHECKING
 import sys
+from urllib.parse import urlparse
 
-from PySide6.QtCore import QEventLoop, QProcess, QTimer
-from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QApplication, QDialog, QInputDialog, QLineEdit, QListWidgetItem, QMessageBox
+import psutil
+
+from PySide6.QtCore import QEventLoop, QProcess, QTimer, Qt
+from PySide6.QtGui import QCloseEvent, QFontDatabase
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QLabel, QInputDialog, QLineEdit, QListWidgetItem, QMessageBox
 
 from .cf_templates import (
+    add_dimension_coordinate_bounds,
+    build_vector_overplot_command,
+    apply_selection_field_operation,
+    binary_field_operation,
     contour_range_from_selection,
     coordinate_list,
     field_list,
     plot_from_selection,
+    regrid_fields_operation,
+    remove_selected_fields,
     save_data_from_selection,
+    save_selected_fields_task,
+    filter_axes_for_field,
+    filter_field_operation,
+    unary_xy_field_operation,
 )
 from .core_window import CFVCore
+from .cf_interface import parse_coordinate_subspace_commands
+from .main_window_components import plot_ops as _plot_ops
+from .main_window_components import remote_auth_ops as _remote_auth_ops
+from .main_window_components import remote_flow_ops as _remote_flow_ops
+from .main_window_components import replay_ops as _replay_ops
+from .worker_message_router import WorkerMessageRouter
 # Remote-access helpers are imported lazily (inside the methods that use them)
 # so that p5rem/paramiko are not loaded at GUI startup.
-from .ui.dialogs import OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog
+from .ui.dialogs import (
+    FilterDialog,
+    OpenURIDialog,
+    ReplayOperationsDialog,
+    RegridDialog,
+    RemoteConfigurationDialog,
+    RemoteOpenDialog,
+    SaveSelectedFieldsDialog,
+)
+
+if TYPE_CHECKING:
+    from .ui.remote_file_navigator import RemoteLoginLogDialog
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_source_path_or_uri(source: str) -> str:
+    """Return expanded local paths while preserving URI forms."""
+    text = str(source).strip()
+    if urlparse(text).scheme:
+        return CFVCore._canonical_remote_uri(text)
+    return str(Path(text).expanduser())
 
 def _get_worker_path() -> str:
     """Find the worker executable, supporting both dev and frozen (PyInstaller) environments.
@@ -91,6 +128,13 @@ class CFVMain(CFVCore):
 
     def __init__(self) -> None:
         super().__init__()
+        self._memory_status_label = QLabel("Mem: --")
+        fixed_font = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+        fixed_font.setPointSize(10)
+        self._memory_status_label.setFont(fixed_font)
+        self._memory_status_timer = QTimer(self)
+        self._memory_status_timer.setInterval(1000)
+        self._memory_status_timer.timeout.connect(self._update_memory_status)
         self._plot_request_in_flight = False
         self._plot_request_expects_image = False
         self._suppress_stale_error_status = False
@@ -106,8 +150,22 @@ class CFVMain(CFVCore):
         self._pending_prepare_log_dialog: RemoteLoginLogDialog | None = None
         self._pending_list_loop: QEventLoop | None = None
         self._pending_list_result: dict | None = None
+        self._pending_remote_open_loop: QEventLoop | None = None
+        self._pending_remote_open_result: dict[str, object] | None = None
+        self._pending_metadata_loop: QEventLoop | None = None
+        self._pending_metadata_received: bool = False
+        self._pending_metadata_error: str = ""
         self._ssh_session_passwords: dict[str, str] = {}
+        self._selected_field_indices: list[int] = []
+        self._loaded_file_paths: list[str] = []
+        self._pending_metadata_append: bool = False
+        self._pending_metadata_source: str | None = None
+        self._pending_reselect_field_index: int | None = None
+        self._pending_field_op_source: str | None = None
+        self._pending_binary_operation_name: str | None = None
         self._shutting_down: bool = False
+        self._replay_session_id: str = str(uuid.uuid4())
+        self._worker_output_router = WorkerMessageRouter(self, main_cls=CFVMain)
 
         self.worker = QProcess()
         self.worker.readyReadStandardOutput.connect(self.handle_worker_output)
@@ -135,24 +193,119 @@ class CFVMain(CFVCore):
             return
         self.worker.start(_worker_bin)
         logger.info("Started worker process: %s", self.worker.program())
+        self.status.addPermanentWidget(self._memory_status_label)
+        self._update_memory_status()
+        self._memory_status_timer.start()
         # Show an initialisation indicator immediately after the first paint so
         # the user knows the worker is loading even before it sends STATUS:.
         QTimer.singleShot(0, lambda: self._show_status_message("Initialising worker…"))
 
     def on_file_selected(self, file_path: str) -> None:
         """Handle file selection by requesting worker metadata."""
-        self._load_selected_file(file_path)
+        normalized_path = _normalize_source_path_or_uri(file_path)
+        if getattr(self, "file_open_mode", "single") == "multi":
+            if normalized_path in self._loaded_file_paths:
+                self._show_status_message(f"File already loaded: {normalized_path}")
+                return
+
+            had_existing_sources = bool(self._loaded_file_paths)
+            self._loaded_file_paths.append(normalized_path)
+            refresh_menu = getattr(self, "_refresh_open_files_menu", None)
+            if callable(refresh_menu):
+                refresh_menu()
+            self._load_selected_file(
+                normalized_path,
+                clear_existing=not had_existing_sources,
+                append_metadata=had_existing_sources,
+            )
+            self.setWindowTitle(f"{self.base_window_title}: {len(self._loaded_file_paths)} files")
+            return
+
+        self._loaded_file_paths = [normalized_path]
+        refresh_menu = getattr(self, "_refresh_open_files_menu", None)
+        if callable(refresh_menu):
+            refresh_menu()
+        self._load_selected_file(normalized_path)
+
+    def on_files_selected(self, file_paths: list[str]) -> None:
+        """Handle multi-file selection by requesting combined worker metadata."""
+        normalized = [_normalize_source_path_or_uri(path) for path in file_paths]
+        if not normalized:
+            return
+
+        if getattr(self, "file_open_mode", "single") == "multi":
+            for path in normalized:
+                if path not in self._loaded_file_paths:
+                    self._loaded_file_paths.append(path)
+
+            refresh_menu = getattr(self, "_refresh_open_files_menu", None)
+            if callable(refresh_menu):
+                refresh_menu()
+
+            self._load_selected_files(list(self._loaded_file_paths))
+            self.setWindowTitle(f"{self.base_window_title}: {len(self._loaded_file_paths)} files")
+            return
+
+        first = normalized[0]
+        self._loaded_file_paths = [first]
+        refresh_menu = getattr(self, "_refresh_open_files_menu", None)
+        if callable(refresh_menu):
+            refresh_menu()
+        self._load_selected_file(first)
 
     def on_field_clicked(self, item: QListWidgetItem) -> None:
         """Show selection details and request slider coordinates for the field."""
         super().on_field_clicked(item)
+
+        selected_items: list[QListWidgetItem] = []
+        selected_items_fn = getattr(self.field_list_widget, "selectedItems", None)
+        if callable(selected_items_fn):
+            selected_items = list(selected_items_fn())
+
+        if len(selected_items) > 1:
+            self._set_selection_panel_mode("multi")
+            self._selected_field_indices = [
+                idx for idx in (self.field_list_widget.row(x) for x in selected_items) if idx >= 0
+            ]
+            self.build_dynamic_sliders({})
+            self._show_status_message(
+                f"{len(selected_items)} fields selected. Enter coordinate bounds commands for multi-field operations."
+            )
+            return
+
+        self._set_selection_panel_mode("single")
         self._reset_ui_for_new_field_selection()
 
         field_index = self.field_list_widget.row(item)
         if field_index < 0:
             return
 
+        self._selected_field_indices = [field_index]
         self._request_coordinates_for_field(field_index, show_status=False)
+
+    def on_field_selection_changed(self) -> None:
+        """Track selected field indices to support mode-specific selection behavior."""
+        super().on_field_selection_changed()
+        selected_items = self.field_list_widget.selectedItems()
+        self._selected_field_indices = [
+            idx for idx in (self.field_list_widget.row(item) for item in selected_items) if idx >= 0
+        ]
+        if len(self._selected_field_indices) > 1:
+            self._set_selection_panel_mode("multi")
+
+    def _on_coordinate_bounds_input_changed(self) -> None:
+        """Validate command-based coordinate bounds as the user edits input."""
+        text = self._coordinate_subspace_command_text()
+        if not text:
+            return
+
+        try:
+            parse_coordinate_subspace_commands(text)
+        except ValueError as exc:
+            self._show_status_message(str(exc), is_error=True)
+            return
+
+        self._show_status_message("Coordinate bounds commands parsed successfully.")
 
     def _reset_ui_for_new_field_selection(self) -> None:
         """Clear stale error/loading UI state before handling a fresh field selection."""
@@ -167,190 +320,18 @@ class CFVMain(CFVCore):
 
     def handle_worker_output(self) -> None:
         """Process worker stdout messages and route updates to UI."""
+        router = getattr(self, "_worker_output_router", None)
+        if router is None:
+            router = WorkerMessageRouter(self, main_cls=CFVMain)
+            self._worker_output_router = router
+
         while self.worker.canReadLine():
             line = self.worker.readLine().data().decode().strip()
             if not line:
                 continue
 
             logger.debug("Worker stdout line: %s", line)
-
-            if line.startswith("REMOTE_STATUS:"):
-                raw_payload = line.split(":", 1)[1]
-                payload = pickle.loads(base64.b64decode(raw_payload))
-                if not isinstance(payload, dict):
-                    logger.warning("Unexpected REMOTE_STATUS payload type: %s", type(payload).__name__)
-                    continue
-
-                phase = str(payload.get("phase", ""))
-                message = str(payload.get("message") or f"Remote worker phase: {phase}")
-                is_error = phase == "failed"
-                self._show_status_message(message, is_error=is_error)
-
-                log_dialog = getattr(self, "_pending_prepare_log_dialog", None)
-                if log_dialog is not None:
-                    log_dialog.append_line(message)
-                    if phase == "failed":
-                        log_dialog.mark_failed("")
-                        self._pending_prepare_failure_message = message
-
-                if phase in ("ready", "failed"):
-                    loop = getattr(self, "_pending_prepare_loop", None)
-                    if loop is not None:
-                        self._pending_prepare_loop_ok = phase == "ready"
-                        self._pending_prepare_loop = None
-                        loop.quit()
-
-            elif line.startswith("REMOTE_LIST_RESULT:"):
-                raw_payload = line.split(":", 1)[1]
-                result = pickle.loads(base64.b64decode(raw_payload))
-                if isinstance(result, dict):
-                    self._pending_list_result = result
-                    loop = getattr(self, "_pending_list_loop", None)
-                    if loop is not None:
-                        self._pending_list_loop = None
-                        loop.quit()
-                else:
-                    logger.warning("Unexpected REMOTE_LIST_RESULT payload type: %s", type(result).__name__)
-
-            elif line.startswith("REMOTE_OPEN_RESULT:"):
-                raw_payload = line.split(":", 1)[1]
-                payload = pickle.loads(base64.b64decode(raw_payload))
-                if not isinstance(payload, dict):
-                    logger.warning("Unexpected REMOTE_OPEN_RESULT payload type: %s", type(payload).__name__)
-                    continue
-
-                if payload.get("ok"):
-                    uri = str(payload.get("uri", ""))
-                    if uri:
-                        self._set_window_title_for_file(uri)
-                        self._show_status_message(f"Loaded remote file: {uri}")
-                else:
-                    error = str(payload.get("error") or "Remote open failed")
-                    self._show_status_message(error, is_error=True)
-
-            elif line.startswith("STATUS:"):
-                status_text = line.split(":", 1)[1]
-                display_status_text = status_text
-                is_error_status = status_text.startswith("Error -")
-
-                if status_text == "Task Complete":
-                    elapsed = CFVMain._complete_pending_worker_task(self, consume=True)
-                    if elapsed is not None:
-                        display_status_text = f"Task Complete ({elapsed:.2f}s)"
-                elif is_error_status:
-                    CFVMain._complete_pending_worker_task(self, consume=True)
-
-                # Ignore delayed worker errors from a previous task right after field reselection.
-                if self._suppress_stale_error_status and is_error_status and not self._plot_request_in_flight:
-                    logger.debug("Ignoring stale worker error status after field reset: %s", status_text)
-                    continue
-
-                self._show_status_message(
-                    display_status_text,
-                    is_error=is_error_status,
-                )
-
-                is_plot_error = self._plot_request_in_flight and is_error_status
-                should_finish = False
-                if is_plot_error:
-                    should_finish = True
-                elif (
-                    self._plot_request_in_flight
-                    and status_text == "Task Complete"
-                    and not self._plot_request_expects_image
-                ):
-                    should_finish = True
-
-                if is_plot_error:
-                    self._clear_plot_canvas("Plot failed.")
-
-                if should_finish:
-                    self._plot_request_in_flight = False
-                    self._plot_request_expects_image = False
-                    self._set_plot_loading(False)
-
-            elif line.startswith("METADATA:"):
-                raw_payload = line.split(":", 1)[1]
-                metadata = pickle.loads(base64.b64decode(raw_payload))
-                if isinstance(metadata, list):
-                    if not all(isinstance(row, dict) for row in metadata):
-                        logger.warning(
-                            "Malformed METADATA payload: expected list of dicts, got mixed types"
-                        )
-                        self._show_status_message(
-                            "Received malformed field metadata from worker.", is_error=True
-                        )
-                        continue
-                    logger.info("Received metadata for %d fields", len(metadata))
-                    self.populate_field_list(metadata)
-                elif isinstance(metadata, dict):
-                    logger.info("Received metadata for %d coordinates", len(metadata))
-                    self.build_dynamic_sliders(metadata)
-                else:
-                    logger.warning("Unexpected metadata payload type: %s", type(metadata).__name__)
-
-            elif line.startswith("IMG_READY:"):
-                logger.info(
-                    "PLOT_DIAG gui_img_ready pid=%s worker_pid=%s payload_kind=bytes",
-                    os.getpid(),
-                    self.worker.processId(),
-                )
-                raw_payload = line.split(":", 1)[1]
-                payload = pickle.loads(base64.b64decode(raw_payload))
-                if isinstance(payload, bytes):
-                    self.set_plot_image(payload)
-                    self._show_status_message("Plot Updated.")
-                    if self._plot_request_in_flight:
-                        self._plot_request_in_flight = False
-                        self._plot_request_expects_image = False
-                        self._set_plot_loading(False)
-                else:
-                    logger.warning("Unexpected IMG_READY payload type: %s", type(payload).__name__)
-
-            elif line == "READY":
-                # Worker has finished all heavy imports and is ready for tasks.
-                logger.info("Worker ready signal received")
-                self._show_status_message("Ready")
-
-            elif line == "IMG_READY":
-                self._show_status_message("Plot Updated.")
-                if self._plot_request_in_flight:
-                    self._plot_request_in_flight = False
-                    self._plot_request_expects_image = False
-                    self._set_plot_loading(False)
-
-            elif line.startswith("COORD:"):
-                raw_payload = line.split(":", 1)[1]
-                coords = pickle.loads(base64.b64decode(raw_payload))
-                metadata = self._normalize_coordinate_metadata(coords)
-                if metadata:
-                    logger.info("Received coordinate metadata for %d sliders", len(metadata))
-                    self.build_dynamic_sliders(metadata)
-                else:
-                    logger.warning("Received empty coordinate metadata payload")
-
-            elif line.startswith("CONTOUR_RANGE:"):
-                raw_payload = line.split(":", 1)[1]
-                payload = pickle.loads(base64.b64decode(raw_payload))
-                if isinstance(payload, dict):
-                    try:
-                        range_min = float(payload["min"])
-                        range_max = float(payload["max"])
-                    except (KeyError, TypeError, ValueError):
-                        logger.warning("Malformed CONTOUR_RANGE payload: %r", payload)
-                        continue
-
-                    suggested_title = payload.get("suggested_title")
-                    if suggested_title is not None:
-                        suggested_title = str(suggested_title).strip() or None
-
-                    self._show_contour_options_dialog(
-                        range_min,
-                        range_max,
-                        suggested_title=suggested_title,
-                    )
-                else:
-                    logger.warning("Unexpected CONTOUR_RANGE payload type: %s", type(payload).__name__)
+            router.handle_line(line)
 
     def handle_worker_error(self) -> None:
         """Log any worker stderr output as errors."""
@@ -363,13 +344,40 @@ class CFVMain(CFVCore):
             if not line:
                 continue
             logger.error("Worker stderr: %s", line)
+            self._maybe_show_binary_validation_dialog(line)
+
+    def _maybe_show_binary_validation_dialog(self, stderr_line: str) -> None:
+        """Show user-facing dialog for any pending binary-operation failure."""
+        if not self._pending_binary_operation_name:
+            return
+
+        message = stderr_line.strip()
+        if not message:
+            return
+
+        if message.startswith("Error -"):
+            message = message[len("Error -"):].strip()
+
+        for prefix in ("ValueError:", "IndexError:", "RuntimeError:", "TypeError:", "Exception:"):
+            if message.startswith(prefix):
+                message = message[len(prefix):].strip()
+                break
+
+        if not message:
+            return
+
+        QMessageBox.warning(self, self._pending_binary_operation_name, message)
+        self._show_status_message(message, is_error=True)
+        self._pending_binary_operation_name = None
 
     def handle_worker_process_error(self, process_error: QProcess.ProcessError) -> None:
         """Capture QProcess-level failures, such as start or crash issues."""
         if self._shutting_down:
             return
         logger.error("Worker process error: %s", process_error)
-        self._show_status_message(f"Worker process error: {process_error}", is_error=True)
+        message = f"Worker process error: {process_error}"
+        self._show_status_message(message, is_error=True)
+        self._maybe_show_binary_validation_dialog(message)
         if self._plot_request_in_flight:
             self._plot_request_in_flight = False
             self._plot_request_expects_image = False
@@ -380,26 +388,69 @@ class CFVMain(CFVCore):
         """Capture worker shutdown information."""
         logger.warning("Worker finished with exit_code=%s exit_status=%s", exit_code, exit_status)
         if exit_code != 0:
-            self._show_status_message(
-                f"Worker stopped unexpectedly (exit_code={exit_code}).",
-                is_error=True,
-            )
+            message = f"Worker stopped unexpectedly (exit_code={exit_code})."
+            self._show_status_message(message, is_error=True)
+            self._maybe_show_binary_validation_dialog(message)
         if self._plot_request_in_flight:
             self._plot_request_in_flight = False
             self._plot_request_expects_image = False
             self._set_plot_loading(False)
             self._clear_plot_canvas("Plot failed because the worker stopped.")
 
-    def _load_selected_file(self, file_path: str) -> None:
+    def _load_selected_file(
+        self,
+        file_path: str,
+        *,
+        clear_existing: bool = True,
+        append_metadata: bool = False,
+    ) -> None:
         """Load selected file in worker and publish field metadata."""
-        self._clear_loaded_data_views()
+        if clear_existing:
+            self._clear_loaded_data_views()
+        self._pending_metadata_append = append_metadata
+        self._pending_metadata_source = file_path
         self._show_status_message(f"Loading file: {file_path}")
         logger.info("Loading file in worker: %s", file_path)
 
+        if append_metadata:
+            code = (
+                f"_cfview_file_path = {file_path!r}\n"
+                "_cfview_field_index = None\n"
+                f"_cfview_new_fields = cf.read({file_path!r})\n"
+                "try:\n"
+                "    f\n"
+                "except NameError:\n"
+                "    f = []\n"
+                "f.extend(_cfview_new_fields)\n"
+                "fields = field_info(_cfview_new_fields)\n"
+                "send_to_gui('METADATA', fields)"
+            )
+        else:
+            code = (
+                f"_cfview_file_path = {file_path!r}\n"
+                "_cfview_field_index = None\n"
+                f"f = cf.read({file_path!r})\n"
+                + field_list
+                + "send_to_gui('METADATA', fields)"
+            )
+        self._send_worker_task(code)
+
+    def _load_selected_files(self, file_paths: list[str]) -> None:
+        """Load multiple selected files in worker and publish combined metadata."""
+        if not file_paths:
+            return
+
+        expanded_paths = [_normalize_source_path_or_uri(path) for path in file_paths]
+        self._clear_loaded_data_views()
+        self._pending_metadata_append = False
+        self._pending_metadata_source = None
+        self._show_status_message(f"Loading {len(expanded_paths)} files")
+        logger.info("Loading %d files in worker", len(expanded_paths))
+
         code = (
-            f"_cfview_file_path = {file_path!r}\n"
+            f"_cfview_file_path = {expanded_paths!r}\n"
             "_cfview_field_index = None\n"
-            f"f = cf.read({file_path!r})\n"
+            f"f = cf.read({expanded_paths!r})\n"
             + field_list
             + "send_to_gui('METADATA', fields)"
         )
@@ -411,7 +462,17 @@ class CFVMain(CFVCore):
             self._show_status_message("Remote worker session is not initialized.", is_error=True)
             return
 
-        self._clear_loaded_data_views()
+        is_multi_mode = getattr(self, "file_open_mode", "single") == "multi"
+        append_metadata = is_multi_mode and bool(self._loaded_file_paths)
+
+        if is_multi_mode and uri in self._loaded_file_paths:
+            self._show_status_message(f"Remote file already loaded: {uri}")
+            return
+
+        if not append_metadata:
+            self._clear_loaded_data_views()
+        self._pending_metadata_append = append_metadata
+        self._pending_metadata_source = uri
         self._show_status_message(f"Loading remote file: {uri}")
         self._send_worker_control_task(
             "REMOTE_OPEN",
@@ -421,6 +482,7 @@ class CFVMain(CFVCore):
                 "descriptor": self._remote_descriptor,
                 "uri": uri,
                 "path": remote_path,
+                "append": append_metadata,
             },
         )
 
@@ -442,133 +504,15 @@ class CFVMain(CFVCore):
 
     def _open_remote_from_config(self, config: dict[str, object]) -> None:
         """Perform remote login once in the worker, then navigate via IPC using a nested QEventLoop."""
-        from .remote_access import (  # noqa: PLC0415
-            build_remote_filesystem_spec, remote_descriptor_hash, spec_to_descriptor,
-        )
-        from .ui.remote_file_navigator import RemoteFileNavigatorDialog, RemoteLoginLogDialog  # noqa: PLC0415
-        if not isinstance(config, dict):
-            return
-
-        config = CFVMain._with_cache_defaults(self, config)
-
-        prepared_config = self._prepare_ssh_config_for_auth(config)
-        if prepared_config is None:
-            return
-        config = prepared_config
-
-        if str(config.get("protocol", "")).upper() in {"HTTP", "HTTPS"}:
-            http_locations = self._settings.get("remote_https_locations")
-            if not isinstance(http_locations, dict):
-                http_locations = self._settings.get("remote_http_locations")
-            if isinstance(http_locations, dict):
-                updated = dict(http_locations)
-            else:
-                updated = {}
-
-            remote = config.get("remote")
-            if isinstance(remote, dict):
-                alias = str(remote.get("alias", "")).strip()
-                details = remote.get("details")
-                if alias and isinstance(details, dict):
-                    url = details.get("url") or details.get("base_url")
-                    if isinstance(url, str) and url.strip():
-                        updated[alias] = {"url": url.strip()}
-
-            self._settings["remote_https_locations"] = updated
-
-        try:
-            spec = build_remote_filesystem_spec(config)
-        except Exception as exc:
-            QMessageBox.critical(self, "Remote configuration invalid", str(exc))
-            return
-
-        self._clear_loaded_data_views()
-
-        descriptor = spec_to_descriptor(spec, cache=config.get("cache") if isinstance(config, dict) else None)
-        descriptor_hash = remote_descriptor_hash(descriptor)
-        self._last_remote_config = config
-        self._last_remote_navigator_state = None  # fresh session; discard any prior tree state
-
-        # Reuse an already active matching session instead of preparing again.
-        reuse_active_session = bool(self._remote_session_id) and self._remote_descriptor_hash == descriptor_hash
-        if reuse_active_session:
-            self._remote_descriptor = descriptor
-            self._show_status_message("Reusing active remote session.")
-        else:
-            session_id = uuid.uuid4().hex
-            self._remote_session_id = session_id
-            self._remote_descriptor_hash = descriptor_hash
-            self._remote_descriptor = descriptor
-
-        if not reuse_active_session:
-            # Show login progress dialog and spin a QEventLoop until the worker signals ready/failed.
-            log_dialog = RemoteLoginLogDialog(self, spec.display_name)
-            self._pending_prepare_log_dialog = log_dialog
-            self._pending_prepare_loop = QEventLoop()
-            self._pending_prepare_loop_ok = False
-            log_dialog.show()
-            QApplication.processEvents()
-
-            self._send_worker_control_task(
-                "REMOTE_PREPARE",
-                {
-                    "session_id": self._remote_session_id,
-                    "descriptor_hash": descriptor_hash,
-                    "descriptor": descriptor,
-                },
-            )
-            self._pending_prepare_failure_message = ""
-            self._pending_prepare_loop.exec()
-            self._pending_prepare_log_dialog = None
-
-            if not self._pending_prepare_loop_ok:
-                # mark_failed was already called in handle_worker_output; show the dialog modally.
-                log_dialog.exec()
-                failure_message = self._pending_prepare_failure_message
-                if self._maybe_retry_ssh_authentication(config, failure_message):
-                    self._open_remote_from_config(config)
-                    return
-                return
-
-            log_dialog.close()
-
-        # Open the navigator backed entirely by worker-side directory listing via IPC.
-        list_callback = self._make_worker_list_callback()
-        dialog = RemoteFileNavigatorDialog(
+        _remote_flow_ops.open_remote_from_config(
             self,
             config,
-            spec=spec,
-            list_callback=list_callback,
-            new_remote_button=True,
-            session_active=bool(self._remote_session_id),
+            with_cache_defaults_fn=lambda payload: CFVMain._with_cache_defaults(self, payload),
+            qeventloop_cls=QEventLoop,
+            qapplication_cls=QApplication,
+            qdialog_accepted_value=QDialog.Accepted,
+            qmessagebox_cls=QMessageBox,
         )
-        result = dialog.exec()
-        self._last_remote_navigator_state = dialog._collect_tree_state()
-        if dialog.shutdown_session_requested:
-            self._release_remote_session_if_active()
-            self._show_status_message("Remote session shut down.")
-            return
-        if dialog.new_remote_requested:
-            self._choose_remote()
-            return
-        if result != QDialog.Accepted:
-            return
-
-        selected_uri = dialog.selected_uri()
-        selected_path = dialog.selected_path()
-        if not selected_uri or not selected_path:
-            self._show_status_message("Remote file selection was incomplete.", is_error=True)
-            return
-
-        remote = config.get("remote") if isinstance(config, dict) else None
-        host_alias = str(remote.get("alias", "")).strip() if isinstance(remote, dict) else ""
-        self._set_window_title_for_file(selected_uri)
-        self._show_status_message(f"Selected remote file: {selected_uri}")
-        if host_alias:
-            self._record_recent_uri(selected_uri, host_alias)
-        else:
-            self._record_recent_file(selected_uri)
-        self._load_remote_selected_file(selected_uri, selected_path)
 
     def _open_remote_uri_direct(
         self,
@@ -579,339 +523,37 @@ class CFVMain(CFVCore):
         host_alias: str,
     ) -> None:
         """Open a specific remote URI directly without launching the navigator dialog."""
-        from .remote_access import (  # noqa: PLC0415
-            build_remote_filesystem_spec, remote_descriptor_hash, spec_to_descriptor,
+        _remote_flow_ops.open_remote_uri_direct(
+            self,
+            uri=uri,
+            remote_path=remote_path,
+            config=config,
+            host_alias=host_alias,
+            with_cache_defaults_fn=lambda payload: CFVMain._with_cache_defaults(self, payload),
+            qeventloop_cls=QEventLoop,
+            qapplication_cls=QApplication,
+            qmessagebox_cls=QMessageBox,
         )
-        from .ui.remote_file_navigator import RemoteLoginLogDialog  # noqa: PLC0415
-        if not isinstance(config, dict):
-            return
-
-        config = CFVMain._with_cache_defaults(self, config)
-
-        prepared_config = self._prepare_ssh_config_for_auth(config)
-        if prepared_config is None:
-            return
-        config = prepared_config
-
-        if str(config.get("protocol", "")).upper() in {"HTTP", "HTTPS"} and host_alias:
-            details = {}
-            remote = config.get("remote")
-            if isinstance(remote, dict):
-                raw_details = remote.get("details")
-                if isinstance(raw_details, dict):
-                    details = dict(raw_details)
-                if not details and isinstance(remote.get("url"), str):
-                    details = {"url": str(remote.get("url"))}
-
-            https_locations = self._settings.get("remote_https_locations")
-            merged = dict(https_locations) if isinstance(https_locations, dict) else {}
-            if details:
-                merged[host_alias] = details
-            self._settings["remote_https_locations"] = merged
-
-        try:
-            spec = build_remote_filesystem_spec(config)
-        except Exception as exc:
-            QMessageBox.critical(self, "Remote configuration invalid", str(exc))
-            return
-
-        self._clear_loaded_data_views()
-        descriptor = spec_to_descriptor(spec, cache=config.get("cache") if isinstance(config, dict) else None)
-        descriptor_hash = remote_descriptor_hash(descriptor)
-        self._last_remote_config = config
-        self._last_remote_navigator_state = None
-
-        # If the currently active session already matches this descriptor, skip prepare.
-        reuse_active_session = bool(self._remote_session_id) and self._remote_descriptor_hash == descriptor_hash
-        if reuse_active_session:
-            self._remote_descriptor = descriptor
-            self._show_status_message("Reusing active remote session.")
-            self._set_window_title_for_file(uri)
-            self._show_status_message(f"Selected remote file: {uri}")
-            self._record_recent_uri(uri, host_alias or spec.display_name)
-            self._load_remote_selected_file(uri, remote_path)
-            return
-
-        session_id = uuid.uuid4().hex
-        self._remote_session_id = session_id
-        self._remote_descriptor_hash = descriptor_hash
-        self._remote_descriptor = descriptor
-
-        log_dialog = RemoteLoginLogDialog(self, spec.display_name)
-        self._pending_prepare_log_dialog = log_dialog
-        self._pending_prepare_loop = QEventLoop()
-        self._pending_prepare_loop_ok = False
-        log_dialog.show()
-        QApplication.processEvents()
-
-        self._send_worker_control_task(
-            "REMOTE_PREPARE",
-            {
-                "session_id": session_id,
-                "descriptor_hash": descriptor_hash,
-                "descriptor": descriptor,
-            },
-        )
-        self._pending_prepare_failure_message = ""
-        self._pending_prepare_loop.exec()
-        self._pending_prepare_log_dialog = None
-
-        if not self._pending_prepare_loop_ok:
-            log_dialog.exec()
-            failure_message = self._pending_prepare_failure_message
-            if self._maybe_retry_ssh_authentication(config, failure_message):
-                self._open_remote_uri_direct(
-                    uri=uri,
-                    remote_path=remote_path,
-                    config=config,
-                    host_alias=host_alias,
-                )
-                return
-            return
-
-        log_dialog.close()
-        self._set_window_title_for_file(uri)
-        self._show_status_message(f"Selected remote file: {uri}")
-        self._record_recent_uri(uri, host_alias or spec.display_name)
-        self._load_remote_selected_file(uri, remote_path)
 
     def _resolve_remote_uri(self, uri: str) -> tuple[dict[str, object] | None, str, str, bool]:
         """Resolve URI into (config, remote_path, host_alias, unknown_host)."""
-        canonical_uri = CFVCore._canonical_remote_uri(uri)
-        parsed = urlparse(canonical_uri)
-        scheme = parsed.scheme.lower()
-
-        if scheme == "s3":
-            locations = RemoteConfigurationDialog._load_s3_locations()
-
-            endpoint_to_alias: dict[str, str] = {}
-            for alias_name, details in locations.items():
-                if not isinstance(alias_name, str) or not isinstance(details, dict):
-                    continue
-                endpoint_url = str(details.get("url", "")).strip()
-                endpoint_host = urlparse(endpoint_url).netloc.strip()
-                if endpoint_host:
-                    endpoint_to_alias[endpoint_host] = alias_name
-
-            netloc = parsed.netloc.strip()
-            endpoint_alias = endpoint_to_alias.get(netloc, "")
-            if endpoint_alias:
-                path = parsed.path.lstrip("/")
-            else:
-                path = f"{parsed.netloc}{parsed.path}".lstrip("/")
-
-            aliases = self._settings.get("recent_uri_aliases")
-            alias_map = aliases if isinstance(aliases, dict) else {}
-            preferred_alias = alias_map.get(canonical_uri) or alias_map.get(uri)
-            if not isinstance(preferred_alias, str):
-                preferred_alias = ""
-            preferred_alias = preferred_alias.strip()
-
-            if endpoint_alias:
-                preferred_alias = endpoint_alias
-
-            if not preferred_alias:
-                raw_state = self._settings.get("last_remote_configuration")
-                state = raw_state if isinstance(raw_state, dict) else {}
-                candidate = state.get("s3_existing_alias")
-                if isinstance(candidate, str) and candidate.strip():
-                    preferred_alias = candidate.strip()
-
-            chosen_alias = preferred_alias if preferred_alias in locations else ""
-            if not chosen_alias and len(locations) == 1:
-                chosen_alias = next(iter(locations.keys()))
-
-            details = dict(locations.get(chosen_alias, {})) if chosen_alias else {}
-            config: dict[str, object] = {
-                "protocol": "S3",
-                "remote": {
-                    "mode": "Select from existing",
-                    "alias": chosen_alias or "S3",
-                    "details": details,
-                },
-            }
-            return config, path, chosen_alias or "S3", False
-
-        if scheme == "ssh":
-            host = (parsed.hostname or parsed.netloc or "").strip()
-            user = (parsed.username or "").strip()
-            remote_path = unquote(parsed.path or "").lstrip("/")
-            if not remote_path:
-                remote_path = "."
-            hosts = RemoteConfigurationDialog._load_ssh_hosts()
-
-            runtime_preferences: dict[str, object] = {}
-            configured_state = self._settings.get("last_remote_configuration")
-            if isinstance(configured_state, dict):
-                configured_prefs = configured_state.get("ssh_runtime_preferences")
-                if isinstance(configured_prefs, dict):
-                    runtime_preferences.update(configured_prefs)
-            open_state = self._settings.get("last_remote_open")
-            if isinstance(open_state, dict):
-                open_prefs = open_state.get("ssh_runtime_preferences")
-                if isinstance(open_prefs, dict):
-                    runtime_preferences.update(open_prefs)
-
-            matched_alias = ""
-            matched_details: dict[str, object] | None = None
-            for alias, details in hosts.items():
-                if alias == host or str(details.get("hostname", "")) == host:
-                    matched_alias = alias
-                    matched_details = dict(details)
-                    break
-
-            if matched_details is None:
-                return None, remote_path, host or "SSH", True
-
-            if user and not matched_details.get("user"):
-                matched_details["user"] = user
-
-            alias_prefs = runtime_preferences.get(matched_alias)
-            if isinstance(alias_prefs, dict):
-                remote_python = alias_prefs.get("remote_python")
-                if isinstance(remote_python, str) and remote_python.strip():
-                    matched_details["remote_python"] = remote_python.strip()
-
-                remote_python_options = alias_prefs.get("remote_python_options")
-                if isinstance(remote_python_options, dict):
-                    cleaned_options = {
-                        str(label): str(command)
-                        for label, command in remote_python_options.items()
-                        if str(label).strip() and str(command).strip()
-                    }
-                    if cleaned_options:
-                        matched_details["remote_python_options"] = cleaned_options
-                elif isinstance(remote_python_options, list):
-                    cleaned_options = {
-                        str(item): str(item)
-                        for item in remote_python_options
-                        if str(item).strip()
-                    }
-                    if cleaned_options:
-                        matched_details["remote_python_options"] = cleaned_options
-
-                if "login_shell" in alias_prefs:
-                    login_shell_value = alias_prefs.get("login_shell")
-                    if isinstance(login_shell_value, str):
-                        matched_details["login_shell"] = login_shell_value.strip().lower() in {"1", "true", "yes", "on"}
-                    else:
-                        matched_details["login_shell"] = bool(login_shell_value)
-
-            config = {
-                "protocol": "SSH",
-                "remote": {
-                    "mode": "Select from existing",
-                    "alias": matched_alias,
-                    "details": matched_details,
-                },
-            }
-            return config, remote_path, matched_alias, False
-
-        if scheme in {"http", "https"}:
-            https_locations = self._settings.get("remote_https_locations")
-            locations = dict(https_locations) if isinstance(https_locations, dict) else {}
-            if not locations:
-                cfg_state = self._settings.get("last_remote_configuration")
-                if isinstance(cfg_state, dict):
-                    raw = cfg_state.get("https_locations")
-                    if isinstance(raw, dict):
-                        locations = dict(raw)
-
-            matched_alias = ""
-            matched_url = ""
-            for alias, details in locations.items():
-                if not isinstance(details, dict):
-                    continue
-                base_url = str(details.get("url") or details.get("base_url") or "").strip()
-                if base_url and uri.startswith(base_url):
-                    if len(base_url) > len(matched_url):
-                        matched_alias = str(alias)
-                        matched_url = base_url
-
-            remote_path = unquote(parsed.path or "/")
-            if not matched_alias:
-                return None, remote_path, (parsed.hostname or "HTTPS"), True
-
-            config = {
-                "protocol": "HTTPS",
-                "remote": {
-                    "mode": "Select from existing",
-                    "alias": matched_alias,
-                    "details": locations.get(matched_alias, {}),
-                },
-            }
-            return config, remote_path, matched_alias, False
-
-        return None, "", "", False
+        return _remote_flow_ops.resolve_remote_uri(
+            self,
+            uri,
+            canonical_remote_uri=CFVCore._canonical_remote_uri,
+        )
 
     def _with_cache_defaults(self, config: dict[str, object]) -> dict[str, object]:
         """Attach persisted cache settings when a remote config omits cache."""
-        merged = dict(config)
-        existing_cache = merged.get("cache")
-        if isinstance(existing_cache, dict):
-            return merged
-
-        raw = self._settings.get("last_remote_configuration", {})
-        if not isinstance(raw, dict):
-            return merged
-
-        merged["cache"] = {
-            "disk_mode": str(raw.get("disk_mode", "Disabled")),
-            "disk_location": str(raw.get("disk_location", str(Path.home() / ".cache/xconv2"))),
-            "disk_limit_gb": int(raw.get("disk_limit_gb", 10)),
-            "disk_expiry": str(raw.get("disk_expiry", "1 day")),
-        }
-        return merged
+        return _remote_auth_ops.with_cache_defaults(self, config)
 
     def _configure_remote_for_uri(self, uri: str) -> None:
         """Open Configure Remote pre-populated for URI-driven add-new workflows."""
-        parsed = urlparse(uri)
-        scheme = parsed.scheme.lower()
-        raw_state = self._settings.get("last_remote_configuration", {})
-        state = dict(raw_state) if isinstance(raw_state, dict) else {}
-        https_locations = self._settings.get("remote_https_locations")
-        if isinstance(https_locations, dict):
-            state["https_locations"] = dict(https_locations)
-        s3_reductionist_locations = self._settings.get("remote_s3_reductionist_locations")
-        if isinstance(s3_reductionist_locations, dict):
-            state["s3_reductionist_locations"] = dict(s3_reductionist_locations)
-
-        if scheme in {"http", "https"}:
-            state.update(
-                {
-                    "protocol_index": 1,
-                    "https_mode": "Add new",
-                    "https_alias": (parsed.hostname or "https").strip(),
-                    "https_url": f"{scheme}://{parsed.netloc}",
-                }
-            )
-        elif scheme == "ssh":
-            state.update(
-                {
-                    "protocol_index": 2,
-                    "ssh_mode": "Add new",
-                    "ssh_alias": (parsed.hostname or parsed.netloc or "ssh").strip(),
-                    "ssh_hostname": (parsed.hostname or parsed.netloc or "").strip(),
-                    "ssh_user": (parsed.username or "").strip(),
-                }
-            )
-
-        def _on_finished_uri(config: dict | None, _ok: bool, next_state: dict) -> None:
-            self._settings["last_remote_configuration"] = next_state
-            if isinstance(next_state, dict):
-                persisted_https = next_state.get("https_locations")
-                if isinstance(persisted_https, dict):
-                    self._settings["remote_https_locations"] = dict(persisted_https)
-                persisted_s3_reductionist = next_state.get("s3_reductionist_locations")
-                if isinstance(persisted_s3_reductionist, dict):
-                    self._settings["remote_s3_reductionist_locations"] = {
-                        str(alias).strip(): str(url).strip()
-                        for alias, url in persisted_s3_reductionist.items()
-                        if str(alias).strip() and str(url).strip()
-                    }
-            self._save_settings()
-
-        RemoteConfigurationDialog.show_non_modal(self, state=state, on_finished=_on_finished_uri)
+        _remote_flow_ops.configure_remote_for_uri(
+            self,
+            uri,
+            remote_configuration_dialog_cls=RemoteConfigurationDialog,
+        )
 
     @staticmethod
     def _probe_ssh_auth_methods(
@@ -922,45 +564,12 @@ class CFVMain(CFVCore):
         timeout: float = 6.0,
     ) -> set[str] | None:
         """Probe SSH server auth methods quickly without waiting for filesystem auth timeout."""
-        try:
-            import paramiko  # type: ignore
-        except Exception:
-            return None
-
-        sock = None
-        transport = None
-        try:
-            sock = socket.create_connection((hostname, port), timeout=timeout)
-            transport = paramiko.Transport(sock)
-            transport.start_client(timeout=timeout)
-            try:
-                transport.auth_none(username)
-                return set()
-            except paramiko.BadAuthenticationType as exc:  # type: ignore[attr-defined]
-                allowed = getattr(exc, "allowed_types", None) or ()
-                methods = {
-                    str(item).strip().lower()
-                    for item in allowed
-                    if str(item).strip()
-                }
-                return methods or None
-            except paramiko.AuthenticationException:  # type: ignore[attr-defined]
-                # Some servers reply with a generic auth failure for auth_none.
-                return None
-        except Exception as exc:
-            logger.info("SSH auth preflight probe failed for %s@%s: %s", username, hostname, exc)
-            return None
-        finally:
-            if transport is not None:
-                try:
-                    transport.close()
-                except Exception:
-                    pass
-            if sock is not None:
-                try:
-                    sock.close()
-                except Exception:
-                    pass
+        return _remote_auth_ops.probe_ssh_auth_methods(
+            hostname,
+            username,
+            port=port,
+            timeout=timeout,
+        )
 
     @staticmethod
     def _validate_ssh_secret(
@@ -972,84 +581,23 @@ class CFVMain(CFVCore):
         timeout: float = 6.0,
     ) -> bool | None:
         """Validate an SSH password/secret; returns None when validation is inconclusive."""
-        try:
-            import paramiko  # type: ignore
-        except Exception:
-            return None
-
-        client = paramiko.SSHClient()
-        client.load_system_host_keys()
-        from .ui.remote_file_navigator import _XconvHostKeyPolicy  # noqa: PLC0415
-        client.set_missing_host_key_policy(_XconvHostKeyPolicy())
-        try:
-            client.connect(
-                hostname,
-                port=port,
-                username=username,
-                password=secret,
-                timeout=timeout,
-                auth_timeout=timeout,
-                banner_timeout=timeout,
-                allow_agent=False,
-                look_for_keys=False,
-            )
-            return True
-        except paramiko.AuthenticationException:  # type: ignore[attr-defined]
-            return False
-        except Exception:
-            return None
-        finally:
-            try:
-                client.close()
-            except Exception:
-                pass
+        return _remote_auth_ops.validate_ssh_secret(
+            hostname,
+            username,
+            secret,
+            port=port,
+            timeout=timeout,
+        )
 
     @staticmethod
     def _parse_proxy_jump_target(proxy_jump: str) -> tuple[str | None, str, int]:
         """Parse first ProxyJump hop into (user, host-or-alias, port)."""
-        first = proxy_jump.split(",", 1)[0].strip()
-        if not first:
-            return None, "", 22
-
-        port = 22
-        user: str | None = None
-        if "@" in first:
-            user_part, rest = first.split("@", 1)
-            user = user_part or None
-        else:
-            rest = first
-
-        if ":" in rest:
-            host, port_text = rest.rsplit(":", 1)
-            try:
-                port = int(port_text)
-            except ValueError:
-                host = rest
-        else:
-            host = rest
-
-        return user, host, port
+        return _remote_auth_ops.parse_proxy_jump_target(proxy_jump)
 
     @staticmethod
     def _resolve_ssh_alias(alias: str) -> tuple[str, str | None]:
         """Resolve SSH config alias to concrete hostname/user when available."""
-        host = alias
-        user: str | None = None
-        try:
-            import paramiko  # type: ignore
-            ssh_config_path = Path.home() / ".ssh/config"
-            if ssh_config_path.is_file():
-                cfg = paramiko.SSHConfig.from_path(str(ssh_config_path))
-                looked_up = cfg.lookup(alias)
-                looked_host = looked_up.get("hostname")
-                looked_user = looked_up.get("user")
-                if isinstance(looked_host, str) and looked_host.strip():
-                    host = looked_host.strip()
-                if isinstance(looked_user, str) and looked_user.strip():
-                    user = looked_user.strip()
-        except Exception:
-            pass
-        return host, user
+        return _remote_auth_ops.resolve_ssh_alias(alias)
 
     def _prompt_ssh_secret(
         self,
@@ -1058,364 +606,75 @@ class CFVMain(CFVCore):
         prompt: str,
     ) -> tuple[str, bool]:
         """Prompt the user for an SSH secret/response."""
-        secret, ok = QInputDialog.getText(
+        return _remote_auth_ops.prompt_ssh_secret(
             self,
-            title,
-            prompt,
-            QLineEdit.Password,
+            title=title,
+            prompt=prompt,
+            qinputdialog_cls=QInputDialog,
+            qlineedit_cls=QLineEdit,
         )
-        if not ok:
-            self._show_status_message("SSH login cancelled by user.", is_error=True)
-            return "", False
-        if not secret:
-            self._show_status_message("SSH secret is required for this host.", is_error=True)
-            return "", False
-        return secret, True
 
     def _prepare_ssh_config_for_auth(self, config: dict[str, object]) -> dict[str, object] | None:
         """Inject transient SSH password credentials when preflight indicates a challenge."""
-        if str(config.get("protocol", "")).upper() != "SSH":
-            return config
-
-        remote = config.get("remote")
-        if not isinstance(remote, dict):
-            return config
-
-        details = remote.get("details")
-        detail_map = dict(details) if isinstance(details, dict) else {}
-
-        hostname_raw = detail_map.get("hostname") or remote.get("hostname")
-        username_raw = detail_map.get("user") or remote.get("user")
-        hostname = str(hostname_raw).strip() if isinstance(hostname_raw, str) else ""
-        username = str(username_raw).strip() if isinstance(username_raw, str) else ""
-        if not hostname or not username:
-            return config
-
-        updated_remote = dict(remote)
-        updated_details = dict(detail_map)
-
-        target_auth_methods = self._probe_ssh_auth_methods(hostname, username)
-        target_needs_secret = bool(target_auth_methods) and (
-            "password" in target_auth_methods or "keyboard-interactive" in target_auth_methods
+        return _remote_auth_ops.prepare_ssh_config_for_auth(
+            self,
+            config,
+            default_probe_ssh_auth_methods_fn=CFVMain._probe_ssh_auth_methods,
+            default_prompt_ssh_secret_fn=CFVMain._prompt_ssh_secret,
+            validate_ssh_secret_fn=CFVMain._validate_ssh_secret,
+            parse_proxy_jump_target_fn=CFVMain._parse_proxy_jump_target,
+            resolve_ssh_alias_fn=CFVMain._resolve_ssh_alias,
+            qmessagebox_cls=QMessageBox,
         )
-
-        if target_needs_secret:
-            cache_key = f"{username}@{hostname}:22"
-            secret = self._ssh_session_passwords.get(cache_key, "")
-            requires_otp_style = bool(target_auth_methods) and (
-                "keyboard-interactive" in target_auth_methods and "password" not in target_auth_methods
-            )
-
-            if secret and not requires_otp_style:
-                validation = CFVMain._validate_ssh_secret(hostname, username, secret, port=22)
-                if validation is False:
-                    self._ssh_session_passwords.pop(cache_key, None)
-                    secret = ""
-
-            if not secret:
-                prompt = f"Enter SSH secret for {username}@{hostname}"
-                if requires_otp_style:
-                    prompt = f"Enter one-time code or challenge response for {username}@{hostname}"
-
-                attempts = 2
-                for attempt in range(attempts):
-                    entered, ok = self._prompt_ssh_secret(
-                        title="SSH Authentication Required",
-                        prompt=prompt,
-                    )
-                    if not ok:
-                        return None
-
-                    validation = CFVMain._validate_ssh_secret(hostname, username, entered, port=22)
-                    if validation is False:
-                        QMessageBox.warning(
-                            self,
-                            "SSH Authentication Failed",
-                            "Authentication failed for the provided SSH secret. Please try again.",
-                        )
-                        continue
-
-                    secret = entered
-                    break
-
-                if not secret:
-                    return None
-
-            self._ssh_session_passwords[cache_key] = secret
-            updated_details["password"] = secret
-            updated_remote["password"] = secret
-
-        proxy_jump_raw = updated_details.get("proxyjump") or updated_remote.get("proxyjump")
-        proxy_jump = str(proxy_jump_raw).strip() if isinstance(proxy_jump_raw, str) else ""
-        if proxy_jump:
-            jump_user_hint, jump_alias, jump_port = CFVMain._parse_proxy_jump_target(proxy_jump)
-            if jump_alias:
-                jump_host, jump_user_cfg = CFVMain._resolve_ssh_alias(jump_alias)
-                jump_user = (jump_user_hint or jump_user_cfg or username).strip()
-
-                jump_auth_methods = self._probe_ssh_auth_methods(jump_host, jump_user, port=jump_port)
-                jump_needs_secret = bool(jump_auth_methods) and (
-                    "password" in jump_auth_methods or "keyboard-interactive" in jump_auth_methods
-                )
-
-                if jump_needs_secret:
-                    jump_cache_key = f"jump:{jump_user}@{jump_host}:{jump_port}"
-                    jump_secret = self._ssh_session_passwords.get(jump_cache_key, "")
-                    jump_requires_otp_style = bool(jump_auth_methods) and (
-                        "keyboard-interactive" in jump_auth_methods and "password" not in jump_auth_methods
-                    )
-
-                    if jump_secret and not jump_requires_otp_style:
-                        validation = CFVMain._validate_ssh_secret(
-                            jump_host,
-                            jump_user,
-                            jump_secret,
-                            port=jump_port,
-                        )
-                        if validation is False:
-                            self._ssh_session_passwords.pop(jump_cache_key, None)
-                            jump_secret = ""
-
-                    if not jump_secret:
-                        prompt = (
-                            f"Authenticating with bastion host {jump_host} "
-                            f"before proxyjump to {hostname}.\n\n"
-                            f"Enter bastion SSH secret for {jump_user}@{jump_host}"
-                        )
-                        if jump_requires_otp_style:
-                            prompt = (
-                                f"Authenticating with bastion host {jump_host} "
-                                f"before proxyjump to {hostname}.\n\n"
-                                f"Enter bastion one-time code or challenge response for {jump_user}@{jump_host}"
-                            )
-
-                        attempts = 2
-                        for _ in range(attempts):
-                            entered, ok = self._prompt_ssh_secret(
-                                title="Bastion Authentication Required",
-                                prompt=prompt,
-                            )
-                            if not ok:
-                                return None
-
-                            validation = CFVMain._validate_ssh_secret(
-                                jump_host,
-                                jump_user,
-                                entered,
-                                port=jump_port,
-                            )
-                            if validation is False:
-                                QMessageBox.warning(
-                                    self,
-                                    "Bastion Authentication Failed",
-                                    "Authentication failed for the provided bastion secret. Please try again.",
-                                )
-                                continue
-
-                            jump_secret = entered
-                            break
-
-                        if not jump_secret:
-                            return None
-
-                    self._ssh_session_passwords[jump_cache_key] = jump_secret
-                    updated_details["proxyjump_password"] = jump_secret
-                    updated_details["proxyjump_user"] = jump_user
-                    updated_remote["proxyjump_password"] = jump_secret
-                    updated_remote["proxyjump_user"] = jump_user
-
-        updated_remote["details"] = updated_details
-
-        updated_config = dict(config)
-        updated_config["remote"] = updated_remote
-        return updated_config
 
     @staticmethod
     def _is_ssh_auth_failure_message(message: str) -> bool:
         """Return True when a worker prepare failure message looks like SSH auth failure."""
-        text = (message or "").strip().lower()
-        if not text:
-            return False
-        markers = (
-            "authentication",
-            "bad authentication type",
-            "auth fail",
-            "permission denied",
-            "keyboard-interactive",
-            "auth",
-        )
-        return any(marker in text for marker in markers)
+        return _remote_auth_ops.is_ssh_auth_failure_message(message)
 
     def _clear_ssh_cached_secrets_for_config(self, config: dict[str, object]) -> None:
         """Forget cached SSH secrets for target and bastion hosts in a config."""
-        if str(config.get("protocol", "")).upper() != "SSH":
-            return
-
-        remote = config.get("remote")
-        if not isinstance(remote, dict):
-            return
-
-        details = remote.get("details")
-        detail_map = dict(details) if isinstance(details, dict) else {}
-
-        hostname_raw = detail_map.get("hostname") or remote.get("hostname")
-        username_raw = detail_map.get("user") or remote.get("user")
-        hostname = str(hostname_raw).strip() if isinstance(hostname_raw, str) else ""
-        username = str(username_raw).strip() if isinstance(username_raw, str) else ""
-        if hostname and username:
-            self._ssh_session_passwords.pop(f"{username}@{hostname}:22", None)
-
-        proxy_jump_raw = detail_map.get("proxyjump") or remote.get("proxyjump")
-        proxy_jump = str(proxy_jump_raw).strip() if isinstance(proxy_jump_raw, str) else ""
-        if proxy_jump:
-            jump_user_hint, jump_alias, jump_port = CFVMain._parse_proxy_jump_target(proxy_jump)
-            if jump_alias:
-                jump_host, jump_user_cfg = CFVMain._resolve_ssh_alias(jump_alias)
-                jump_user = (jump_user_hint or jump_user_cfg or username).strip()
-                if jump_host and jump_user:
-                    self._ssh_session_passwords.pop(f"jump:{jump_user}@{jump_host}:{jump_port}", None)
+        _remote_auth_ops.clear_ssh_cached_secrets_for_config(
+            self,
+            config,
+            parse_proxy_jump_target_fn=CFVMain._parse_proxy_jump_target,
+            resolve_ssh_alias_fn=CFVMain._resolve_ssh_alias,
+        )
 
     def _maybe_retry_ssh_authentication(self, config: dict[str, object], failure_message: str) -> bool:
         """Offer auth retry for SSH prepare failures that look like authentication problems."""
-        if str(config.get("protocol", "")).upper() != "SSH":
-            return False
-        if not CFVMain._is_ssh_auth_failure_message(failure_message):
-            return False
-
-        self._clear_ssh_cached_secrets_for_config(config)
-        choice = QMessageBox.question(
+        return _remote_auth_ops.maybe_retry_ssh_authentication(
             self,
-            "SSH Authentication Failed",
-            "SSH authentication failed. Retry with new credentials/response?",
-            QMessageBox.Retry | QMessageBox.Cancel,
-            QMessageBox.Retry,
+            config,
+            failure_message,
+            is_ssh_auth_failure_message_fn=CFVMain._is_ssh_auth_failure_message,
+            qmessagebox_cls=QMessageBox,
         )
-        return choice == QMessageBox.Retry
 
     def _open_uri_entry(self, uri: str, *, from_uri_dialog: bool) -> None:
         """Open a URI from user input or recent list."""
-        canonical_uri = CFVCore._canonical_remote_uri(uri)
-        parsed = urlparse(canonical_uri)
-        scheme = parsed.scheme.lower()
-
-        if not scheme:
-            self._open_recent_file(canonical_uri)
-            return
-
-        if scheme not in {"s3", "ssh", "http", "https"}:
-            QMessageBox.critical(self, "Unsupported URI", f"Unsupported URI protocol: {scheme}")
-            return
-
-        config, remote_path, host_alias, unknown_host = self._resolve_remote_uri(canonical_uri)
-        if unknown_host and from_uri_dialog:
-            self._configure_remote_for_uri(canonical_uri)
-            config, remote_path, host_alias, _unknown_host_after = self._resolve_remote_uri(canonical_uri)
-
-        if config is None:
-            QMessageBox.critical(self, "Unknown host", "Host route is not known. Configure a remote first.")
-            return
-
-        self._open_remote_uri_direct(
-            uri=canonical_uri,
-            remote_path=remote_path,
-            config=config,
-            host_alias=host_alias,
+        _remote_flow_ops.open_uri_entry(
+            self,
+            uri,
+            from_uri_dialog=from_uri_dialog,
+            canonical_remote_uri=CFVCore._canonical_remote_uri,
+            qmessagebox_cls=QMessageBox,
         )
 
     def _configure_remote(self) -> None:
         """Open the full remote configuration dialog non-modally; Open proceeds to worker-backed navigation."""
-        raw_state = self._settings.get("last_remote_configuration", {})
-        state = dict(raw_state) if isinstance(raw_state, dict) else {}
-        https_locations = self._settings.get("remote_https_locations")
-        if not isinstance(https_locations, dict):
-            https_locations = self._settings.get("remote_http_locations")
-        if isinstance(https_locations, dict) and https_locations:
-            state["https_locations"] = dict(https_locations)
-        s3_reductionist_locations = self._settings.get("remote_s3_reductionist_locations")
-        if isinstance(s3_reductionist_locations, dict) and s3_reductionist_locations:
-            state["s3_reductionist_locations"] = dict(s3_reductionist_locations)
-
-        def _on_finished(config: dict | None, ok: bool, next_state: dict) -> None:
-            self._settings["last_remote_configuration"] = next_state
-            if isinstance(next_state, dict):
-                persisted_https = next_state.get("https_locations")
-                if not isinstance(persisted_https, dict):
-                    persisted_https = next_state.get("http_locations")
-                if isinstance(persisted_https, dict):
-                    self._settings["remote_https_locations"] = dict(persisted_https)
-                persisted_s3_reductionist = next_state.get("s3_reductionist_locations")
-                if isinstance(persisted_s3_reductionist, dict):
-                    self._settings["remote_s3_reductionist_locations"] = {
-                        str(alias).strip(): str(url).strip()
-                        for alias, url in persisted_s3_reductionist.items()
-                        if str(alias).strip() and str(url).strip()
-                    }
-            self._save_settings()
-            if not ok or config is None:
-                return
-            self._open_remote_from_config(config)
-
-        RemoteConfigurationDialog.show_non_modal(self, state=state, on_finished=_on_finished)
+        _remote_flow_ops.configure_remote(
+            self,
+            remote_configuration_dialog_cls=RemoteConfigurationDialog,
+        )
 
     def _choose_remote(self) -> None:
         """Open using existing short names via a streamlined protocol picker dialog."""
-        raw_state = self._settings.get("last_remote_open", {})
-        state = raw_state if isinstance(raw_state, dict) else {}
-        if isinstance(state, dict):
-            merged_http: dict[str, object] = {}
-            merged_ssh_runtime_preferences: dict[str, object] = {}
-            merged_s3_reductionist: dict[str, str] = {}
-
-            configured_state = self._settings.get("last_remote_configuration")
-            if isinstance(configured_state, dict):
-                cfg_http = configured_state.get("https_locations")
-                if not isinstance(cfg_http, dict):
-                    cfg_http = configured_state.get("http_locations")
-                if isinstance(cfg_http, dict):
-                    merged_http.update(cfg_http)
-                cfg_ssh_prefs = configured_state.get("ssh_runtime_preferences")
-                if isinstance(cfg_ssh_prefs, dict):
-                    merged_ssh_runtime_preferences.update(cfg_ssh_prefs)
-
-            http_locations = self._settings.get("remote_https_locations")
-            if not isinstance(http_locations, dict):
-                http_locations = self._settings.get("remote_http_locations")
-            if isinstance(http_locations, dict):
-                merged_http.update(http_locations)
-
-            persisted_s3_reductionist = self._settings.get("remote_s3_reductionist_locations")
-            if isinstance(persisted_s3_reductionist, dict):
-                merged_s3_reductionist.update(
-                    {
-                        str(alias).strip(): str(url).strip()
-                        for alias, url in persisted_s3_reductionist.items()
-                        if str(alias).strip() and str(url).strip()
-                    }
-                )
-
-            open_state_ssh_prefs = state.get("ssh_runtime_preferences") if isinstance(state, dict) else None
-            if isinstance(open_state_ssh_prefs, dict):
-                merged_ssh_runtime_preferences.update(open_state_ssh_prefs)
-
-            if merged_http or merged_ssh_runtime_preferences or merged_s3_reductionist:
-                state = dict(state)
-                if merged_http:
-                    state["https_locations"] = dict(merged_http)
-                if merged_ssh_runtime_preferences:
-                    state["ssh_runtime_preferences"] = dict(merged_ssh_runtime_preferences)
-                if merged_s3_reductionist:
-                    state["s3_reductionist_locations"] = dict(merged_s3_reductionist)
-
-        config, ok, next_state = RemoteOpenDialog.get_configuration(self, state=state)
-        self._settings["last_remote_open"] = next_state
-        self._save_settings()
-        if isinstance(next_state, dict) and bool(next_state.get("configure_new_remote")):
-            self._configure_remote()
-            return
-        if not ok or config is None:
-            return
-        config = CFVMain._with_cache_defaults(self, config)
-        self._open_remote_from_config(config)
+        _remote_flow_ops.choose_remote(
+            self,
+            remote_open_dialog_cls=RemoteOpenDialog,
+            with_cache_defaults_fn=lambda payload: CFVMain._with_cache_defaults(self, payload),
+        )
 
     def _browse_remote(self) -> None:
         """Re-browse the active remote session, or prompt for a new one if none is active.
@@ -1425,102 +684,902 @@ class CFVMain(CFVCore):
         previous tree state.  A "New Remote..." button in the navigator lets the user
         switch to a different remote at any time.
         """
-        if self._remote_session_id and self._last_remote_config:
-            from .remote_access import build_remote_filesystem_spec  # noqa: PLC0415
-            from .ui.remote_file_navigator import RemoteFileNavigatorDialog  # noqa: PLC0415
-            try:
-                spec = build_remote_filesystem_spec(self._last_remote_config)
-            except Exception as exc:
-                QMessageBox.critical(self, "Remote configuration invalid", str(exc))
-                return
-            list_callback = self._make_worker_list_callback()
-            dialog = RemoteFileNavigatorDialog(
-                self,
-                self._last_remote_config,
-                spec=spec,
-                list_callback=list_callback,
-                new_remote_button=True,
-                session_active=bool(self._remote_session_id),
-                initial_tree_state=self._last_remote_navigator_state,
-            )
-            result = dialog.exec()
-            self._last_remote_navigator_state = dialog._collect_tree_state()
-            if dialog.shutdown_session_requested:
-                self._release_remote_session_if_active()
-                self._show_status_message("Remote session shut down.")
-                return
-            if dialog.new_remote_requested:
-                self._choose_remote()
-                return
-            if result != QDialog.Accepted:
-                return
-            selected_uri = dialog.selected_uri()
-            selected_path = dialog.selected_path()
-            if not selected_uri or not selected_path:
-                self._show_status_message("Remote file selection was incomplete.", is_error=True)
-                return
-            remote = self._last_remote_config.get("remote") if isinstance(self._last_remote_config, dict) else None
-            host_alias = str(remote.get("alias", "")).strip() if isinstance(remote, dict) else ""
-            self._set_window_title_for_file(selected_uri)
-            self._show_status_message(f"Selected remote file: {selected_uri}")
-            if host_alias:
-                self._record_recent_uri(selected_uri, host_alias)
-            else:
-                self._record_recent_file(selected_uri)
-            self._load_remote_selected_file(selected_uri, selected_path)
-        else:
-            self._choose_remote()
+        _remote_flow_ops.browse_remote(
+            self,
+            qdialog_accepted_value=QDialog.Accepted,
+            qmessagebox_cls=QMessageBox,
+        )
 
     def _choose_uris(self) -> None:
         """Show URI dialog and open supported URIs directly through the worker."""
-        default_uri = self._default_open_uri_value()
-        uri, ok, quit_requested = OpenURIDialog.get_uri(self, default_uri=default_uri)
-        if quit_requested:
-            return
-        if not ok:
-            return
-        self._open_uri_entry(uri, from_uri_dialog=True)
+        _remote_flow_ops.choose_uris(
+            self,
+            open_uri_dialog_cls=OpenURIDialog,
+        )
 
     def _open_recent_file(self, file_path: str) -> None:
         """Open a recent entry, routing remote URIs through URI resolution flow."""
-        if urlparse(file_path).scheme:
-            self._open_uri_entry(file_path, from_uri_dialog=False)
-            return
-        super()._open_recent_file(file_path)
+        _remote_flow_ops.open_recent_file(
+            self,
+            file_path,
+            super_open_recent_file=super()._open_recent_file,
+        )
 
     def _make_worker_list_callback(self):
         """Return a callable that lists a remote directory via worker IPC using a nested QEventLoop."""
-        def list_dir(path: str) -> list[RemoteEntry]:
-            loop = QEventLoop()
-            self._pending_list_loop = loop
-            self._pending_list_result = None
-            self._send_worker_control_task(
-                "REMOTE_LIST",
-                {
-                    "session_id": self._remote_session_id,
-                    "descriptor_hash": self._remote_descriptor_hash,
-                    "descriptor": self._remote_descriptor,
-                    "path": path,
-                },
-            )
-            loop.exec()
-            result = self._pending_list_result
-            self._pending_list_loop = None
-            self._pending_list_result = None
-            if result is None:
-                raise RuntimeError(f"No response from worker for directory listing of {path!r}")
-            error = result.get("error")
-            if error:
-                raise RuntimeError(str(error))
-            return list(result.get("entries", []))
-
-        return list_dir
+        return _remote_flow_ops.make_worker_list_callback(
+            self,
+            qeventloop_cls=QEventLoop,
+        )
 
     def _request_coordinates_for_field(self, index: int, show_status: bool = True) -> None:
         """Request coordinate arrays for a selected field index."""
         if show_status:
             self._show_status_message(f"Loading coordinates for field index {index}...")
         self._send_worker_task(coordinate_list(index))
+
+    @staticmethod
+    def _json_safe_operation_payload(value: object) -> object:
+        """Return a JSON-compatible copy of operation payload data."""
+        return _replay_ops.json_safe_operation_payload(value)
+
+    def _last_operations_path(self) -> Path:
+        """Return path to the replayable operations history file."""
+        return _replay_ops.last_operations_path()
+
+    def _load_last_operations_payload(self) -> dict[str, object]:
+        """Load replay payload from disk, returning an empty schema when absent/invalid."""
+        return _replay_ops.load_last_operations_payload(self)
+
+    def _record_replayable_operation(self, operation: dict[str, object]) -> None:
+        """Append one replayable field operation to disk."""
+        _replay_ops.record_replayable_operation(self, operation)
+
+    def _worker_code_for_replay_operation(self, operation: dict[str, object]) -> str | None:
+        """Build worker task code for one replayable operation payload."""
+        kind = str(operation.get("kind", "")).strip().lower()
+
+        if kind == "unary_xy":
+            field_index = operation.get("field_index")
+            field_ref = operation.get("field_ref")
+            operation_key = operation.get("operation")
+            resolved_index = None
+            if isinstance(field_ref, dict):
+                resolved_index = CFVMain._resolve_field_reference_index(self, field_ref)
+            if resolved_index is None and isinstance(field_index, int):
+                resolved_index = field_index
+            if isinstance(resolved_index, int) and isinstance(operation_key, str) and operation_key.strip():
+                return unary_xy_field_operation(resolved_index, operation_key)
+            return None
+
+        if kind == "filter":
+            field_index = operation.get("field_index")
+            field_ref = operation.get("field_ref")
+            config = operation.get("config")
+            resolved_index = None
+            if isinstance(field_ref, dict):
+                resolved_index = CFVMain._resolve_field_reference_index(self, field_ref)
+            if resolved_index is None and isinstance(field_index, int):
+                resolved_index = field_index
+            if isinstance(resolved_index, int) and isinstance(config, dict):
+                return filter_field_operation(resolved_index, config)
+            return None
+
+        if kind == "binary":
+            index_a = operation.get("index_a")
+            index_b = operation.get("index_b")
+            field_ref_a = operation.get("field_ref_a")
+            field_ref_b = operation.get("field_ref_b")
+            operation_key = operation.get("operation")
+            source_files_raw = operation.get("source_files", [])
+            source_files = []
+            if isinstance(source_files_raw, list):
+                source_files = [str(item) for item in source_files_raw if isinstance(item, str)]
+            resolved_a = None
+            resolved_b = None
+            if isinstance(field_ref_a, dict):
+                resolved_a = CFVMain._resolve_field_reference_index(self, field_ref_a)
+            if isinstance(field_ref_b, dict):
+                resolved_b = CFVMain._resolve_field_reference_index(self, field_ref_b)
+            if resolved_a is None and isinstance(index_a, int):
+                resolved_a = index_a
+            if resolved_b is None and isinstance(index_b, int):
+                resolved_b = index_b
+            if (
+                isinstance(resolved_a, int)
+                and isinstance(resolved_b, int)
+                and isinstance(operation_key, str)
+                and operation_key.strip()
+            ):
+                return binary_field_operation(resolved_a, resolved_b, operation_key, source_files=source_files)
+            return None
+
+        if kind == "apply_selection":
+            field_index = operation.get("field_index")
+            field_ref = operation.get("field_ref")
+            selections = operation.get("selections")
+            collapse_by_coord = operation.get("collapse_by_coord")
+            resolved_index = None
+            if isinstance(field_ref, dict):
+                resolved_index = CFVMain._resolve_field_reference_index(self, field_ref)
+            if resolved_index is None and isinstance(field_index, int):
+                resolved_index = field_index
+            if (
+                isinstance(resolved_index, int)
+                and isinstance(selections, dict)
+                and isinstance(collapse_by_coord, dict)
+            ):
+                return apply_selection_field_operation(resolved_index, selections, collapse_by_coord)
+            return None
+
+        if kind == "regrid":
+            config = operation.get("config")
+            if isinstance(config, dict):
+                config_copy = dict(config)
+                field_refs = operation.get("field_refs")
+                if isinstance(field_refs, list) and field_refs:
+                    resolved_indices: list[int] = []
+                    for raw_ref in field_refs:
+                        if not isinstance(raw_ref, dict):
+                            continue
+                        resolved = CFVMain._resolve_field_reference_index(self, raw_ref)
+                        if isinstance(resolved, int):
+                            resolved_indices.append(resolved)
+                    if resolved_indices:
+                        config_copy["field_indices"] = resolved_indices
+                return regrid_fields_operation(json.dumps(config_copy, sort_keys=True))
+            return None
+
+        return None
+
+    def _describe_replay_operation(self, operation: dict[str, object]) -> str:
+        """Build a short, user-facing description for one replayable operation."""
+        return _replay_ops.describe_replay_operation(operation)
+
+    def _source_files_for_replay_operation(self, operation: dict[str, object]) -> list[str]:
+        """Return ordered source-file hints associated with one replay operation."""
+        return _replay_ops.source_files_for_replay_operation(operation)
+
+    @staticmethod
+    def _is_remote_source_uri(uri: str) -> bool:
+        return _replay_ops.is_remote_source_uri(uri)
+
+    def _open_remote_uri_for_replay_sync(self, uri: str) -> None:
+        """Open one remote URI via the normal remote-control path and wait for REMOTE_OPEN_RESULT."""
+        canonical_uri = CFVCore._canonical_remote_uri(uri)
+        config, remote_path, host_alias, unknown_host = self._resolve_remote_uri(canonical_uri)
+        if unknown_host or config is None:
+            raise ValueError(f"Replay could not resolve remote source URI: {canonical_uri}")
+
+        self._pending_remote_open_result = None
+        self._pending_remote_open_loop = QEventLoop()
+        open_loop = self._pending_remote_open_loop
+
+        timeout = QTimer(self)
+        timeout.setSingleShot(True)
+        timeout.timeout.connect(open_loop.quit)
+        timeout.start(15000)
+
+        before_prepare_failure = str(getattr(self, "_pending_prepare_failure_message", "") or "")
+        self._open_remote_uri_direct(
+            uri=canonical_uri,
+            remote_path=remote_path,
+            config=config,
+            host_alias=host_alias,
+        )
+        after_prepare_failure = str(getattr(self, "_pending_prepare_failure_message", "") or "")
+        if after_prepare_failure and after_prepare_failure != before_prepare_failure:
+            self._pending_remote_open_loop = None
+            timeout.stop()
+            raise ValueError(f"Replay remote preload failed for {canonical_uri}: {after_prepare_failure}")
+
+        if self._pending_remote_open_result is None and self._pending_remote_open_loop is not None:
+            open_loop.exec()
+
+        timed_out = not bool(self._pending_remote_open_result)
+        if timeout.isActive():
+            timeout.stop()
+        self._pending_remote_open_loop = None
+
+        payload = self._pending_remote_open_result
+        self._pending_remote_open_result = None
+        if timed_out or not isinstance(payload, dict):
+            raise ValueError(f"Replay remote preload timed out for source: {canonical_uri}")
+        if not bool(payload.get("ok")):
+            error = str(payload.get("error") or "Remote open failed")
+            raise ValueError(f"Replay remote preload failed for {canonical_uri}: {error}")
+
+    def _load_local_source_for_replay_sync(self, file_path: str, *, append: bool) -> None:
+        """Load one local source via worker and wait for METADATA response."""
+        loader = getattr(self, "_load_selected_file", None)
+        if not callable(loader):
+            return
+
+        self._pending_metadata_received = False
+        self._pending_metadata_error = ""
+        self._pending_metadata_loop = QEventLoop()
+        metadata_loop = self._pending_metadata_loop
+
+        timeout = QTimer(self)
+        timeout.setSingleShot(True)
+        timeout.timeout.connect(metadata_loop.quit)
+        timeout.start(15000)
+
+        loader(file_path, clear_existing=False, append_metadata=append)
+
+        if self._pending_metadata_loop is not None:
+            metadata_loop.exec()
+
+        timed_out = not self._pending_metadata_received and not bool(self._pending_metadata_error)
+        if timeout.isActive():
+            timeout.stop()
+        self._pending_metadata_loop = None
+
+        if self._pending_metadata_error:
+            raise ValueError(f"Replay local preload failed for {file_path}: {self._pending_metadata_error}")
+        if timed_out:
+            raise ValueError(f"Replay local preload timed out for source: {file_path}")
+
+    def _field_reference_for_index(self, index: int) -> dict[str, object] | None:
+        """Build a stable field reference for one current list index."""
+        item = self.field_list_widget.item(index)
+        if item is None:
+            return None
+
+        identity = CFVMain._field_identity_from_item(self, item)
+        if not identity:
+            return None
+
+        source_raw = item.data(Qt.UserRole + 2)
+        source = str(source_raw).strip() if isinstance(source_raw, str) and source_raw.strip() else ""
+        generated_raw = item.data(Qt.UserRole + 5)
+        generated = bool(generated_raw) if isinstance(generated_raw, bool) else False
+
+        occurrence = 0
+        for idx in range(self.field_list_widget.count()):
+            current = self.field_list_widget.item(idx)
+            if current is None:
+                continue
+            if CFVMain._field_identity_from_item(self, current) != identity:
+                continue
+            current_source_raw = current.data(Qt.UserRole + 2)
+            current_source = (
+                str(current_source_raw).strip()
+                if isinstance(current_source_raw, str) and current_source_raw.strip()
+                else ""
+            )
+            current_generated_raw = current.data(Qt.UserRole + 5)
+            current_generated = bool(current_generated_raw) if isinstance(current_generated_raw, bool) else False
+            if current_source == source and current_generated == generated:
+                occurrence += 1
+            if idx == index:
+                break
+
+        return {
+            "identity": identity,
+            "source_file": source,
+            "generated": generated,
+            "occurrence": max(occurrence, 1),
+        }
+
+    def _resolve_field_reference_index(self, field_ref: dict[str, object]) -> int | None:
+        """Resolve a stable field reference to the current list index."""
+        identity_raw = field_ref.get("identity")
+        if not isinstance(identity_raw, str) or not identity_raw.strip():
+            return None
+        identity = identity_raw.strip()
+
+        source_raw = field_ref.get("source_file")
+        source = str(source_raw).strip() if isinstance(source_raw, str) and source_raw.strip() else ""
+
+        generated_raw = field_ref.get("generated")
+        generated_filter = bool(generated_raw) if isinstance(generated_raw, bool) else None
+
+        occurrence_raw = field_ref.get("occurrence")
+        try:
+            occurrence_target = int(occurrence_raw)
+        except (TypeError, ValueError):
+            occurrence_target = 1
+        if occurrence_target < 1:
+            occurrence_target = 1
+
+        seen = 0
+        for idx in range(self.field_list_widget.count()):
+            item = self.field_list_widget.item(idx)
+            if item is None:
+                continue
+            if CFVMain._field_identity_from_item(self, item) != identity:
+                continue
+
+            item_source_raw = item.data(Qt.UserRole + 2)
+            item_source = (
+                str(item_source_raw).strip()
+                if isinstance(item_source_raw, str) and item_source_raw.strip()
+                else ""
+            )
+            if source and item_source != source:
+                continue
+
+            if generated_filter is not None:
+                item_generated_raw = item.data(Qt.UserRole + 5)
+                item_generated = bool(item_generated_raw) if isinstance(item_generated_raw, bool) else False
+                if item_generated != generated_filter:
+                    continue
+
+            seen += 1
+            if seen == occurrence_target:
+                return idx
+
+        return None
+
+    def _field_ops_replay_last_operations(self) -> None:
+        """Replay persisted field operations by dispatching a worker control task."""
+        _replay_ops.field_ops_replay_last_operations(
+            self,
+            replay_dialog_cls=ReplayOperationsDialog,
+        )
+
+    def _build_remote_open_requests_for_sources(self, sources: list[str]) -> list[dict[str, object]]:
+        """Build worker remote-open descriptors for a list of replay/provenance sources."""
+        return _replay_ops.build_remote_open_requests_for_sources(
+            self,
+            sources,
+            is_remote_source_uri_fn=CFVMain._is_remote_source_uri,
+            with_cache_defaults_fn=lambda payload: CFVMain._with_cache_defaults(self, payload),
+        )
+
+    def _file_ops_save_selected_provenance(self) -> None:
+        """Save field-specific upstream provenance for selected fields."""
+        _replay_ops.file_ops_save_selected_provenance(
+            self,
+            file_dialog_cls=QFileDialog,
+        )
+
+    @staticmethod
+    def _workflow_payload_from_provenance_document(payload: object) -> dict[str, object] | None:
+        """Normalize either internal workflow JSON or PROV-JSON into replay workflow payload."""
+        return _replay_ops.workflow_payload_from_provenance_document(payload)
+
+    def _input_load_and_run_prov(self) -> None:
+        """Load internal/PROV workflow JSON and replay it through worker control messaging."""
+        _replay_ops.input_load_and_run_prov(
+            self,
+            file_dialog_cls=QFileDialog,
+            workflow_payload_from_provenance_document=CFVMain._workflow_payload_from_provenance_document,
+        )
+
+    def _field_identity_from_item(self, item: QListWidgetItem | None) -> str:
+        """Return stable field identity text when available, else display text."""
+        if item is None:
+            return ""
+        controller = getattr(self, "field_metadata_controller", None)
+        resolver = getattr(controller, "field_identity_from_item", None)
+        if callable(resolver):
+            identity = resolver(item)
+            if isinstance(identity, str) and identity:
+                return identity
+        return item.text() if hasattr(item, "text") else ""
+
+    def _selected_field_index_for_operation(self, operation: str) -> int | None:
+        """Return a single selected field index suitable for unary field operations."""
+        selected = list(getattr(self, "_selected_field_indices", []))
+
+        if not selected:
+            item = self.field_list_widget.currentItem()
+            if item is not None:
+                idx = self.field_list_widget.row(item)
+                if idx >= 0:
+                    selected = [idx]
+
+        if len(selected) != 1:
+            message = f"{operation} requires exactly one selected field."
+            logger.error(message)
+            self._show_status_message(message, is_error=True)
+            return None
+
+        return selected[0]
+
+    def _run_unary_xy_field_operation(self, operation_name: str, operation_key: str) -> None:
+        """Dispatch unary XY field operation through worker-side template/helper code."""
+        field_index = self._selected_field_index_for_operation(operation_name)
+        if field_index is None:
+            return
+        self._pending_binary_operation_name = None
+
+        source_file = None
+        selected_item = self.field_list_widget.item(field_index)
+        if selected_item is not None:
+            raw_source = selected_item.data(Qt.UserRole + 2)
+            if isinstance(raw_source, str) and raw_source.strip():
+                source_file = raw_source
+        self._pending_field_op_source = source_file
+
+        self._show_status_message(f"Running {operation_name} on field index {field_index}...")
+        logger.info("Running field op %s on field index %d", operation_name, field_index)
+
+        self._record_replayable_operation(
+            {
+                "kind": "unary_xy",
+                "field_index": field_index,
+                "field_ref": CFVMain._field_reference_for_index(self, field_index),
+                "selected_indices": [field_index],
+                "operation": operation_key,
+                "source_file": source_file,
+            }
+        )
+
+        code = unary_xy_field_operation(field_index, operation_key)
+        self._send_worker_task(code, emit_image=False)
+
+    def _run_add_bounds_operation(self, operation_name: str) -> None:
+        """Dispatch missing dimension-coordinate bounds creation through the worker."""
+        field_index = self._selected_field_index_for_operation(operation_name)
+        if field_index is None:
+            return
+        self._pending_binary_operation_name = None
+
+        source_file = None
+        selected_item = self.field_list_widget.item(field_index)
+        if selected_item is not None:
+            raw_source = selected_item.data(Qt.UserRole + 2)
+            if isinstance(raw_source, str) and raw_source.strip():
+                source_file = raw_source
+        self._pending_field_op_source = source_file
+        self._pending_metadata_source = source_file
+        self._pending_metadata_append = False
+        self._pending_reselect_field_index = field_index
+
+        self._show_status_message(f"Adding bounds on field index {field_index}...")
+        logger.info("Adding bounds on field index %d", field_index)
+
+        code = add_dimension_coordinate_bounds(field_index)
+        self._send_worker_task(code, emit_image=False)
+
+    def _selected_two_field_indices_for_operation(self, operation: str) -> tuple[int, int] | None:
+        """Return exactly two selected field indices for binary operations."""
+        selected = [int(i) for i in getattr(self, "_selected_field_indices", []) if int(i) >= 0]
+        if len(selected) != 2:
+            self._show_status_message("Two fields need to be selected for difference", is_error=True)
+            return None
+        return selected[0], selected[1]
+
+    def _run_binary_field_operation(self, operation_name: str, operation_key: str) -> None:
+        """Dispatch binary field operation using exactly two selected fields."""
+        pair = self._selected_two_field_indices_for_operation(operation_name)
+        if pair is None:
+            return
+        self._pending_binary_operation_name = operation_name
+
+        idx_a, idx_b = pair
+        source_paths: list[str] = []
+        for idx in (idx_a, idx_b):
+            item = self.field_list_widget.item(idx)
+            if item is None:
+                continue
+            raw_source = item.data(Qt.UserRole + 2)
+            if isinstance(raw_source, str) and raw_source.strip():
+                source_paths.append(raw_source)
+        unique_sources = sorted(set(source_paths))
+        self._pending_field_op_source = unique_sources[0] if len(unique_sources) == 1 else None
+
+        self._show_status_message(f"Running {operation_name} on field indices {idx_a} and {idx_b}...")
+        logger.info("Running binary field op %s on field indices %d and %d", operation_name, idx_a, idx_b)
+
+        self._record_replayable_operation(
+            {
+                "kind": "binary",
+                "index_a": idx_a,
+                "index_b": idx_b,
+                "field_ref_a": CFVMain._field_reference_for_index(self, idx_a),
+                "field_ref_b": CFVMain._field_reference_for_index(self, idx_b),
+                "selected_indices": [idx_a, idx_b],
+                "operation": operation_key,
+                "source_files": source_paths,
+            }
+        )
+
+        code = binary_field_operation(idx_a, idx_b, operation_key, source_files=source_paths)
+        self._send_worker_task(code, emit_image=False)
+
+    def _process_rss_mib(self, pid: int | None) -> float | None:
+        """Return RSS for a process in MiB, or None if unavailable."""
+        if not isinstance(pid, int) or pid <= 0:
+            return None
+
+        try:
+            process = psutil.Process(pid)
+            return float(process.memory_info().rss) / (1024.0 * 1024.0)
+        except Exception:
+            return None
+
+    def _update_memory_status(self) -> None:
+        """Refresh the status-bar memory readout."""
+        app_rss = self._process_rss_mib(os.getpid())
+        worker_rss = self._process_rss_mib(self.worker.processId())
+
+        if app_rss is None and worker_rss is None:
+            text = "Mem: unavailable"
+        elif worker_rss is None:
+            text = f"Mem app: {app_rss:.0f} MiB | worker: --"
+        elif app_rss is None:
+            text = f"Mem app: -- | worker: {worker_rss:.0f} MiB"
+        else:
+            text = f"Mem app: {app_rss:.0f} MiB | worker: {worker_rss:.0f} MiB"
+
+        self._memory_status_label.setText(text)
+
+    def _field_ops_regrid(self) -> None:
+        """Open the Regrid dialog for the currently selected fields."""
+        selected_items = list(self.field_list_widget.selectedItems())
+        if not selected_items:
+            self._show_status_message("Select one or more fields to regrid.", is_error=True)
+            return
+
+        selected_rows: list[dict[str, object]] = []
+        for item in selected_items:
+            idx = self.field_list_widget.row(item)
+            if idx < 0:
+                continue
+            selected_rows.append(
+                {
+                    "index": idx,
+                    "identity": CFVMain._field_identity_from_item(self, item),
+                }
+            )
+
+        if not selected_rows:
+            self._show_status_message("No valid selected fields to regrid.", is_error=True)
+            return
+
+        dialog = RegridDialog(self, selected_rows, on_submit=self._run_regrid_operation)
+        dialog.show()
+
+    def _field_ops_apply_selection(self) -> None:
+        """Apply current selection/collapse state and append result as a new field."""
+        context = self._build_plot_context()
+        if context is None:
+            return
+
+        field_index = self._selected_field_index_for_operation("Apply Selection")
+        if field_index is None:
+            return
+
+        selections, collapse_by_coord, _plot_kind = context
+        source_file = None
+        selected_item = self.field_list_widget.item(field_index)
+        if selected_item is not None:
+            raw_source = selected_item.data(Qt.UserRole + 2)
+            if isinstance(raw_source, str) and raw_source.strip():
+                source_file = raw_source
+
+        self._pending_binary_operation_name = None
+        self._pending_field_op_source = source_file
+
+        self._show_status_message(f"Applying selection on field index {field_index}...")
+        logger.info(
+            "Applying selection on field index %d with %d selection(s) and %d collapse(s)",
+            field_index,
+            len(selections),
+            len(collapse_by_coord),
+        )
+
+        self._record_replayable_operation(
+            {
+                "kind": "apply_selection",
+                "field_index": field_index,
+                "field_ref": CFVMain._field_reference_for_index(self, field_index),
+                "selected_indices": [field_index],
+                "selections": selections,
+                "collapse_by_coord": collapse_by_coord,
+                "source_file": source_file,
+            }
+        )
+
+        code = apply_selection_field_operation(field_index, selections, collapse_by_coord)
+        self._send_worker_task(code, emit_image=False)
+
+    def _run_regrid_operation(self, regrid_config: dict[str, object]) -> None:
+        """Dispatch a regrid operation through worker-side JSON config parsing."""
+        self._pending_binary_operation_name = None
+        selected_indices = regrid_config.get("field_indices", [])
+        if not isinstance(selected_indices, list) or not selected_indices:
+            self._show_status_message("Regrid configuration did not include selected fields.", is_error=True)
+            return
+
+        source_paths: set[str] = set()
+        for raw_idx in selected_indices:
+            try:
+                idx = int(raw_idx)
+            except (TypeError, ValueError):
+                continue
+            item = self.field_list_widget.item(idx)
+            if item is None:
+                continue
+            raw_source = item.data(Qt.UserRole + 2)
+            if isinstance(raw_source, str) and raw_source.strip():
+                source_paths.add(raw_source)
+
+        sorted_sources = sorted(source_paths)
+        self._pending_field_op_source = sorted_sources[0] if len(sorted_sources) == 1 else None
+
+        target = str(regrid_config.get("target", "unknown"))
+        self._show_status_message(f"Running Regrid for target {target}...")
+        logger.info("Running regrid operation target=%s selected_count=%d", target, len(selected_indices))
+
+        self._record_replayable_operation(
+            {
+                "kind": "regrid",
+                "config": regrid_config,
+                "field_refs": [
+                    ref
+                    for ref in (
+                        CFVMain._field_reference_for_index(self, int(idx))
+                        for idx in selected_indices
+                        if isinstance(idx, int)
+                    )
+                    if isinstance(ref, dict)
+                ],
+                "source_files": sorted_sources,
+            }
+        )
+
+        config_json = json.dumps(regrid_config, sort_keys=True)
+        code = regrid_fields_operation(config_json)
+        self._send_worker_task(code, emit_image=False)
+
+    def _field_ops_add_bounds(self) -> None:
+        """Create missing dimension-coordinate bounds on the selected field."""
+        self._run_add_bounds_operation("Add Bounds")
+
+    def _field_ops_maths_grad(self) -> None:
+        """Create and append grad field via cf.Field.grad_xy."""
+        self._run_unary_xy_field_operation("Grad", "grad")
+
+    def _field_ops_maths_difference_ab(self) -> None:
+        """Create and append binary difference field using first-selected minus second-selected."""
+        self._run_binary_field_operation("Difference (A-B)", "difference_ab")
+
+    def _field_ops_maths_difference_ba(self) -> None:
+        """Create and append binary difference field using second-selected minus first-selected."""
+        self._run_binary_field_operation("Difference (B-A)", "difference_ba")
+
+    def _field_ops_maths_laplacian(self) -> None:
+        """Create and append laplacian field via cf.Field.laplacian_xy."""
+        self._run_unary_xy_field_operation("Laplacian", "laplacian")
+
+    def _field_ops_maths_filter(self) -> None:
+        """Open filter options dialog for one selected field."""
+        field_index = self._selected_field_index_for_operation("Filter")
+        if field_index is None:
+            return
+
+        axes = self._request_filter_axes_for_field(field_index)
+        if not axes:
+            self._show_status_message(
+                "No filterable axes are available for this field (all candidate axes have size 1).",
+                is_error=True,
+            )
+            return
+
+        selected_item = self.field_list_widget.item(field_index)
+        field_label = self._field_identity_from_item(selected_item) or f"field index {field_index}"
+
+        dialog = FilterDialog(
+            self,
+            field_label=field_label,
+            available_axes=axes,
+            on_submit=lambda config: self._run_filter_field_operation(field_index, config),
+        )
+        dialog.show()
+
+    def _request_filter_axes_for_field(self, field_index: int) -> list[str]:
+        """Request filterable non-singleton axes from worker for one field index."""
+        self._pending_filter_axes_result = None
+        self._pending_filter_axes_loop = QEventLoop()
+        loop = self._pending_filter_axes_loop
+
+        timeout = QTimer(self)
+        timeout.setSingleShot(True)
+        timeout.timeout.connect(loop.quit)
+        timeout.start(8000)
+
+        code = filter_axes_for_field(field_index)
+        self._send_worker_task(code, emit_image=False)
+
+        if self._pending_filter_axes_loop is not None:
+            loop.exec()
+
+        if timeout.isActive():
+            timeout.stop()
+        self._pending_filter_axes_loop = None
+
+        axes_raw = self._pending_filter_axes_result
+        self._pending_filter_axes_result = None
+        if not isinstance(axes_raw, list):
+            return []
+
+        ordered: list[str] = []
+        for axis in ("T", "Z", "Y", "X"):
+            if axis in axes_raw and axis not in ordered:
+                ordered.append(axis)
+        return ordered
+
+    def _run_filter_field_operation(self, field_index: int, config: dict[str, object]) -> None:
+        """Dispatch configurable filter operation using one selected field."""
+        self._pending_binary_operation_name = None
+
+        source_file = None
+        selected_item = self.field_list_widget.item(field_index)
+        if selected_item is not None:
+            raw_source = selected_item.data(Qt.UserRole + 2)
+            if isinstance(raw_source, str) and raw_source.strip():
+                source_file = raw_source
+        self._pending_field_op_source = source_file
+
+        method = str(config.get("method", "filter")).strip() or "filter"
+        self._show_status_message(f"Running Filter ({method}) on field index {field_index}...")
+        logger.info("Running filter op method=%s on field index %d", method, field_index)
+
+        self._record_replayable_operation(
+            {
+                "kind": "filter",
+                "field_index": field_index,
+                "field_ref": CFVMain._field_reference_for_index(self, field_index),
+                "selected_indices": [field_index],
+                "config": config,
+                "source_file": source_file,
+            }
+        )
+
+        code = filter_field_operation(field_index, config)
+        self._send_worker_task(code, emit_image=False)
+
+    def _remove_selected_fields(self) -> None:
+        """Remove selected fields from both the UI list and worker field list."""
+        selected_items = list(self.field_list_widget.selectedItems())
+        if not selected_items:
+            self._show_status_message("Select one or more fields to remove.", is_error=True)
+            return
+
+        indices = sorted(
+            {
+                idx
+                for idx in (self.field_list_widget.row(item) for item in selected_items)
+                if idx >= 0
+            },
+            reverse=True,
+        )
+        if not indices:
+            return
+
+        self._send_worker_task(remove_selected_fields(list(reversed(indices))), emit_image=False)
+
+        for idx in indices:
+            _ = self.field_list_widget.takeItem(idx)
+
+        controller = getattr(self, "field_metadata_controller", None)
+        renumber = getattr(controller, "renumber_field_list", None)
+        if callable(renumber):
+            renumber()
+
+        self._selected_field_indices = []
+        remaining = self.field_list_widget.count()
+        if remaining <= 0:
+            self._set_field_list_hint("Open a file to see fields")
+            self.build_dynamic_sliders({})
+            self._show_status_message("Removed all fields.")
+            return
+
+        next_index = min(indices[-1], remaining - 1)
+        next_item = self.field_list_widget.item(next_index)
+        if next_item is not None:
+            self.field_list_widget.setCurrentItem(next_item)
+            self.on_field_clicked(next_item)
+
+        self._show_status_message(f"Removed {len(indices)} field(s).")
+
+    def _file_ops_save_selected(self) -> None:
+        """Show save-selected dialog and dispatch worker save task."""
+        selected_items = list(self.field_list_widget.selectedItems())
+        if not selected_items:
+            self._show_status_message("Select one or more fields to save.", is_error=True)
+            return
+
+        selected_indices = sorted(
+            {
+                idx
+                for idx in (self.field_list_widget.row(item) for item in selected_items)
+                if idx >= 0
+            }
+        )
+        if not selected_indices:
+            self._show_status_message("No valid selected fields to save.", is_error=True)
+            return
+
+        item_by_index = {
+            self.field_list_widget.row(item): item
+            for item in selected_items
+            if self.field_list_widget.row(item) >= 0
+        }
+        selected_rows: list[dict[str, object]] = []
+        for idx in selected_indices:
+            item = item_by_index.get(idx)
+            if item is None:
+                continue
+            selected_rows.append(
+                {
+                    "index": idx,
+                    "identity": CFVMain._field_identity_from_item(self, item),
+                    "chunk_shape": str(item.data(Qt.UserRole + 3) or ""),
+                }
+            )
+
+        if not selected_rows:
+            self._show_status_message("No valid selected fields to save.", is_error=True)
+            return
+
+        default_destination = str(self._settings.get("last_save_data_dir", str(Path.home())))
+        default_output_filename = f"{self._default_plot_filename()}_selected.nc"
+        dialog = SaveSelectedFieldsDialog(
+            self,
+            selected_rows=selected_rows,
+            default_destination=default_destination,
+            default_output_filename=default_output_filename,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        output_format = dialog.output_format
+        destination_folder = Path(dialog.destination_folder).expanduser()
+        requested_filename = dialog.output_filename.strip()
+        destination_name = Path(requested_filename).name
+        expected_suffix = ".zarr" if output_format == "zarr" else ".nc"
+        if not destination_name.endswith(expected_suffix):
+            destination_name = f"{Path(destination_name).stem}{expected_suffix}"
+        destination = destination_folder / destination_name
+
+        output_chunk_by_index: dict[int, str] = {}
+        for row_meta, chunk_text in zip(selected_rows, dialog.output_chunk_shapes):
+            idx = int(row_meta["index"])
+            output_chunk_by_index[idx] = str(chunk_text).strip()
+
+        self._remember_last_save_dir("last_save_data_dir", str(destination))
+        code = save_selected_fields_task(
+            selected_indices,
+            str(destination),
+            output_format,
+            output_chunk_by_index,
+        )
+        self._send_worker_task(code, emit_image=False)
+
+    def _apply_saved_selected_status(self, status_text: str) -> None:
+        """Adopt selected generated fields into the destination source after save-selected."""
+        match = re.match(
+            r"^Saved\s+\d+\s+selected field\(s\)\s+to\s+(.+?)\s+\([^)]+\)$",
+            status_text,
+        )
+        if not match:
+            return
+
+        destination = str(Path(match.group(1).strip()).expanduser())
+        if not destination:
+            return
+
+        controller = getattr(self, "field_metadata_controller", None)
+        mark_saved = getattr(controller, "mark_selected_items_saved", None)
+        if not callable(mark_saved):
+            return
+
+        updated = int(mark_saved(destination))
+        if updated <= 0:
+            return
+
+        if destination not in self._loaded_file_paths:
+            self._loaded_file_paths.append(destination)
+
+        refresh_menu = getattr(self, "_refresh_open_files_menu", None)
+        if callable(refresh_menu):
+            refresh_menu()
 
     def _normalize_coordinate_metadata(self, payload: object) -> dict[str, dict[str, object]]:
         """Normalize worker coordinate payload into slider metadata mapping."""
@@ -1624,6 +1683,12 @@ class CFVMain(CFVCore):
             self._show_lineplot_options_dialog()
             return
 
+        if plot_kind == "vector":
+            field_index = self._selected_field_index_for_operation("Vector Plot Options")
+            if field_index is not None:
+                self._show_vector_options_dialog(field_index)
+            return
+
         if plot_kind != "contour":
             self._show_status_message(f"No options dialog available for plot type: {plot_kind}")
             return
@@ -1633,60 +1698,10 @@ class CFVMain(CFVCore):
 
     def _build_plot_context(self) -> tuple[dict[str, tuple[object, object]], dict[str, str], str] | None:
         """Collect current selections/collapse state and infer plot type."""
-        if not self.controls:
-            return None
-
-        selections: dict[str, tuple[object, object]] = {}
-        collapse_by_coord: dict[str, str] = {}
-        dims: list[int] = []
-
-        for name, control in self.controls.items():
-            values = control["values"]
-            start_idx, end_idx = control["range_slider"].value()
-            lo_idx = int(min(start_idx, end_idx))
-            hi_idx = int(max(start_idx, end_idx))
-            is_singleton = (hi_idx - lo_idx) <= 1
-
-            if is_singleton:
-                if lo_idx == 0:
-                    singleton_idx = lo_idx
-                elif hi_idx == (len(values) - 1):
-                    singleton_idx = hi_idx
-                else:
-                    singleton_idx = lo_idx
-                lo = values[singleton_idx]
-                hi = values[singleton_idx]
-            else:
-                lo = values[lo_idx]
-                hi = values[hi_idx]
-            selections[name] = (lo, hi)
-
-            collapse_method = self.selected_collapse_methods.get(name)
-            if collapse_method:
-                collapse_by_coord[name] = collapse_method
-                dims.append(1)
-            else:
-                dims.append(1 if is_singleton else 2)
-
-        varying_dims = sum(1 for dim in dims if dim != 1)
-        available_kinds = getattr(self, "available_plot_kinds", [])
-        selected_kind = getattr(self, "selected_plot_kind", None)
-
-        if varying_dims == 0:
-            plot_kind = "collapsed"
-        elif varying_dims > 2:
-            plot_kind = "unsupported"
-        elif isinstance(selected_kind, str) and selected_kind in available_kinds:
-            plot_kind = selected_kind
-        elif varying_dims == 1:
-            plot_kind = "lineplot"
-        elif varying_dims == 2:
-            # Keep contour as a sensible default in 2D when no explicit selection exists.
-            plot_kind = "contour"
-        else:
-            plot_kind = "unsupported"
-
-        return selections, collapse_by_coord, plot_kind
+        return _plot_ops.build_plot_context(
+            self,
+            parse_coordinate_subspace_commands_fn=parse_coordinate_subspace_commands,
+        )
 
     def _request_plot_task(
         self,
@@ -1696,100 +1711,16 @@ class CFVMain(CFVCore):
         emit_image_override: bool | None = None,
     ) -> None:
         """Build and send a plot/data task with optional save targets."""
-        context = self._build_plot_context()
-        if context is None:
-            logger.info("PLOT_DIAG gui_plot_skip reason=no_controls")
-            return
-        selections, collapse_by_coord, plot_kind = context
-
-        if plot_kind in {"collapsed", "unsupported"}:
-            logger.info(
-                "PLOT_DIAG gui_plot_skip reason=dimensionality kind=%s coords=%d collapses=%d",
-                plot_kind,
-                len(selections),
-                len(collapse_by_coord),
-            )
-            return
-
-        save_target = None
-        if save_code_path:
-            save_target = str(Path(save_code_path).expanduser())
-
-        save_plot_target = str(Path(save_plot_path).expanduser()) if save_plot_path else None
-        save_data_target = str(Path(save_data_path).expanduser()) if save_data_path else None
-
-        if save_data_target and not save_plot_target:
-            if save_code_path:
-                self._show_status_message(
-                    "Save Code + Save Data requires a plot target. Use Save All.",
-                    is_error=True,
-                )
-                return
-            cmd = save_data_from_selection(selections, collapse_by_coord, save_data_target)
-        else:
-            plot_options = dict(self.plot_options_by_kind.get(plot_kind, {}))
-            if plot_kind == "contour":
-                plot_options.setdefault("contour_title_fontsize", self._contour_title_fontsize())
-                plot_options.setdefault("page_title_fontsize", self._page_title_fontsize())
-                plot_options.setdefault("annotation_fontsize", self._annotation_fontsize())
-
-            if save_plot_target:
-                plot_options["filename"] = save_plot_target
-            elif not plot_options:
-                plot_options = None
-
-            try:
-                cmd = plot_from_selection(
-                    selections,
-                    collapse_by_coord,
-                    plot_kind,
-                    plot_options,
-                    save_data_path=save_data_target,
-                )
-            except (ValueError, NotImplementedError) as exc:
-                self._show_status_message(f"Plot request unavailable: {exc}", is_error=True)
-                logger.warning("Plot template unavailable for kind=%s: %s", plot_kind, exc)
-                return
-
-        if emit_image_override is not None:
-            emit_image = emit_image_override
-        else:
-            emit_image = save_plot_target is None and save_data_target is None
-
-        logger.debug(
-            "Requesting plot update kind=%s coords=%d collapses=%d save_code=%s save_plot=%s",
-            plot_kind,
-            len(selections),
-            len(collapse_by_coord),
-            bool(save_target),
-            bool(save_plot_target),
+        _plot_ops.request_plot_task(
+            self,
+            save_code_path=save_code_path,
+            save_plot_path=save_plot_path,
+            save_data_path=save_data_path,
+            emit_image_override=emit_image_override,
+            save_data_from_selection_fn=save_data_from_selection,
+            plot_from_selection_fn=plot_from_selection,
+            build_vector_overplot_command_fn=build_vector_overplot_command,
         )
-        logger.info(
-            "PLOT_DIAG gui_plot_request pid=%s worker_pid=%s kind=%s emit_image=%s",
-            os.getpid(),
-            self.worker.processId(),
-            plot_kind,
-            emit_image,
-        )
-
-        if save_target and save_plot_target and save_data_target:
-            loading_message = "Saving plot, data, and code..."
-        elif save_plot_target and save_data_target:
-            loading_message = "Rendering and saving plot/data..."
-        elif save_plot_target:
-            loading_message = "Rendering and saving plot..."
-        elif save_data_target:
-            loading_message = "Saving selected data..."
-        elif save_code_path:
-            loading_message = "Rendering plot and saving code..."
-        else:
-            loading_message = "Rendering plot..."
-
-        self._plot_request_in_flight = True
-        self._plot_request_expects_image = emit_image
-        self._suppress_stale_error_status = False
-        self._set_plot_loading(True, loading_message)
-        self._send_worker_task(cmd, save_code_path=save_target, emit_image=emit_image)
 
     def _send_worker_task(
         self,
@@ -1883,8 +1814,6 @@ class CFVMain(CFVCore):
         filename = Path(file_path).name
         self.setWindowTitle(f"{self.base_window_title}: {filename}{remote_tag}")
 
-    def closeEvent(self, event: QCloseEvent) -> None:
-        """Ensure worker process is shut down cleanly when GUI exits."""
     def _shutdown_worker(self) -> None:
         """Shut down the worker process cleanly, suppressing the crash error signal."""
         if self.worker.state() == QProcess.NotRunning:
