@@ -53,6 +53,9 @@ Quick verify:
 hdiutil imageinfo dist/xconv2.dmg | rg -n "Format|Class|Software Version"
 ```
 
+(I think I used `create_dmg` before, so we need to test this properly.)
+
+
 ## Startup performance lessons
 
 We saw severe startup lag when heavy scientific/plotting imports happened eagerly at process start.
