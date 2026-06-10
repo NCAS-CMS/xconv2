@@ -11,25 +11,11 @@ import re
 import textwrap
 import time
 import resource
+import importlib
 from io import BytesIO
 from pathlib import Path
 from typing import Any, NamedTuple
 
-import matplotlib
-import numpy as np
-from matplotlib.backend_bases import FigureManagerBase
-
-# Worker renders to bytes/files only, so force a headless backend and
-# avoid spawning a separate matplotlib GUI app/window (e.g. extra dock icon).
-matplotlib.use("Agg", force=True)
-
-import cf
-import cfplot as cfp
-from matplotlib import pyplot as plt
-
-from . import cf_interface
-from .cf_interface import lineplot as xconv_lineplot
-from . import cell_method_handler as xconv_cell_method_handler
 from . import __version__
 from .logging_utils import apply_scoped_runtime_logging, configure_logging
 from .workflow.provenance_export import handle_save_provenance_task as _handle_save_provenance_task_impl
@@ -40,39 +26,26 @@ from .remote_access import (
     normalize_remote_datasets_for_cf_read as _normalize_remote_datasets_for_cf_read_shared,
 )
 
-# cf-plot may still call show(); in Agg mode this is non-interactive and noisy.
-plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
-plt.ioff()
-# Some plotting paths call the backend manager directly; force no-op.
-FigureManagerBase.show = lambda self: None  # type: ignore[assignment]
-# LinePlot imports pyplot in its own module namespace; disable there too.
-xconv_lineplot.plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
-xconv_lineplot.plt.ioff()
-warnings.filterwarnings(
-    "ignore",
-    message="FigureCanvasAgg is non-interactive, and thus cannot be shown",
-    category=UserWarning,
-)
-
-# Ensure cf-plot never tries to open an external viewer (e.g. ImageMagick
-# display) when running worker-generated contour plots.
-try:
-    cfp.setvars(viewer=None)
-    cfp.plotvars.viewer = None
-except Exception:
-    logger = logging.getLogger(__name__)
-    logger.exception("Failed to set cfplot viewer=None in worker")
-
 
 logger = logging.getLogger(__name__)
 SAVE_TASK_HEADER = "#SAVE_TASK_CODE_PATH_B64:"
 EMIT_IMAGE_HEADER = "#EMIT_IMAGE:"
 TASK_KIND_HEADER = "#TASK_KIND:"
 TASK_PAYLOAD_HEADER = "#TASK_PAYLOAD_B64:"
-INTERFACE_EXPORTS = tuple(getattr(cf_interface, "__all__", ()))
 OMIT4SAVE_TOKEN = "#omit4save"
 REMOTE_SESSION_TTL_SECONDS = 180.0
 REMOTE_SESSION_MAX = 4
+
+matplotlib = None
+np = None
+cf = None
+cfp = None
+plt = None
+cf_interface = None
+xconv_lineplot = None
+xconv_cell_method_handler = None
+INTERFACE_EXPORTS: tuple[str, ...] = ()
+_RUNTIME_READY = False
 
 
 class TaskHeaders(NamedTuple):
@@ -113,19 +86,85 @@ _HANDLED_TASK_EXCEPTIONS = (ValueError, IndexError)
 
 # This dictionary persists data (like 'f') between GUI commands
 worker_globals = {
-    'cf': cf,
-    'cfp': cfp,
-    'plt': plt,
-    'np': np,
+    'cf': None,
+    'cfp': None,
+    'plt': None,
+    'np': None,
 }
 
-# Expose helper functions/constants from the interface module to generated code.
-worker_globals.update(
-    {
-        name: getattr(cf_interface, name)
-        for name in INTERFACE_EXPORTS
-    }
-)
+
+def _ensure_worker_runtime_loaded() -> None:
+    """Load heavy scientific/plotting modules lazily on first demand."""
+    global _RUNTIME_READY
+    global matplotlib, np, cf, cfp, plt
+    global cf_interface, xconv_lineplot, xconv_cell_method_handler, INTERFACE_EXPORTS
+
+    if _RUNTIME_READY:
+        return
+
+    matplotlib = importlib.import_module("matplotlib")
+    matplotlib.use("Agg", force=True)
+
+    np = importlib.import_module("numpy")
+    cf = importlib.import_module("cf")
+    cfp = importlib.import_module("cfplot")
+    plt = importlib.import_module("matplotlib.pyplot")
+    FigureManagerBase = importlib.import_module("matplotlib.backend_bases").FigureManagerBase
+
+    cf_interface = importlib.import_module("xconv2.cf_interface")
+    xconv_lineplot = importlib.import_module("xconv2.cf_interface.lineplot")
+    xconv_cell_method_handler = importlib.import_module("xconv2.cell_method_handler")
+    INTERFACE_EXPORTS = tuple(getattr(cf_interface, "__all__", ()))
+
+    # cf-plot may still call show(); in Agg mode this is non-interactive and noisy.
+    plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
+    plt.ioff()
+    # Some plotting paths call the backend manager directly; force no-op.
+    FigureManagerBase.show = lambda self: None  # type: ignore[assignment]
+    # LinePlot imports pyplot in its own module namespace; disable there too.
+    xconv_lineplot.plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
+    xconv_lineplot.plt.ioff()
+    warnings.filterwarnings(
+        "ignore",
+        message="FigureCanvasAgg is non-interactive, and thus cannot be shown",
+        category=UserWarning,
+    )
+
+    try:
+        cfp.setvars(viewer=None)
+        cfp.plotvars.viewer = None
+    except Exception:
+        logger.exception("Failed to set cfplot viewer=None in worker")
+
+    worker_globals.update({
+        "cf": cf,
+        "cfp": cfp,
+        "plt": plt,
+        "np": np,
+        **{name: getattr(cf_interface, name) for name in INTERFACE_EXPORTS},
+    })
+
+    try:
+        import cfdm
+
+        logger.info(
+            "Worker runtime python=%s cf=%s (%s) cfdm=%s (%s)",
+            sys.executable,
+            getattr(cf, "__version__", "unknown"),
+            getattr(cf, "__file__", "unknown"),
+            getattr(cfdm, "__version__", "unknown"),
+            getattr(cfdm, "__file__", "unknown"),
+        )
+    except Exception:
+        logger.exception("Failed to log worker cf/cfdm runtime details")
+
+    logger.info(
+        "PLOT_DIAG worker_runtime version=%s module_dir=%s backend=%s",
+        __version__,
+        Path(__file__).resolve().parent,
+        matplotlib.get_backend(),
+    )
+    _RUNTIME_READY = True
 
 def send_to_gui(prefix, data=None):
     """Helper to format messages for the GUI pipe."""
@@ -379,6 +418,7 @@ def _read_remote_fields(
     datasets: str | list[str],
 ):
     """Read remote fields using the warmed filesystem and dataset path(s)."""
+    _ensure_worker_runtime_loaded()
     session = entry.session
     normalized_datasets = _normalize_remote_datasets_for_cf_read(
         descriptor=descriptor,
@@ -454,6 +494,7 @@ def _replay_resolve_field_reference_index(
     fallback_index: object,
 ) -> int | None:
     """Resolve a persisted field reference against current worker replay state."""
+    _ensure_worker_runtime_loaded()
     identity_raw = field_ref.get("identity")
     identity = identity_raw.strip() if isinstance(identity_raw, str) else ""
 
@@ -503,6 +544,7 @@ def _replay_resolve_field_reference_index(
 
 def _replay_normalize_loaded_fields(loaded: Any) -> list:
     """Normalize cf.read output into a plain list of fields."""
+    _ensure_worker_runtime_loaded()
     if isinstance(loaded, cf.FieldList):
         return list(loaded)
     if isinstance(loaded, (list, tuple)):
@@ -512,6 +554,7 @@ def _replay_normalize_loaded_fields(loaded: Any) -> list:
 
 def _handle_replay_fields_task(payload: dict[str, Any]) -> None:
     """Replay persisted field operations entirely on the worker side."""
+    _ensure_worker_runtime_loaded()
     operations_raw = payload.get("operations")
     if not isinstance(operations_raw, list) or not operations_raw:
         raise ValueError("REPLAY_FIELDS requires a non-empty operations list")
@@ -707,6 +750,7 @@ def _handle_replay_fields_task(payload: dict[str, Any]) -> None:
 
 def _handle_save_provenance_task(payload: dict[str, Any]) -> None:
     """Build field-specific provenance and save to disk in requested format."""
+    _ensure_worker_runtime_loaded()
     status_message = _handle_save_provenance_task_impl(
         payload,
         replay_source_files_for_operation=_replay_source_files_for_operation,
@@ -799,6 +843,7 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
         return
 
     if task_kind == "REMOTE_OPEN":
+        _ensure_worker_runtime_loaded()
         if not isinstance(descriptor, dict) or not session_id or not descriptor_hash:
             raise ValueError("REMOTE_OPEN requires session_id, descriptor_hash, and descriptor")
 
@@ -884,6 +929,7 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
 
 def _build_saved_plot_script(exec_code: str) -> str:
     """Build a reproducible script with worker state preamble plus plot code."""
+    _ensure_worker_runtime_loaded()
     lines: list[str] = [
         "from __future__ import annotations",
         "import cf",
@@ -1024,6 +1070,7 @@ def _build_saved_plot_script(exec_code: str) -> str:
 
 def _emit_latest_plot_image() -> None:
     """Send the latest matplotlib figure to GUI as PNG bytes, if available."""
+    _ensure_worker_runtime_loaded()
     fig_numbers = plt.get_fignums()
     logger.info(
         "PLOT_DIAG worker_emit pid=%s backend=%s fig_count=%d",
@@ -1055,35 +1102,11 @@ def main():
 
     logger.info("Worker starting")
     logger.info("Log file: %s", log_file)
-    try:
-        logger.info(
-            "MATPLOTLIB_PATHS cache=%s config=%s env[MPLCONFIGDIR]=%s env[XDG_CACHE_HOME]=%s env[HOME]=%s",
-            matplotlib.get_cachedir(),
-            matplotlib.get_configdir(),
-            os.environ.get("MPLCONFIGDIR"),
-            os.environ.get("XDG_CACHE_HOME"),
-            os.environ.get("HOME"),
-        )
-    except Exception:
-        logger.exception("Failed to log matplotlib cache/config paths")
-    try:
-        import cfdm
-
-        logger.info(
-            "Worker runtime python=%s cf=%s (%s) cfdm=%s (%s)",
-            sys.executable,
-            getattr(cf, "__version__", "unknown"),
-            getattr(cf, "__file__", "unknown"),
-            getattr(cfdm, "__version__", "unknown"),
-            getattr(cfdm, "__file__", "unknown"),
-        )
-    except Exception:
-        logger.exception("Failed to log worker cf/cfdm runtime details")
     logger.info(
-        "PLOT_DIAG worker_runtime version=%s module_dir=%s backend=%s",
-        __version__,
-        Path(__file__).resolve().parent,
-        matplotlib.get_backend(),
+        "MATPLOTLIB_PATHS env[MPLCONFIGDIR]=%s env[XDG_CACHE_HOME]=%s env[HOME]=%s",
+        os.environ.get("MPLCONFIGDIR"),
+        os.environ.get("XDG_CACHE_HOME"),
+        os.environ.get("HOME"),
     )
 
     # Expose helper in the exec namespace so GUI-issued tasks can emit messages.
@@ -1194,6 +1217,7 @@ def main():
 
             if save_path:
                 try:
+                    _ensure_worker_runtime_loaded()
                     destination = Path(save_path).expanduser()
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     script_text = _build_saved_plot_script(exec_code)
@@ -1207,6 +1231,7 @@ def main():
             try:
                 task_start = time.monotonic()
                 rss_before_mb = _worker_rss_mb()
+                _ensure_worker_runtime_loaded()
                 # Execute the code block in our persistent global namespace
                 logger.info(
                     "PLOT_DIAG worker_exec_start pid=%s backend=%s emit_image=%s",
