@@ -322,27 +322,20 @@ def _assert_successful_open(messages: list, *, session_id: str, uri: str) -> Non
     assert result == {"session_id": session_id, "uri": uri, "ok": True}
 
 
-def test_read_remote_fields_passes_prepared_filesystem_to_reader(tmp_path: Path) -> None:
+def test_read_remote_fields_passes_prepared_filesystem_to_reader(monkeypatch: pytest.MonkeyPatch) -> None:
     """Prove worker._read_remote_fields opens prepared remote datasets before cf.read."""
 
     class _FakeFilesystem:
-        def __init__(self, payload: bytes) -> None:
-            self.payload = payload
+        def __init__(self) -> None:
             self.open_calls: list[tuple[str, str]] = []
 
         def open(self, path: str, mode: str):
             from io import BytesIO
 
             self.open_calls.append((path, mode))
-            return BytesIO(self.payload)
+            return BytesIO(b"remote-bytes")
 
-    import cf
-
-    source_field = cf.example_field(0)
-    payload_path = tmp_path / "example.nc"
-    cf.write(source_field, str(payload_path))
-
-    sentinel_fs = _FakeFilesystem(payload=payload_path.read_bytes())
+    sentinel_fs = _FakeFilesystem()
     entry = worker.RemoteSessionEntry(
         session_id="sid",
         descriptor_hash="hash",
@@ -350,15 +343,25 @@ def test_read_remote_fields_passes_prepared_filesystem_to_reader(tmp_path: Path)
         filesystem=sentinel_fs,
     )
 
+    calls: dict[str, object] = {}
+
+    def fake_reader(datasets, *, filesystem=None):
+        calls["datasets"] = datasets
+        calls["filesystem"] = filesystem
+        return ["ok"]
+
+    monkeypatch.setattr(worker.cf, "read", fake_reader)
+
     result = worker._read_remote_fields(
         entry=entry,
         descriptor={"protocol": "s3"},
         datasets="bucket/path/file.nc",
     )
 
-    assert isinstance(result, list) and result
-    assert hasattr(result[0], "identity")
+    assert result == ["ok"]
     assert sentinel_fs.open_calls == [("bucket/path/file.nc", "rb")]
+    assert getattr(calls["datasets"], "read", None) is not None
+    assert calls["filesystem"] is None
 
 
 # ---------------------------------------------------------------------------
