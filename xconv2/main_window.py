@@ -18,6 +18,7 @@ import socket
 import time
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlparse
 import sys
 
@@ -26,16 +27,22 @@ from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QApplication, QDialog, QInputDialog, QLineEdit, QListWidgetItem, QMessageBox
 
 from .cf_templates import (
+    build_vector_overplot_command,
     contour_range_from_selection,
     coordinate_list,
     field_list,
     plot_from_selection,
     save_data_from_selection,
 )
+from .cf_interface import parse_coordinate_subspace_commands
 from .core_window import CFVCore
+from .main_window_components import plot_ops as _plot_ops
 # Remote-access helpers are imported lazily (inside the methods that use them)
 # so that p5rem/paramiko are not loaded at GUI startup.
 from .ui.dialogs import OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog
+
+if TYPE_CHECKING:
+    from .ui.remote_file_navigator import RemoteEntry, RemoteLoginLogDialog
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +114,8 @@ class CFVMain(CFVCore):
         self._pending_list_loop: QEventLoop | None = None
         self._pending_list_result: dict | None = None
         self._ssh_session_passwords: dict[str, str] = {}
+        self._selected_field_indices: list[int] = []
+        self._last_contour_plot_context: dict[str, object] | None = None
         self._shutting_down: bool = False
 
         self.worker = QProcess()
@@ -146,13 +155,87 @@ class CFVMain(CFVCore):
     def on_field_clicked(self, item: QListWidgetItem) -> None:
         """Show selection details and request slider coordinates for the field."""
         super().on_field_clicked(item)
+
+        selected_items: list[QListWidgetItem] = []
+        selected_items_fn = getattr(self.field_list_widget, "selectedItems", None)
+        if callable(selected_items_fn):
+            selected_items = list(selected_items_fn())
+
+        if len(selected_items) > 1:
+            self._set_selection_panel_mode("multi")
+            self._selected_field_indices = [
+                idx for idx in (self.field_list_widget.row(x) for x in selected_items) if idx >= 0
+            ]
+            self.build_dynamic_sliders({})
+            self._show_status_message(
+                f"{len(selected_items)} fields selected. Enter coordinate bounds commands for multi-field operations."
+            )
+            return
+
+        self._set_selection_panel_mode("single")
         self._reset_ui_for_new_field_selection()
 
         field_index = self.field_list_widget.row(item)
         if field_index < 0:
             return
 
+        self._selected_field_indices = [field_index]
         self._request_coordinates_for_field(field_index, show_status=False)
+
+    def on_field_selection_changed(self) -> None:
+        """Track selected field indices to support mode-specific selection behavior."""
+        super().on_field_selection_changed()
+        selected_items = self.field_list_widget.selectedItems()
+        self._selected_field_indices = [
+            idx for idx in (self.field_list_widget.row(item) for item in selected_items) if idx >= 0
+        ]
+        if len(self._selected_field_indices) > 1:
+            self._set_selection_panel_mode("multi")
+
+    def _on_coordinate_bounds_input_changed(self) -> None:
+        """Validate command-based coordinate bounds as the user edits input."""
+        text = self._coordinate_subspace_command_text()
+        if not text:
+            return
+
+        try:
+            parse_coordinate_subspace_commands(text)
+        except ValueError as exc:
+            self._show_status_message(str(exc), is_error=True)
+            return
+
+        self._show_status_message("Coordinate bounds commands parsed successfully.")
+
+    def _field_identity_from_item(self, item: QListWidgetItem | None) -> str:
+        """Return stable field identity text when available, else display text."""
+        if item is None:
+            return ""
+        controller = getattr(self, "field_metadata_controller", None)
+        resolver = getattr(controller, "field_identity_from_item", None)
+        if callable(resolver):
+            identity = resolver(item)
+            if isinstance(identity, str) and identity:
+                return identity
+        return item.text() if hasattr(item, "text") else ""
+
+    def _selected_field_index_for_operation(self, operation: str) -> int | None:
+        """Return a single selected field index suitable for unary operations."""
+        selected = list(getattr(self, "_selected_field_indices", []))
+
+        if not selected:
+            item = self.field_list_widget.currentItem()
+            if item is not None:
+                idx = self.field_list_widget.row(item)
+                if idx >= 0:
+                    selected = [idx]
+
+        if len(selected) != 1:
+            message = f"{operation} requires exactly one selected field."
+            logger.error(message)
+            self._show_status_message(message, is_error=True)
+            return None
+
+        return selected[0]
 
     def _reset_ui_for_new_field_selection(self) -> None:
         """Clear stale error/loading UI state before handling a fresh field selection."""
@@ -1624,6 +1707,12 @@ class CFVMain(CFVCore):
             self._show_lineplot_options_dialog()
             return
 
+        if plot_kind == "vector":
+            field_index = self._selected_field_index_for_operation("Vector Plot Options")
+            if field_index is not None:
+                self._show_vector_options_dialog(field_index)
+            return
+
         if plot_kind != "contour":
             self._show_status_message(f"No options dialog available for plot type: {plot_kind}")
             return
@@ -1633,60 +1722,10 @@ class CFVMain(CFVCore):
 
     def _build_plot_context(self) -> tuple[dict[str, tuple[object, object]], dict[str, str], str] | None:
         """Collect current selections/collapse state and infer plot type."""
-        if not self.controls:
-            return None
-
-        selections: dict[str, tuple[object, object]] = {}
-        collapse_by_coord: dict[str, str] = {}
-        dims: list[int] = []
-
-        for name, control in self.controls.items():
-            values = control["values"]
-            start_idx, end_idx = control["range_slider"].value()
-            lo_idx = int(min(start_idx, end_idx))
-            hi_idx = int(max(start_idx, end_idx))
-            is_singleton = (hi_idx - lo_idx) <= 1
-
-            if is_singleton:
-                if lo_idx == 0:
-                    singleton_idx = lo_idx
-                elif hi_idx == (len(values) - 1):
-                    singleton_idx = hi_idx
-                else:
-                    singleton_idx = lo_idx
-                lo = values[singleton_idx]
-                hi = values[singleton_idx]
-            else:
-                lo = values[lo_idx]
-                hi = values[hi_idx]
-            selections[name] = (lo, hi)
-
-            collapse_method = self.selected_collapse_methods.get(name)
-            if collapse_method:
-                collapse_by_coord[name] = collapse_method
-                dims.append(1)
-            else:
-                dims.append(1 if is_singleton else 2)
-
-        varying_dims = sum(1 for dim in dims if dim != 1)
-        available_kinds = getattr(self, "available_plot_kinds", [])
-        selected_kind = getattr(self, "selected_plot_kind", None)
-
-        if varying_dims == 0:
-            plot_kind = "collapsed"
-        elif varying_dims > 2:
-            plot_kind = "unsupported"
-        elif isinstance(selected_kind, str) and selected_kind in available_kinds:
-            plot_kind = selected_kind
-        elif varying_dims == 1:
-            plot_kind = "lineplot"
-        elif varying_dims == 2:
-            # Keep contour as a sensible default in 2D when no explicit selection exists.
-            plot_kind = "contour"
-        else:
-            plot_kind = "unsupported"
-
-        return selections, collapse_by_coord, plot_kind
+        return _plot_ops.build_plot_context(
+            self,
+            parse_coordinate_subspace_commands_fn=parse_coordinate_subspace_commands,
+        )
 
     def _request_plot_task(
         self,
@@ -1696,100 +1735,16 @@ class CFVMain(CFVCore):
         emit_image_override: bool | None = None,
     ) -> None:
         """Build and send a plot/data task with optional save targets."""
-        context = self._build_plot_context()
-        if context is None:
-            logger.info("PLOT_DIAG gui_plot_skip reason=no_controls")
-            return
-        selections, collapse_by_coord, plot_kind = context
-
-        if plot_kind in {"collapsed", "unsupported"}:
-            logger.info(
-                "PLOT_DIAG gui_plot_skip reason=dimensionality kind=%s coords=%d collapses=%d",
-                plot_kind,
-                len(selections),
-                len(collapse_by_coord),
-            )
-            return
-
-        save_target = None
-        if save_code_path:
-            save_target = str(Path(save_code_path).expanduser())
-
-        save_plot_target = str(Path(save_plot_path).expanduser()) if save_plot_path else None
-        save_data_target = str(Path(save_data_path).expanduser()) if save_data_path else None
-
-        if save_data_target and not save_plot_target:
-            if save_code_path:
-                self._show_status_message(
-                    "Save Code + Save Data requires a plot target. Use Save All.",
-                    is_error=True,
-                )
-                return
-            cmd = save_data_from_selection(selections, collapse_by_coord, save_data_target)
-        else:
-            plot_options = dict(self.plot_options_by_kind.get(plot_kind, {}))
-            if plot_kind == "contour":
-                plot_options.setdefault("contour_title_fontsize", self._contour_title_fontsize())
-                plot_options.setdefault("page_title_fontsize", self._page_title_fontsize())
-                plot_options.setdefault("annotation_fontsize", self._annotation_fontsize())
-
-            if save_plot_target:
-                plot_options["filename"] = save_plot_target
-            elif not plot_options:
-                plot_options = None
-
-            try:
-                cmd = plot_from_selection(
-                    selections,
-                    collapse_by_coord,
-                    plot_kind,
-                    plot_options,
-                    save_data_path=save_data_target,
-                )
-            except (ValueError, NotImplementedError) as exc:
-                self._show_status_message(f"Plot request unavailable: {exc}", is_error=True)
-                logger.warning("Plot template unavailable for kind=%s: %s", plot_kind, exc)
-                return
-
-        if emit_image_override is not None:
-            emit_image = emit_image_override
-        else:
-            emit_image = save_plot_target is None and save_data_target is None
-
-        logger.debug(
-            "Requesting plot update kind=%s coords=%d collapses=%d save_code=%s save_plot=%s",
-            plot_kind,
-            len(selections),
-            len(collapse_by_coord),
-            bool(save_target),
-            bool(save_plot_target),
+        _plot_ops.request_plot_task(
+            self,
+            save_code_path=save_code_path,
+            save_plot_path=save_plot_path,
+            save_data_path=save_data_path,
+            emit_image_override=emit_image_override,
+            save_data_from_selection_fn=save_data_from_selection,
+            plot_from_selection_fn=plot_from_selection,
+            build_vector_overplot_command_fn=build_vector_overplot_command,
         )
-        logger.info(
-            "PLOT_DIAG gui_plot_request pid=%s worker_pid=%s kind=%s emit_image=%s",
-            os.getpid(),
-            self.worker.processId(),
-            plot_kind,
-            emit_image,
-        )
-
-        if save_target and save_plot_target and save_data_target:
-            loading_message = "Saving plot, data, and code..."
-        elif save_plot_target and save_data_target:
-            loading_message = "Rendering and saving plot/data..."
-        elif save_plot_target:
-            loading_message = "Rendering and saving plot..."
-        elif save_data_target:
-            loading_message = "Saving selected data..."
-        elif save_code_path:
-            loading_message = "Rendering plot and saving code..."
-        else:
-            loading_message = "Rendering plot..."
-
-        self._plot_request_in_flight = True
-        self._plot_request_expects_image = emit_image
-        self._suppress_stale_error_status = False
-        self._set_plot_loading(True, loading_message)
-        self._send_worker_task(cmd, save_code_path=save_target, emit_image=emit_image)
 
     def _send_worker_task(
         self,
@@ -1883,8 +1838,6 @@ class CFVMain(CFVCore):
         filename = Path(file_path).name
         self.setWindowTitle(f"{self.base_window_title}: {filename}{remote_tag}")
 
-    def closeEvent(self, event: QCloseEvent) -> None:
-        """Ensure worker process is shut down cleanly when GUI exits."""
     def _shutdown_worker(self) -> None:
         """Shut down the worker process cleanly, suppressing the crash error signal."""
         if self.worker.state() == QProcess.NotRunning:
