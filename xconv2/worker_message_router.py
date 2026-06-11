@@ -302,10 +302,16 @@ class WorkerMessageRouter:
                 set_mode("single")
             logger.info("Received coordinate metadata for %d sliders", len(metadata))
             self._host.build_dynamic_sliders(metadata)
+            auto_plot = getattr(self._host, "_auto_plot_initial_field_selection", None)
+            if callable(auto_plot):
+                auto_plot()
         else:
             set_mode = getattr(self._host, "_set_selection_panel_mode", None)
             if callable(set_mode):
                 set_mode("multi")
+            clear_pending_autoplot = getattr(self._host, "_clear_pending_initial_autoplot", None)
+            if callable(clear_pending_autoplot):
+                clear_pending_autoplot()
             logger.warning("Received empty coordinate metadata payload")
             self._host._show_status_message(
                 "No slider-friendly coordinates were found. Use coordinate bounds commands."

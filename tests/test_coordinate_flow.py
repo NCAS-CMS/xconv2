@@ -56,9 +56,16 @@ class _FakeWorker:
 class _FakeRangeSlider:
     def __init__(self, bounds: tuple[int, int]) -> None:
         self._bounds = bounds
+        self.signal_blocks: list[bool] = []
 
     def value(self) -> tuple[int, int]:
         return self._bounds
+
+    def setValue(self, bounds: tuple[int, int]) -> None:
+        self._bounds = bounds
+
+    def blockSignals(self, state: bool) -> None:
+        self.signal_blocks.append(state)
 
 
 @dataclass
@@ -806,6 +813,7 @@ def test_on_field_clicked_resets_ui_then_requests_coordinates() -> None:
     field_controller = _DummyFieldMetadataController()
     window.field_metadata_controller = field_controller
     window.field_list_widget = _DummyFieldListWidget(index_to_return=7)
+    window._allow_initial_autoplot_on_next_field_click = True
 
     call_order: list[tuple[str, object]] = []
 
@@ -828,6 +836,87 @@ def test_on_field_clicked_resets_ui_then_requests_coordinates() -> None:
         ("reset", None),
         ("request", (7, False)),
     ]
+    assert window._pending_initial_autoplot_field_index == 7
+    assert window._allow_initial_autoplot_on_next_field_click is False
+
+
+def test_on_field_clicked_after_first_click_does_not_set_initial_autoplot_pending() -> None:
+    window = CFVMain.__new__(CFVMain)
+    field_controller = _DummyFieldMetadataController()
+    window.field_metadata_controller = field_controller
+    window.field_list_widget = _DummyFieldListWidget(index_to_return=3)
+    window._allow_initial_autoplot_on_next_field_click = False
+
+    call_order: list[tuple[str, object]] = []
+    window._reset_ui_for_new_field_selection = types.MethodType(
+        lambda self: call_order.append(("reset", None)),
+        window,
+    )
+    window._request_coordinates_for_field = types.MethodType(
+        lambda self, index, show_status=True: call_order.append(("request", (index, show_status))),
+        window,
+    )
+
+    CFVMain.on_field_clicked(window, object())
+
+    assert field_controller.clicked_items
+    assert call_order == [
+        ("reset", None),
+        ("request", (3, False)),
+    ]
+    assert window._pending_initial_autoplot_field_index is None
+
+
+def test_auto_plot_initial_field_selection_collapses_extra_dims_and_requests_contour() -> None:
+    class _DummyFieldList:
+        def selectedItems(self):
+            return [object()]
+
+        def row(self, _item: object) -> int:
+            return 4
+
+    class _DummyPlotViewController:
+        def __init__(self) -> None:
+            self.calls: list[tuple[list[str], str]] = []
+
+        def set_plot_type_options(self, kinds: list[str], selected_kind: str | None) -> None:
+            if selected_kind is None:
+                raise AssertionError("selected kind should not be None")
+            self.calls.append((list(kinds), selected_kind))
+
+    time_slider = _FakeRangeSlider((0, 2))
+    lat_slider = _FakeRangeSlider((0, 3))
+    lon_slider = _FakeRangeSlider((0, 4))
+
+    host = types.SimpleNamespace(
+        _pending_initial_autoplot_field_index=4,
+        field_list_widget=_DummyFieldList(),
+        controls={
+            "time": {"values": [0, 1, 2], "range_slider": time_slider},
+            "latitude": {"values": [-30, -10, 10, 30], "range_slider": lat_slider},
+            "longitude": {"values": [0, 90, 180, 270, 360], "range_slider": lon_slider},
+        },
+        available_plot_kinds=["lineplot", "contour", "vector"],
+        selected_plot_kind=None,
+        plot_view_controller=_DummyPlotViewController(),
+        plot_button=types.SimpleNamespace(isEnabled=lambda: True),
+    )
+    updated_labels: list[str] = []
+    host._update_range_labels = lambda name: updated_labels.append(name)
+    host._refresh_plot_summary = lambda: None
+    requested: list[str] = []
+    host._request_plot_update = lambda: requested.append("plot")
+
+    CFVMain._auto_plot_initial_field_selection(host)
+
+    assert host._pending_initial_autoplot_field_index is None
+    assert time_slider.value() == (0, 0)
+    assert lat_slider.value() == (0, 3)
+    assert lon_slider.value() == (0, 4)
+    assert updated_labels == ["time"]
+    assert host.selected_plot_kind == "contour"
+    assert host.plot_view_controller.calls == [(["lineplot", "contour", "vector"], "contour")]
+    assert requested == ["plot"]
 
 
 def test_handle_worker_output_ignores_stale_error_after_field_reset() -> None:

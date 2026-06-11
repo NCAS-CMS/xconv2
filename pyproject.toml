@@ -11,6 +11,8 @@ dependencies = [
     "cfdm @ git+https://github.com/davidhassell/cfdm.git@pyfive-netcdf",
     "cf-python @ git+https://github.com/davidhassell/cf-python.git@kerchunk-read",
     "cf-plot @git+https://github.com/bnlawrence/cf-plot.git@main",
+    "ppfive @git+https://github.com/NCAS-CMS/ppfive.git@main",
+    "p5rem @git+https://github.com/NCAS-CMS/p5rem.git@main",
     "fsspec",
     "pandas",
     "rdflib",
@@ -19,6 +21,7 @@ dependencies = [
     "paramiko",
     "PySide6",
     "s3fs",
+    "pyfive",
     "setuptools>80",  # cf-plot imports distutils
     "superqt",
     "zarr",

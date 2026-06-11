@@ -163,6 +163,8 @@ class CFVMain(CFVCore):
         self._pending_reselect_field_index: int | None = None
         self._pending_field_op_source: str | None = None
         self._pending_binary_operation_name: str | None = None
+        self._pending_initial_autoplot_field_index: int | None = None
+        self._allow_initial_autoplot_on_next_field_click: bool = True
         self._shutting_down: bool = False
         self._replay_session_id: str = str(uuid.uuid4())
         self._worker_output_router = WorkerMessageRouter(self, main_cls=CFVMain)
@@ -267,6 +269,7 @@ class CFVMain(CFVCore):
             self._selected_field_indices = [
                 idx for idx in (self.field_list_widget.row(x) for x in selected_items) if idx >= 0
             ]
+            self._pending_initial_autoplot_field_index = None
             self.build_dynamic_sliders({})
             self._show_status_message(
                 f"{len(selected_items)} fields selected. Enter coordinate bounds commands for multi-field operations."
@@ -278,9 +281,15 @@ class CFVMain(CFVCore):
 
         field_index = self.field_list_widget.row(item)
         if field_index < 0:
+            self._pending_initial_autoplot_field_index = None
             return
 
         self._selected_field_indices = [field_index]
+        if self._allow_initial_autoplot_on_next_field_click:
+            self._pending_initial_autoplot_field_index = field_index
+            self._allow_initial_autoplot_on_next_field_click = False
+        else:
+            self._pending_initial_autoplot_field_index = None
         self._request_coordinates_for_field(field_index, show_status=False)
 
     def on_field_selection_changed(self) -> None:
@@ -290,8 +299,71 @@ class CFVMain(CFVCore):
         self._selected_field_indices = [
             idx for idx in (self.field_list_widget.row(item) for item in selected_items) if idx >= 0
         ]
+        if len(self._selected_field_indices) != 1:
+            self._pending_initial_autoplot_field_index = None
         if len(self._selected_field_indices) > 1:
             self._set_selection_panel_mode("multi")
+
+    def _clear_pending_initial_autoplot(self) -> None:
+        """Clear one-shot auto-plot intent for first field-click handling."""
+        self._pending_initial_autoplot_field_index = None
+
+    def _auto_plot_initial_field_selection(self) -> None:
+        """Auto-plot contour on first field click, collapsing extra dimensions to index 0."""
+        pending_index = self._pending_initial_autoplot_field_index
+        self._pending_initial_autoplot_field_index = None
+        if not isinstance(pending_index, int) or pending_index < 0:
+            return
+
+        selected_items_fn = getattr(self.field_list_widget, "selectedItems", None)
+        selected_items = list(selected_items_fn()) if callable(selected_items_fn) else []
+        if len(selected_items) != 1:
+            return
+
+        current_index = self.field_list_widget.row(selected_items[0])
+        if current_index != pending_index:
+            return
+
+        controls = getattr(self, "controls", {})
+        if not controls:
+            return
+
+        varying_coords = [
+            name
+            for name, control in controls.items()
+            if len(control.get("values", [])) > 1
+        ]
+        if len(varying_coords) < 2:
+            return
+
+        keep_varying = set(varying_coords[-2:])
+        for name in varying_coords:
+            if name in keep_varying:
+                continue
+
+            control = controls.get(name)
+            if not isinstance(control, dict):
+                continue
+
+            slider = control.get("range_slider")
+            if slider is None:
+                continue
+
+            slider.blockSignals(True)
+            slider.setValue((0, 0))
+            slider.blockSignals(False)
+            self._update_range_labels(name)
+
+        self._refresh_plot_summary()
+        if "contour" not in getattr(self, "available_plot_kinds", []):
+            return
+
+        self.selected_plot_kind = "contour"
+        self.plot_view_controller.set_plot_type_options(self.available_plot_kinds, "contour")
+        if not self.plot_button.isEnabled():
+            return
+
+        self._request_plot_update()
 
     def _on_coordinate_bounds_input_changed(self) -> None:
         """Validate command-based coordinate bounds as the user edits input."""
@@ -407,6 +479,8 @@ class CFVMain(CFVCore):
         """Load selected file in worker and publish field metadata."""
         if clear_existing:
             self._clear_loaded_data_views()
+            self._allow_initial_autoplot_on_next_field_click = True
+            self._pending_initial_autoplot_field_index = None
         self._pending_metadata_append = append_metadata
         self._pending_metadata_source = file_path
         self._show_status_message(f"Loading file: {file_path}")
@@ -442,6 +516,8 @@ class CFVMain(CFVCore):
 
         expanded_paths = [_normalize_source_path_or_uri(path) for path in file_paths]
         self._clear_loaded_data_views()
+        self._allow_initial_autoplot_on_next_field_click = True
+        self._pending_initial_autoplot_field_index = None
         self._pending_metadata_append = False
         self._pending_metadata_source = None
         self._show_status_message(f"Loading {len(expanded_paths)} files")
@@ -471,6 +547,8 @@ class CFVMain(CFVCore):
 
         if not append_metadata:
             self._clear_loaded_data_views()
+            self._allow_initial_autoplot_on_next_field_click = True
+            self._pending_initial_autoplot_field_index = None
         self._pending_metadata_append = append_metadata
         self._pending_metadata_source = uri
         self._show_status_message(f"Loading remote file: {uri}")
