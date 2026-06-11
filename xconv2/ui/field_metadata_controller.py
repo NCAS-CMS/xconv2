@@ -260,6 +260,9 @@ class FieldMetadataController:
                 item.setBackground(row_color)
             if row_generated:
                 item.setForeground(QColor("#b00020"))
+            font = item.font()
+            font.setItalic(row_generated)
+            item.setFont(font)
             self.host.field_list_widget.addItem(item)
             added_count += 1
 
@@ -319,6 +322,9 @@ class FieldMetadataController:
             item.setData(Qt.UserRole + 5, False)
             item.setBackground(color)
             item.setForeground(QColor("#000000"))
+            font = item.font()
+            font.setItalic(False)
+            item.setFont(font)
             updated += 1
 
         return updated
