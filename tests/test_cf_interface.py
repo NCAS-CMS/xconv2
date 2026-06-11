@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 import xconv2.cf_interface.maths as maths_ops
@@ -1035,11 +1036,10 @@ def test_save_selected_fields_writes_netcdf(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_save_selected_fields_writes_zarr(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[object, str, str]] = []
+    calls: list[tuple[object, str, str, dict[str, object]]] = []
 
     def _fake_write(fields, destination, fmt="NETCDF4", **kwargs):
-        _ = kwargs
-        calls.append((fields, destination, fmt))
+        calls.append((fields, destination, fmt, kwargs))
 
     monkeypatch.setattr(metadata_ops.cf, "write", _fake_write)
 
@@ -1047,7 +1047,31 @@ def test_save_selected_fields_writes_zarr(monkeypatch: pytest.MonkeyPatch) -> No
     count = save_selected_fields(payload, [1], "/tmp/out.zarr", "zarr")
 
     assert count == 1
-    assert calls == [([payload[1]], "/tmp/out.zarr", "ZARR")]
+    assert calls == [([payload[1]], "/tmp/out.zarr", "ZARR3", {})]
+
+
+def test_cf_example_field_writes_zarr3_smoke(tmp_path: Path) -> None:
+    field = cf.example_field(0)
+    destination = tmp_path / "example_field.zarr"
+
+    cf.write(field, str(destination), fmt="ZARR3")
+
+    assert destination.exists()
+
+
+@pytest.mark.xfail(
+    raises=TypeError,
+    reason="Upstream cf.write ZARR3 fails when field properties include numpy scalar values.",
+)
+def test_save_selected_fields_writes_zarr_with_numpy_scalar_property(tmp_path: Path) -> None:
+    field = cf.example_field(0)
+    field.set_property("np_scalar", np.int32(7))
+
+    destination = tmp_path / "selected_with_numpy_attr.zarr"
+    count = save_selected_fields([field], [0], str(destination), "zarr")
+
+    assert count == 1
+    assert destination.exists()
 
 
 def test_save_selected_fields_passes_chunk_overrides(monkeypatch: pytest.MonkeyPatch) -> None:

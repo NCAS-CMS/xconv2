@@ -182,6 +182,7 @@ class SaveSelectedFieldsDialog(QDialog):
 
         self.format_combo = QComboBox()
         self.format_combo.addItems(["nc", "zarr"])
+        self.format_combo.currentIndexChanged.connect(self._on_output_format_changed)
         form.addRow("Output format", self.format_combo)
 
         self.output_filename_edit = QLineEdit(default_output_filename)
@@ -207,6 +208,22 @@ class SaveSelectedFieldsDialog(QDialog):
         buttons.accepted.connect(self._validate_and_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _on_output_format_changed(self, _index: int) -> None:
+        """Keep suggested output filename suffix in sync with selected output format."""
+        raw_name = self.output_filename_edit.text().strip()
+        if not raw_name:
+            return
+
+        expected_suffix = ".zarr" if self.output_format == "zarr" else ".nc"
+        lower_name = raw_name.lower()
+
+        if lower_name.endswith(".nc") or lower_name.endswith(".zarr"):
+            stem = raw_name.rsplit(".", 1)[0]
+            self.output_filename_edit.setText(f"{stem}{expected_suffix}")
+            return
+
+        self.output_filename_edit.setText(f"{raw_name}{expected_suffix}")
 
     def _browse_destination(self) -> None:
         folder = QFileDialog.getExistingDirectory(
@@ -335,6 +352,37 @@ class ReplayOperationsDialog(QDialog):
             QMessageBox.warning(self, "No operations selected", "Select at least one operation to replay.")
             return
         self.accept()
+
+
+class ZarrSaveWarningDialog(QDialog):
+    """Confirm zarr output through an explicit opt-in warning step."""
+
+    def __init__(self, parent: QWidget | None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Zarr Output Confirmation")
+        self.resize(480, 360)
+
+        layout = QVBoxLayout(self)
+
+        clipster_path = Path(__file__).parent.parent / "assets" / "clipster.svg"
+        if clipster_path.exists():
+            clipster_pixmap = QPixmap(str(clipster_path))
+            if not clipster_pixmap.isNull():
+                clipster_pixmap = clipster_pixmap.scaledToWidth(480, Qt.SmoothTransformation)
+                image_label = QLabel()
+                image_label.setAlignment(Qt.AlignCenter)
+                image_label.setPixmap(clipster_pixmap)
+                layout.addWidget(image_label)
+
+        buttons_row = QHBoxLayout()
+        buttons_row.addStretch(1)
+        cancel_button = QPushButton("Cancel")
+        proceed_button = QPushButton("If I must")
+        cancel_button.clicked.connect(self.reject)
+        proceed_button.clicked.connect(self.accept)
+        buttons_row.addWidget(cancel_button)
+        buttons_row.addWidget(proceed_button)
+        layout.addLayout(buttons_row)
 
 
 def create_info_button(

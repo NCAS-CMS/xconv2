@@ -61,6 +61,7 @@ from .ui.dialogs import (
     RemoteConfigurationDialog,
     RemoteOpenDialog,
     SaveSelectedFieldsDialog,
+    ZarrSaveWarningDialog,
 )
 
 if TYPE_CHECKING:
@@ -1608,6 +1609,11 @@ class CFVMain(CFVCore):
             return
 
         output_format = dialog.output_format
+        if output_format == "zarr":
+            zarr_warning_dialog = ZarrSaveWarningDialog(self)
+            if zarr_warning_dialog.exec() != QDialog.Accepted:
+                return
+
         destination_folder = Path(dialog.destination_folder).expanduser()
         requested_filename = dialog.output_filename.strip()
         destination_name = Path(requested_filename).name

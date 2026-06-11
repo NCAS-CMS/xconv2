@@ -10,7 +10,7 @@ import cf
 import numpy as np
 
 from xconv2.cache_utils import estimate_hdf5_metadata_bytes_for_fields
-from xconv2.coordinate_subspace import parse_coordinate_subspace_commands
+from xconv2.coordinate_subspace import parse_coordinate_subspace_commands  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -312,7 +312,7 @@ def save_selected_fields(
         h5py_options = {"meta_block_size": meta_block_size}
         cf.write(selected, destination, fmt="NETCDF4", h5py_options=h5py_options)
     elif output_format == "zarr":
-        cf.write(selected, destination, fmt="ZARR")
+        cf.write(selected, destination, fmt="ZARR3")
 
     logger.info(
         "save_selected_fields completed destination=%s format=%s field_count=%d meta_block_size=%s",

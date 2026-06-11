@@ -1340,6 +1340,13 @@ def test_file_ops_save_selected_builds_worker_task(monkeypatch: pytest.MonkeyPat
         def exec(self) -> int:
             return 1
 
+    class _AcceptZarrWarningDialog:
+        def __init__(self, _parent) -> None:
+            self._parent = _parent
+
+        def exec(self) -> int:
+            return 1
+
     class _DummyMain:
         def __init__(self) -> None:
             self.field_list_widget = _DummyFieldListWidget()
@@ -1361,6 +1368,7 @@ def test_file_ops_save_selected_builds_worker_task(monkeypatch: pytest.MonkeyPat
             self.sent.append((code, emit_image))
 
     monkeypatch.setattr(main_window, "SaveSelectedFieldsDialog", _AcceptedDialog)
+    monkeypatch.setattr(main_window, "ZarrSaveWarningDialog", _AcceptZarrWarningDialog)
     host = _DummyMain()
 
     CFVMain._file_ops_save_selected(host)
@@ -1372,6 +1380,84 @@ def test_file_ops_save_selected_builds_worker_task(monkeypatch: pytest.MonkeyPat
     assert "save_selected_fields(" in code
     assert "_cfview_output_format = 'zarr'" in code
     assert "_cfview_output_chunk_by_index = {0: '(10, 20)', 2: '(5, 5)'}" in code
+
+
+def test_file_ops_save_selected_zarr_warning_cancel_aborts_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DummyItem:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def text(self) -> str:
+            return self._text
+
+        def data(self, _role: object):
+            return ""
+
+    class _DummyFieldListWidget:
+        def __init__(self) -> None:
+            self._items = [_DummyItem("a")]
+
+        def selectedItems(self):
+            return [self._items[0]]
+
+        def row(self, item) -> int:
+            return self._items.index(item)
+
+    class _AcceptedDialog:
+        def __init__(
+            self,
+            _parent,
+            *,
+            selected_rows: list[dict[str, object]],
+            default_destination: str,
+            default_output_filename: str,
+        ) -> None:
+            _ = (selected_rows, default_destination, default_output_filename)
+            self.output_format = "zarr"
+            self.destination_folder = "/tmp"
+            self.output_filename = "custom_name"
+            self.output_chunk_shapes = [""]
+
+        def exec(self) -> int:
+            return 1
+
+    class _RejectZarrWarningDialog:
+        def __init__(self, _parent) -> None:
+            self._parent = _parent
+
+        def exec(self) -> int:
+            return 0
+
+    class _DummyMain:
+        def __init__(self) -> None:
+            self.field_list_widget = _DummyFieldListWidget()
+            self._settings = {"last_save_data_dir": "/tmp/default-save"}
+            self.remembered: list[tuple[str, str]] = []
+            self.sent: list[tuple[str, bool]] = []
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            raise AssertionError(f"unexpected status: {message} error={is_error}")
+
+        def _default_plot_filename(self) -> str:
+            return "cfv_plot"
+
+        def _remember_last_save_dir(self, key: str, path: str) -> None:
+            self.remembered.append((key, path))
+
+        def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
+            _ = (code, save_code_path)
+            self.sent.append(("code", emit_image))
+
+    monkeypatch.setattr(main_window, "SaveSelectedFieldsDialog", _AcceptedDialog)
+    monkeypatch.setattr(main_window, "ZarrSaveWarningDialog", _RejectZarrWarningDialog)
+    host = _DummyMain()
+
+    CFVMain._file_ops_save_selected(host)
+
+    assert host.remembered == []
+    assert host.sent == []
 
 
 def test_file_ops_save_selected_provenance_dispatches_worker_control_task(
