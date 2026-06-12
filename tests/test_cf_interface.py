@@ -1056,13 +1056,13 @@ def test_cf_example_field_writes_zarr3_smoke(tmp_path: Path) -> None:
 
     cf.write(field, str(destination), fmt="ZARR3")
 
-    assert destination.exists()
+    newfield = cf.read(str(destination))[0]
+
+    assert newfield.equals(field)
 
 
-@pytest.mark.xfail(
-    raises=TypeError,
-    reason="Upstream cf.write ZARR3 fails when field properties include numpy scalar values.",
-)
+
+
 def test_save_selected_fields_writes_zarr_with_numpy_scalar_property(tmp_path: Path) -> None:
     field = cf.example_field(0)
     field.set_property("np_scalar", np.int32(7))

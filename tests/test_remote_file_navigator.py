@@ -6,7 +6,11 @@ from types import SimpleNamespace
 import sys
 import types
 
+from PySide6.QtWidgets import QApplication, QDialog
+
 from xconv2.ui.remote_file_navigator import (
+    RemoteEntry,
+    RemoteFileNavigatorDialog,
     RemoteFilesystemSpec,
     _apply_cache_configuration,
     _parse_proxy_jump,
@@ -20,6 +24,13 @@ from xconv2.ui.remote_file_navigator import (
     normalize_remote_entries,
     resolve_link_entries,
 )
+
+
+def _ensure_qapp() -> QApplication:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    return app
 
 
 def test_build_s3_filesystem_spec_uses_endpoint_and_credentials() -> None:
@@ -204,6 +215,46 @@ def test_directory_contains_zarr_metadata_detects_v2_and_v3_markers() -> None:
     assert directory_contains_zarr_metadata(v2_entries) is True
     assert directory_contains_zarr_metadata(v3_entries) is True
     assert directory_contains_zarr_metadata(other_entries) is False
+
+
+def test_remote_file_navigator_allows_opening_detected_zarr_directories() -> None:
+    _ensure_qapp()
+
+    spec = RemoteFilesystemSpec(
+        protocol="sftp",
+        storage_options={},
+        root_path="/data",
+        display_name="SSH",
+        uri_scheme="ssh",
+        uri_authority="example.org",
+    )
+    zarr_entry = RemoteEntry(path="/data/store.zarr", name="store.zarr", is_dir=True, size=0)
+
+    dialog = RemoteFileNavigatorDialog(
+        None,
+        {},
+        spec=spec,
+        list_callback=lambda path: [zarr_entry] if path == "/data" else [],
+        session_active=True,
+    )
+    dialog._initialize_root_listing()
+
+    item = dialog.tree.topLevelItem(0)
+    assert item is not None
+    dialog.tree.setCurrentItem(item)
+
+    data = item.data(0, dialog._ROLE_DATA) or {}
+    assert isinstance(data, dict)
+    assert data["is_zarr"] is True
+
+    dialog._on_selection_changed()
+
+    assert dialog.open_button.isEnabled() is True
+    assert dialog.selected_path() == "/data/store.zarr"
+    assert dialog.selected_uri() == build_remote_uri(spec, "/data/store.zarr")
+
+    dialog.accept()
+    assert dialog.result() == QDialog.Accepted
 
 
 def test_apply_cache_configuration_wraps_block_disk_cache(monkeypatch) -> None:
