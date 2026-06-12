@@ -117,6 +117,36 @@ def _maybe_wrap_ppfive(filesystem: Any, path: str, protocol: str) -> Any:
     return filesystem.open(path, "rb")
 
 
+def _is_zarr_dataset_path(path: str) -> bool:
+    """Return True when a dataset input points at a Zarr store path."""
+    return is_zarr_path(path)
+
+
+def _normalize_s3_uri(path: str) -> str:
+    """Ensure S3 dataset paths are URI-form for readers that expect scheme-qualified input."""
+    text = str(path).strip()
+    parsed = urlparse(text)
+    if parsed.scheme:
+        return text
+    return f"s3://{text.lstrip('/')}"
+
+
+def _zarr_reader_input_for_filesystem(filesystem: Any, path: str, protocol: str) -> Any:
+    """Return a cache-aware reader input for a Zarr dataset path."""
+    mapper_path = str(path).strip()
+    if protocol == "s3":
+        parsed = urlparse(mapper_path)
+        if parsed.scheme == "s3":
+            mapper_path = f"{parsed.netloc}{parsed.path}".lstrip("/")
+
+    get_mapper = getattr(filesystem, "get_mapper", None)
+    if callable(get_mapper):
+        return get_mapper(mapper_path)
+
+    # Fallback for unusual filesystems that may not expose get_mapper.
+    return mapper_path
+
+
 # ---------------------------------------------------------------------------
 # Classes
 # ---------------------------------------------------------------------------
@@ -211,7 +241,19 @@ class RemoteAccessSession:
         )
         logging.info(f'Attempting to open remote dataset(s) with reader: {normalized}')
         protocol = str(descriptor.get("protocol", "")).lower()
+        normalized_paths = normalized if isinstance(normalized, list) else [normalized]
+        has_zarr_input = any(_is_zarr_dataset_path(path) for path in normalized_paths)
         self._close_open_handles()
+
+        if has_zarr_input:
+            # Keep Zarr reads cache-aware by using mapper inputs from the already
+            # prepared filesystem instead of bypassing with direct URI strings.
+            zarr_inputs = [
+                _zarr_reader_input_for_filesystem(self.filesystem, path, protocol)
+                for path in normalized_paths
+            ]
+            return reader(zarr_inputs if isinstance(normalized, list) else zarr_inputs[0])
+
         try:
             if isinstance(normalized, list):
                 self._open_handles = [

@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import json
 import logging
-from pathlib import Path
 from types import SimpleNamespace
 import pytest
 
 from xconv2.remote_access import (
     RemoteAccessSession,
-    RemoteFilesystemSpec,
     build_remote_filesystem_spec,
     create_filesystem,
     normalize_remote_datasets_for_cf_read,
@@ -124,6 +121,55 @@ def test_remote_access_read_fields_opens_s3_dataset_handles() -> None:
     handle, filesystem = calls[0]
     assert getattr(handle, "path", None) == "bucket/data.nc"
     assert filesystem is None
+
+
+def test_remote_access_read_fields_passes_s3_zarr_mapper_to_reader_without_opening_handles() -> None:
+    calls: list[object] = []
+
+    class _Mapper:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+    class _Fs:
+        def __init__(self) -> None:
+            self.paths: list[str] = []
+            self.mapper_paths: list[str] = []
+
+        def open(self, path: str, mode: str = "rb", **kwargs):
+            _ = (mode, kwargs)
+            self.paths.append(path)
+            raise AssertionError("Zarr datasets should not be opened as file handles")
+
+        def get_mapper(self, path: str):
+            self.mapper_paths.append(path)
+            return _Mapper(path)
+
+    def _reader(datasets):
+        calls.append(datasets)
+        return ["fields"]
+
+    fs = _Fs()
+    session = RemoteAccessSession(fs)
+    result = session.read_fields(
+        descriptor={
+            "protocol": "s3",
+            "root_path": "",
+            "storage_options": {
+                "key": "abc",
+                "secret": "xyz",
+                "client_kwargs": {"endpoint_url": "https://example.invalid"},
+            },
+        },
+        datasets="bucket/store.zarr",
+        reader=_reader,
+    )
+
+    assert result == ["fields"]
+    assert fs.paths == []
+    assert fs.mapper_paths == ["bucket/store.zarr"]
+    assert len(calls) == 1
+    assert isinstance(calls[0], _Mapper)
+    assert calls[0].path == "bucket/store.zarr"
 
 
 def test_normalize_remote_datasets_for_cf_read_passthrough_non_http() -> None:

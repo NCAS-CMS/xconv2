@@ -47,6 +47,35 @@ def _upload_minio_data(
     return uri, path
 
 
+def _upload_minio_zarr_store(
+    minio_service,
+    temp_bucket: str,
+    *,
+    tmp_path: Path,
+    object_prefix: str,
+) -> tuple[str, str]:
+    """Create a local Zarr store and upload it to MinIO under object_prefix."""
+    import cf
+
+    local_store = tmp_path / "fixture.zarr"
+    cf.write(cf.example_field(0), str(local_store), fmt="ZARR3")
+
+    uploaded = 0
+    for file_path in local_store.rglob("*"):
+        if not file_path.is_file():
+            continue
+        relative = file_path.relative_to(local_store).as_posix()
+        object_name = f"{object_prefix.rstrip('/')}/{relative}"
+        minio_service.fput_object(temp_bucket, object_name, str(file_path))
+        uploaded += 1
+
+    assert uploaded > 0, "Expected at least one object in uploaded Zarr store"
+
+    uri = f"s3://{temp_bucket}/{object_prefix.rstrip('/')}"
+    path = f"{temp_bucket}/{object_prefix.rstrip('/')}"
+    return uri, path
+
+
 @contextmanager
 def _captured_worker_gui_messages() -> Iterator[list[tuple[str, object]]]:
     """Capture worker send_to_gui traffic and isolate global worker state."""
@@ -949,6 +978,73 @@ def test_worker_remote_open_large_logged_s3_key_cache_hits_on_second_open(minio_
         )
 
         open_results = [data for prefix, data in messages if prefix == "REMOTE_OPEN_RESULT"]
+        assert open_results
+        assert open_results[-1] == {
+            "session_id": session_id,
+            "uri": uri,
+            "ok": True,
+        }
+
+
+@pytest.mark.integration
+def test_worker_remote_open_s3_zarr_disk_cache_hits_on_second_open(minio_service, temp_bucket, tmp_path) -> None:
+    """Verify cache-aware worker Zarr open reduces wire bytes on second open."""
+    uri, path = _upload_minio_zarr_store(
+        minio_service,
+        temp_bucket,
+        tmp_path=tmp_path,
+        object_prefix="worker-zarr-cache/example.zarr",
+    )
+
+    cache_dir = tmp_path / "worker-zarr-blockcache"
+    cache_dir.mkdir()
+
+    descriptor = _s3_descriptor(
+        minio_service,
+        cache={
+            "disk_mode": "blocks",
+            "disk_location": str(cache_dir),
+            "blocksize_mb": 1,
+            "max_blocks": 128,
+        },
+    )
+    descriptor_hash = "worker-zarr-cache-hash"
+    session_id = "worker-zarr-cache-session"
+
+    with _captured_worker_gui_messages() as messages:
+        first_open_bytes = _measure_minio_bytes(
+            minio_service,
+            lambda: _handle_remote_prepare_open(
+                descriptor,
+                session_id=session_id,
+                descriptor_hash=descriptor_hash,
+                uri=uri,
+                path=path,
+            ),
+        )
+
+        assert first_open_bytes > 0, "First Zarr open should transfer bytes from MinIO"
+        assert _has_blockcache_index(cache_dir), "Blockcache index missing after first Zarr open"
+
+        _handle_remote_release(session_id=session_id, descriptor_hash=descriptor_hash)
+
+        second_open_bytes = _measure_minio_bytes(
+            minio_service,
+            lambda: _handle_remote_prepare_open(
+                descriptor,
+                session_id=session_id,
+                descriptor_hash=descriptor_hash,
+                uri=uri,
+                path=path,
+            ),
+        )
+
+        assert second_open_bytes < first_open_bytes * 0.75, (
+            "Disk cache did not materially reduce S3 Zarr wire bytes on second open: "
+            f"first={first_open_bytes:,.0f} second={second_open_bytes:,.0f}"
+        )
+
+        open_results = [payload for prefix, payload in messages if prefix == "REMOTE_OPEN_RESULT"]
         assert open_results
         assert open_results[-1] == {
             "session_id": session_id,
