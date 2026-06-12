@@ -199,6 +199,28 @@ def test_get_data_for_plotting_snaps_singleton_to_nearest_coordinate_value() -> 
     assert fld.kwargs["longitude"] == pytest.approx(0.07)
 
 
+def test_get_data_for_plotting_snaps_range_bounds_to_nearest_coordinate_values() -> None:
+    """Low-precision GUI bounds for a range must snap to nearest coordinate values.
+
+    Without snapping, cf.wi(lo, hi) can exclude the intended end-points when GUI
+    values are truncated or rounded relative to the stored coordinate values.
+    """
+    coords = np.array([-1.5, -0.5, 0.5, 1.5])
+    fld = _FakePlotField(coord_arrays={"latitude": coords})
+
+    # GUI provides lower-precision bounds that fall just short of -0.5 and 1.5
+    pfld = get_data_for_plotting(
+        fld,
+        {"latitude": ("-0.4999", "1.4999")},
+        {},
+    )
+
+    assert pfld is fld
+    assert fld.kwargs is not None
+    wi_arg = fld.kwargs["latitude"]
+    assert str(wi_arg) == str(cf.wi(-0.5, 1.5))
+
+
 def test_append_unary_xy_field_operation_appends_grad_row(monkeypatch: pytest.MonkeyPatch) -> None:
     field = cf.example_field(0)
     fields = [field]

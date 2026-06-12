@@ -399,64 +399,54 @@ def get_data_for_plotting(
         object: Subspaced and optionally collapsed field-like object.
     """
 
-    def _parse_bound(value: object) -> object:
-        """Convert textual bounds to numbers when possible."""
+    def _parse_bound(value: object, coord_name: str) -> object:
+        """Parse a GUI bound to a number and snap it to the nearest coordinate value.
+
+        GUI values may arrive at reduced precision, so snapping both range
+        endpoints prevents cf.wi(lo, hi) from missing the intended end-points.
+        Non-numeric bounds (e.g. date strings) are returned as-is.
+        """
         if isinstance(value, (int, float)):
-            return value
-
-        text = str(value).strip()
-        try:
-            return int(text)
-        except ValueError:
+            parsed: object = value
+        else:
+            text = str(value).strip()
             try:
-                return float(text)
+                parsed = int(text)
             except ValueError:
-                return text
-
-    def _snap_singleton_bound(coord_name: str, value: object) -> object:
-        """
-        Snap singleton GUI bounds to nearest coordinate values in the field.
-
-        GUI coordinate values may not correspond exactly to coordinate values in
-        the field in terms of binary equivalence.
-        """
+                try:
+                    parsed = float(text)
+                except ValueError:
+                    return text  # non-numeric — no snapping possible
 
         coord = field.dimension_coordinate(coord_name, default=None)
         if coord is None:
             coord = field.auxiliary_coordinate(coord_name, default=None)
         if coord is None:
-            return value
-
-        arr = coord.array
+            return parsed
 
         try:
-            numeric = np.ma.array(arr, dtype=float).compressed()
+            numeric = np.ma.array(coord.array, dtype=float).compressed()
         except Exception:
-            return value
+            return parsed
         if numeric.size == 0:
-            return value
+            return parsed
 
-        try:
-            value_as_float = float(value)
-        except (TypeError, ValueError):
-            return value
-
-        nearest_index = int(np.abs(numeric - value_as_float).argmin())
+        nearest_index = int(np.abs(numeric - float(parsed)).argmin())
         nearest = float(numeric[nearest_index])
-        if isinstance(value, int) and nearest.is_integer():
+        if isinstance(parsed, int) and nearest.is_integer():
             return int(nearest)
         return nearest
 
     subspace_kwargs: dict[str, object] = {}
     for coord_name, bounds in selection_spec.items():
         lo, hi = bounds
-        lo = _parse_bound(lo)
-        hi = _parse_bound(hi)
+        lo = _parse_bound(lo, coord_name)
+        hi = _parse_bound(hi, coord_name)
+        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+            lo, hi = sorted((lo, hi))
         if lo == hi:
-            subspace_kwargs[coord_name] = _snap_singleton_bound(coord_name, lo)
+            subspace_kwargs[coord_name] = lo
         else:
-            if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
-                lo, hi = sorted((lo, hi))
             subspace_kwargs[coord_name] = cf.wi(lo, hi)
 
     pfld = field.subspace(**subspace_kwargs)
