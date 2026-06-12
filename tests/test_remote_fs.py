@@ -389,6 +389,44 @@ def test_factory_ssh_forwards_paramiko_logs_to_callback(
     assert any("[p5rem.bootstrap]" in line and "SSH connection established" in line for line in streamed)
 
 
+def test_factory_ssh_forwards_and_restores_disabled_paramiko_logger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeSession:
+        def heartbeat(self):
+            return {"type": "HEARTBEAT"}
+
+    def _fake_bootstrap_session(**kwargs):
+        _ = kwargs
+        logging.getLogger("paramiko.transport").info("KEXINIT received")
+        return _FakeSession()
+
+    monkeypatch.setattr(remote_fs, "bootstrap_session", _fake_bootstrap_session)
+
+    paramiko_logger = logging.getLogger("paramiko.transport")
+    original_disabled = paramiko_logger.disabled
+    original_global_disable = logging.getLogger().manager.disable
+    streamed: list[str] = []
+
+    try:
+        paramiko_logger.disabled = True
+        logging.disable(logging.CRITICAL)
+
+        remote_fs.RemoteFileSystemFactory(
+            url="ssh://alice@myhost:2222/home/alice/data.nc",
+            credentials={"password": "pw"},
+            cache_dir=None,
+            log_callback=streamed.append,
+        )
+
+        assert any("[paramiko.transport]" in line and "KEXINIT received" in line for line in streamed)
+        assert paramiko_logger.disabled is True
+        assert logging.getLogger().manager.disable == logging.CRITICAL
+    finally:
+        paramiko_logger.disabled = original_disabled
+        logging.disable(original_global_disable)
+
+
 def test_p5rem_filesystem_ls_uses_structured_entries_without_stat() -> None:
     class _FakeSession:
         def list(self, path: str):

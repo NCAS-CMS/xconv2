@@ -101,7 +101,10 @@ def _forward_logger_output(
         yield
         return
 
-    handlers: list[tuple[logging.Logger, logging.Handler, int]] = []
+    handlers: list[tuple[logging.Logger, logging.Handler, int, bool, bool]] = []
+    manager = logging.getLogger().manager
+    previous_global_disable = manager.disable
+    logging.disable(logging.NOTSET)
 
     class _CallbackHandler(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
@@ -112,8 +115,8 @@ def _forward_logger_output(
             except Exception:
                 return
 
-    # Also track child loggers to ensure propagation
-    child_loggers_to_enable: list[logging.Logger] = []
+    # Track child logger state so we can restore it after forwarding.
+    child_logger_states: list[tuple[logging.Logger, int, bool, bool]] = []
 
     for name in logger_names:
         target_logger = logging.getLogger(name)
@@ -121,25 +124,45 @@ def _forward_logger_output(
         handler.setLevel(logging.DEBUG)
         handler.setFormatter(logging.Formatter("[%(name)s] %(message)s"))
         previous_level = target_logger.level
+        previous_propagate = target_logger.propagate
+        previous_disabled = target_logger.disabled
         target_logger.addHandler(handler)
         target_logger.setLevel(logging.DEBUG)
-        target_logger.propagate = True  # Ensure propagation is enabled
-        handlers.append((target_logger, handler, previous_level))
+        target_logger.propagate = True
+        target_logger.disabled = False
+        handlers.append((target_logger, handler, previous_level, previous_propagate, previous_disabled))
         
         # Also enable propagation on common child loggers
         for child_name in ["paramiko.transport", "p5rem.bootstrap"]:
             if child_name.startswith(name + "."):
                 child_logger = logging.getLogger(child_name)
+                child_logger_states.append(
+                    (
+                        child_logger,
+                        child_logger.level,
+                        child_logger.propagate,
+                        child_logger.disabled,
+                    )
+                )
                 child_logger.propagate = True
                 child_logger.setLevel(logging.DEBUG)
-                child_loggers_to_enable.append(child_logger)
+                child_logger.disabled = False
 
     try:
         yield
     finally:
-        for target_logger, handler, previous_level in handlers:
+        for target_logger, handler, previous_level, previous_propagate, previous_disabled in handlers:
             target_logger.removeHandler(handler)
             target_logger.setLevel(previous_level)
+            target_logger.propagate = previous_propagate
+            target_logger.disabled = previous_disabled
+
+        for child_logger, previous_level, previous_propagate, previous_disabled in child_logger_states:
+            child_logger.setLevel(previous_level)
+            child_logger.propagate = previous_propagate
+            child_logger.disabled = previous_disabled
+
+        logging.disable(previous_global_disable)
 
 
 class ShimmyFS(fsspec.AbstractFileSystem):
