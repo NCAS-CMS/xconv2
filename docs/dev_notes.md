@@ -8,3 +8,4 @@ e.g.
 
 pip install --upgrade git+https://github.com/davidhassell/cfdm.git@pyfive-netcdf
 pip install --upgrade git+https://github.com/davidhassell/cf-python.git@kerchunk-read
+pip install --upgrade git+https://github.com/bnlawrence/cf-plot.git@main

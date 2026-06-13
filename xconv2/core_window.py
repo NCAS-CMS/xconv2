@@ -660,11 +660,11 @@ class CFVCore(QMainWindow):
             "High-performance data viewer and simple data converter."
             "</p>"
             "<p> Provides a graphical interface to explore and plot CF-compliant (and near compliant) datasets, " 
-            "stored in NetCDF, Zarr, or Met Office pp/fields files. Supports file conversion and simple" 
+            "stored in NetCDF, Zarr, or Met Office pp/fields files. Supports file conversion and simple " 
             "data manipulation. All data saved will be CF-compliant." 
             "</p>"
             "<p>Maintained by NCAS-Computational Modelling Services (NCAS-CMS) at the University of Reading. "
-            "Powered by cf-python, pyfive, and Dask."
+            "Powered by cf-python, cf-plot, pyfive, fsspec, and Dask."
             "</p>"
         )
         heading.setTextFormat(Qt.RichText)
