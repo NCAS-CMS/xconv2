@@ -134,6 +134,14 @@ class WorkerMessageRouter:
             self._handle_contour_range(line)
         elif line.startswith("FILTER_AXES:"):
             self._handle_filter_axes(line)
+        elif line.startswith("ANIM_START:"):
+            self._handle_anim_start(line)
+        elif line.startswith("ANIM_FRAME:"):
+            self._handle_anim_frame(line)
+        elif line.startswith("ANIM_END:"):
+            self._handle_anim_end(line)
+        elif line.startswith("ANIM_ERROR:"):
+            self._handle_anim_error(line)
 
     def _handle_remote_status(self, line: str) -> None:
         payload = self._decode_payload(line)
@@ -349,3 +357,100 @@ class WorkerMessageRouter:
                 loop.quit()
         else:
             logger.warning("Unexpected FILTER_AXES payload type: %s", type(payload).__name__)
+
+    def _handle_anim_start(self, line: str) -> None:
+        """Handle ANIM_START: animation session initialization."""
+        payload = self._decode_payload(line)
+        if not isinstance(payload, dict):
+            logger.warning("Unexpected ANIM_START payload type: %s", type(payload).__name__)
+            return
+
+        request_id = str(payload.get("request_id", ""))
+        session_id = payload.get("session_id")
+        total_frames = payload.get("total_frames")
+        fps_hint = payload.get("fps_hint")
+        title_template = payload.get("title_template")
+
+        logger.info(
+            "ANIM_DIAG anim_start pid=%s worker_pid=%s request_id=%s total_frames=%s",
+            os.getpid(),
+            self._host.worker.processId(),
+            request_id,
+            total_frames,
+        )
+
+        handler = getattr(self._host, "_handle_animation_start", None)
+        if callable(handler):
+            handler(request_id=request_id, session_id=session_id, total_frames=total_frames, fps_hint=fps_hint, title_template=title_template)
+
+    def _handle_anim_frame(self, line: str) -> None:
+        """Handle ANIM_FRAME: frame data during animation."""
+        payload = self._decode_payload(line)
+        if not isinstance(payload, dict):
+            logger.warning("Unexpected ANIM_FRAME payload type: %s", type(payload).__name__)
+            return
+
+        request_id = str(payload.get("request_id", ""))
+        session_id = payload.get("session_id")
+        frame_index = int(payload.get("frame_index", 0))
+        png_bytes = payload.get("png_bytes", b"")
+
+        logger.info(
+            "ANIM_DIAG anim_frame pid=%s worker_pid=%s request_id=%s frame_index=%s",
+            os.getpid(),
+            self._host.worker.processId(),
+            request_id,
+            frame_index,
+        )
+
+        handler = getattr(self._host, "_handle_animation_frame", None)
+        if callable(handler):
+            handler(request_id=request_id, session_id=session_id, frame_index=frame_index, png_bytes=png_bytes)
+
+    def _handle_anim_end(self, line: str) -> None:
+        """Handle ANIM_END: animation session completion."""
+        payload = self._decode_payload(line)
+        if not isinstance(payload, dict):
+            logger.warning("Unexpected ANIM_END payload type: %s", type(payload).__name__)
+            return
+
+        request_id = str(payload.get("request_id", ""))
+        session_id = payload.get("session_id")
+        frames_emitted = int(payload.get("frames_emitted", 0))
+
+        logger.info(
+            "ANIM_DIAG anim_end pid=%s worker_pid=%s request_id=%s frames_emitted=%s",
+            os.getpid(),
+            self._host.worker.processId(),
+            request_id,
+            frames_emitted,
+        )
+
+        handler = getattr(self._host, "_handle_animation_end", None)
+        if callable(handler):
+            handler(request_id=request_id, session_id=session_id, frames_emitted=frames_emitted)
+
+    def _handle_anim_error(self, line: str) -> None:
+        """Handle ANIM_ERROR: animation session error."""
+        payload = self._decode_payload(line)
+        if not isinstance(payload, dict):
+            logger.warning("Unexpected ANIM_ERROR payload type: %s", type(payload).__name__)
+            return
+
+        request_id = str(payload.get("request_id", ""))
+        session_id = payload.get("session_id")
+        frame_index = payload.get("frame_index")
+        error_message = str(payload.get("error", "Unknown animation error"))
+
+        logger.error(
+            "ANIM_DIAG anim_error pid=%s worker_pid=%s request_id=%s frame_index=%s error=%s",
+            os.getpid(),
+            self._host.worker.processId(),
+            request_id,
+            frame_index,
+            error_message,
+        )
+
+        handler = getattr(self._host, "_handle_animation_error", None)
+        if callable(handler):
+            handler(request_id=request_id, session_id=session_id, frame_index=frame_index, error_message=error_message)

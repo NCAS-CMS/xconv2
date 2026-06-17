@@ -1077,6 +1077,98 @@ def _emit_latest_plot_image() -> None:
     buffer.close()
 
 
+def _emit_animation_start(
+    request_id: str,
+    session_id: str | None,
+    total_frames: int | None,
+    fps_hint: float | None,
+    title_template: str | None,
+) -> None:
+    """Notify GUI of animation session start."""
+    import time
+
+    payload = {
+        "request_id": request_id,
+        "session_id": session_id,
+        "total_frames": total_frames,
+        "fps_hint": fps_hint,
+        "title_template": title_template,
+        "started_at": time.time(),
+    }
+    send_to_gui("ANIM_START", payload)
+
+
+def _emit_animation_frame(
+    request_id: str,
+    session_id: str | None,
+    frame_index: int,
+    total_frames: int | None,
+    frame_value_label: str | None = None,
+) -> None:
+    """Emit a single animation frame to GUI."""
+    import time
+
+    _ensure_worker_runtime_loaded()
+    fig_numbers = plt.get_fignums()
+    if not fig_numbers:
+        logger.warning("No matplotlib figure available for animation frame")
+        return
+
+    fig = plt.figure(fig_numbers[-1])
+    buffer = BytesIO()
+    dpi = fig.get_dpi() if hasattr(fig, "get_dpi") else 120
+    fig.savefig(buffer, format="png", dpi=dpi)
+    buffer.seek(0)
+    png_bytes = buffer.getvalue()
+    buffer.close()
+
+    payload = {
+        "request_id": request_id,
+        "session_id": session_id,
+        "frame_index": frame_index,
+        "total_frames": total_frames,
+        "png_bytes": png_bytes,
+        "frame_value_label": frame_value_label,
+        "emitted_at": time.time(),
+    }
+    send_to_gui("ANIM_FRAME", payload)
+    logger.info(
+        "ANIM_DIAG worker_emit_frame request_id=%s frame_index=%s png_bytes=%d",
+        request_id,
+        frame_index,
+        len(png_bytes),
+    )
+
+
+def _emit_animation_end(request_id: str, session_id: str | None, frames_emitted: int) -> None:
+    """Notify GUI of animation session completion."""
+    import time
+
+    payload = {
+        "request_id": request_id,
+        "session_id": session_id,
+        "frames_emitted": frames_emitted,
+        "completed_at": time.time(),
+    }
+    send_to_gui("ANIM_END", payload)
+
+
+def _emit_animation_error(
+    request_id: str, session_id: str | None, frame_index: int | None, error_message: str
+) -> None:
+    """Notify GUI of animation session error."""
+    import time
+
+    payload = {
+        "request_id": request_id,
+        "session_id": session_id,
+        "frame_index": frame_index,
+        "error": error_message,
+        "failed_at": time.time(),
+    }
+    send_to_gui("ANIM_ERROR", payload)
+
+
 def main():
     """Entry point for the cf-worker command."""
     log_file = configure_logging()
