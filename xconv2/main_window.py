@@ -1763,6 +1763,10 @@ class CFVMain(CFVCore):
             return
 
         selections, collapse_by_coord, plot_kind = context
+        if getattr(self, "selected_plot_action", "plot") == "animation":
+            self._show_animation_options_dialog()
+            return
+
         if plot_kind == "lineplot":
             self._show_lineplot_options_dialog()
             return
@@ -1811,6 +1815,7 @@ class CFVMain(CFVCore):
         code: str,
         save_code_path: str | None = None,
         emit_image: bool = True,
+        animation_enabled: bool = False,
     ) -> None:
         """Send a code block to the worker process with task terminator."""
         if not code.endswith("\n"):
@@ -1822,6 +1827,8 @@ class CFVMain(CFVCore):
             headers.append(f"#SAVE_TASK_CODE_PATH_B64:{encoded_path}")
         if not emit_image:
             headers.append("#EMIT_IMAGE:0")
+        if animation_enabled:
+            headers.append("#ANIMATION:1")
 
         header_block = ""
         if headers:

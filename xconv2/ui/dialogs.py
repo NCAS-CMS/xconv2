@@ -385,6 +385,94 @@ class ZarrSaveWarningDialog(QDialog):
         layout.addLayout(buttons_row)
 
 
+class AnimationOptionsDialog(QDialog):
+    """Dialog for configuring animation rendering and playback hints."""
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        *,
+        current_options: dict[str, object] | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Animation Options")
+        self.resize(460, 260)
+
+        options = dict(current_options or {})
+
+        layout = QVBoxLayout(self)
+
+        header = QLabel("Configure animation output and playback hints.")
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        form = QFormLayout()
+
+        self.fps_spin = QSpinBox(self)
+        self.fps_spin.setRange(1, 30)
+        self.fps_spin.setValue(int(options.get("fps_hint", 8) or 8))
+        self.fps_spin.setToolTip("Preferred playback rate in frames per second.")
+        form.addRow("FPS hint", self.fps_spin)
+
+        self.frame_axis_combo = QComboBox(self)
+        self.frame_axis_combo.addItem("Auto", "auto")
+        self.frame_axis_combo.addItem("Time", "time")
+        self.frame_axis_combo.addItem("Level", "level")
+        self.frame_axis_combo.addItem("Depth", "depth")
+        self.frame_axis_combo.addItem("Latitude", "latitude")
+        self.frame_axis_combo.addItem("Longitude", "longitude")
+        axis_value = str(options.get("frame_axis", "auto") or "auto")
+        axis_index = self.frame_axis_combo.findData(axis_value)
+        self.frame_axis_combo.setCurrentIndex(axis_index if axis_index >= 0 else 0)
+        self.frame_axis_combo.setToolTip("Coordinate to step through when rendering animation frames.")
+        form.addRow("Frame axis", self.frame_axis_combo)
+
+        self.max_frames_spin = QSpinBox(self)
+        self.max_frames_spin.setRange(0, 2000)
+        self.max_frames_spin.setSpecialValueText("All")
+        self.max_frames_spin.setValue(int(options.get("max_frames", 0) or 0))
+        self.max_frames_spin.setToolTip("Limit number of frames rendered. Set to All for no cap.")
+        form.addRow("Frame limit", self.max_frames_spin)
+
+        self.loop_checkbox = QCheckBox("Loop playback when finished", self)
+        self.loop_checkbox.setChecked(bool(options.get("loop_playback", True)))
+        form.addRow("Playback", self.loop_checkbox)
+
+        self.show_labels_checkbox = QCheckBox("Show frame value labels", self)
+        self.show_labels_checkbox.setChecked(bool(options.get("show_frame_labels", True)))
+        form.addRow("Frame labels", self.show_labels_checkbox)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def selected_options(self) -> dict[str, object]:
+        """Return validated animation options from dialog controls."""
+        return {
+            "fps_hint": int(self.fps_spin.value()),
+            "frame_axis": str(self.frame_axis_combo.currentData() or "auto"),
+            "max_frames": int(self.max_frames_spin.value()),
+            "loop_playback": bool(self.loop_checkbox.isChecked()),
+            "show_frame_labels": bool(self.show_labels_checkbox.isChecked()),
+        }
+
+    @classmethod
+    def get_options(
+        cls,
+        parent: QWidget | None,
+        *,
+        current_options: dict[str, object] | None = None,
+    ) -> tuple[dict[str, object] | None, bool]:
+        """Open dialog and return selected options with acceptance state."""
+        dialog = cls(parent, current_options=current_options)
+        if dialog.exec() != QDialog.Accepted:
+            return None, False
+        return dialog.selected_options(), True
+
+
 def create_info_button(
     parent: QWidget | None,
     title: str,

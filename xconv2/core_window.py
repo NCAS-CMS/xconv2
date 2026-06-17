@@ -68,7 +68,14 @@ from .ui.vector_options_controller import VectorOptionsController
 from .ui.menu_controller import MenuController
 from .ui.plot_view_controller import PlotViewController
 from .ui.selection_controller import SelectionController
-from .ui.dialogs import OpenGlobDialog, OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog, create_info_button
+from .ui.dialogs import (
+    AnimationOptionsDialog,
+    OpenGlobDialog,
+    OpenURIDialog,
+    RemoteConfigurationDialog,
+    RemoteOpenDialog,
+    create_info_button,
+)
 from .tooltips import CACHE_MANAGEMENT, FIELDS_HELP, SELECTION_HELP
 # RemoteFileNavigatorDialog is imported lazily (inside the methods that open it)
 # to avoid loading p5rem/paramiko at GUI startup.
@@ -2261,6 +2268,16 @@ class CFVCore(QMainWindow):
     def _show_vector_options_dialog(self, current_field_index: int) -> None:
         """Show vector options dialog and persist selected options."""
         self.vector_options_controller.show_vector_options_dialog(current_field_index)
+
+    def _show_animation_options_dialog(self) -> None:
+        """Show animation options dialog and persist selected options."""
+        current = self.plot_options_by_kind.get("animation")
+        current_options = dict(current) if isinstance(current, dict) else {}
+        selected, ok = AnimationOptionsDialog.get_options(self, current_options=current_options)
+        if not ok or not isinstance(selected, dict):
+            return
+        self.plot_options_by_kind["animation"] = selected
+        self._show_status_message("Animation options updated.")
 
     def _show_annotation_properties_chooser(
         self,
