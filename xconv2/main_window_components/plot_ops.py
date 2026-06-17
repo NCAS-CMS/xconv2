@@ -163,6 +163,27 @@ def request_plot_task(
     save_plot_target = str(Path(save_plot_path).expanduser()) if save_plot_path else None
     save_data_target = str(Path(save_data_path).expanduser()) if save_data_path else None
 
+    if (
+        plot_action == "animation"
+        and save_target is None
+        and save_plot_target is None
+        and save_data_target is None
+    ):
+        host._show_status_message("Animation: using synthetic preview mode (cf-plot callbacks not active yet).")
+        preview_handler = getattr(host, "_send_synthetic_animation_preview", None)
+        if callable(preview_handler):
+            preview_handler(
+                field_index=int(field_index),
+                selections=selections,
+                collapse_by_coord=collapse_by_coord,
+            )
+            return
+        host._show_status_message(
+            "Animation preview is not available in this build.",
+            is_error=True,
+        )
+        return
+
     if save_data_target and not save_plot_target:
         if save_code_path:
             host._show_status_message(

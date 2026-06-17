@@ -46,6 +46,7 @@ from .cf_templates import (
 )
 from .core_window import CFVCore
 from .coordinate_subspace import parse_coordinate_subspace_commands
+from .animation_session import AnimationPlaybackState, AnimationSession, AnimationSessionController
 from .main_window_components import plot_ops as _plot_ops
 from .main_window_components import remote_auth_ops as _remote_auth_ops
 from .main_window_components import remote_flow_ops as _remote_flow_ops
@@ -168,6 +169,11 @@ class CFVMain(CFVCore):
         self._allow_initial_autoplot_on_next_field_click: bool = True
         self._shutting_down: bool = False
         self._replay_session_id: str = str(uuid.uuid4())
+        self._animation_session_controller = AnimationSessionController()
+        self._active_animation_request_id: str | None = None
+        self._animation_playback_timer = QTimer(self)
+        self._animation_playback_timer.setInterval(120)
+        self._animation_playback_timer.timeout.connect(self._advance_animation_playback)
         self._worker_output_router = WorkerMessageRouter(self, main_cls=CFVMain)
 
         self.worker = QProcess()
@@ -382,6 +388,7 @@ class CFVMain(CFVCore):
 
     def _reset_ui_for_new_field_selection(self) -> None:
         """Clear stale error/loading UI state before handling a fresh field selection."""
+        CFVMain._reset_animation_preview_state(self)
         self._plot_request_in_flight = False
         self._plot_request_expects_image = False
         self._suppress_stale_error_status = True
@@ -390,6 +397,309 @@ class CFVMain(CFVCore):
         self._set_plot_loading(False)
         self._clear_plot_canvas("Waiting for data...")
         self._show_status_message("Task Complete")
+
+    def _current_animation_session(self) -> AnimationSession | None:
+        request_id = self._active_animation_request_id
+        if not request_id:
+            return None
+        return self._animation_session_controller.get_session(request_id)
+
+    def _current_animation_options(self) -> dict[str, object]:
+        """Return normalized animation option settings for playback behavior."""
+        raw = self.plot_options_by_kind.get("animation")
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def _reset_animation_preview_state(self) -> None:
+        """Reset transient animation session/playback state in the GUI."""
+        timer = getattr(self, "_animation_playback_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+
+        self._active_animation_request_id = None
+        self._animation_is_playing = False
+
+        play_button = getattr(self, "anim_play_pause_button", None)
+        stop_button = getattr(self, "anim_stop_button", None)
+        export_button = getattr(self, "anim_export_button", None)
+        is_animation_mode = getattr(self, "selected_plot_action", "plot") == "animation"
+
+        if play_button is not None:
+            play_button.setText("Play")
+            play_button.setEnabled(is_animation_mode)
+        if stop_button is not None:
+            stop_button.setEnabled(False)
+        if export_button is not None:
+            export_button.setEnabled(is_animation_mode)
+
+    def _send_synthetic_animation_preview(
+        self,
+        *,
+        field_index: int,
+        selections: dict[str, tuple[object, object]],
+        collapse_by_coord: dict[str, str],
+    ) -> None:
+        """Request synthetic ANIM_* events so GUI playback can be tested without cf-plot callbacks."""
+        _ = (selections, collapse_by_coord)
+        animation_options = self.plot_options_by_kind.get("animation")
+        options = dict(animation_options) if isinstance(animation_options, dict) else {}
+
+        max_frames = options.get("max_frames", 0)
+        try:
+            frame_count = int(max_frames)
+        except (TypeError, ValueError):
+            frame_count = 0
+        if frame_count <= 0:
+            frame_count = 18
+        frame_count = max(2, min(frame_count, 240))
+
+        fps_hint_raw = options.get("fps_hint", 8)
+        try:
+            fps_hint = float(fps_hint_raw)
+        except (TypeError, ValueError):
+            fps_hint = 8.0
+
+        request_id = str(uuid.uuid4())
+        self._active_animation_request_id = request_id
+        self._animation_session_controller.create_session(request_id=request_id, session_id=request_id)
+
+        self._plot_request_in_flight = True
+        self._plot_request_expects_image = False
+        self._suppress_stale_error_status = False
+        self._set_plot_loading(True, "Generating synthetic animation preview...")
+        self._show_status_message("Synthetic preview mode active: generating animation frames...")
+        self._send_worker_control_task(
+            "ANIM_SYNTHETIC",
+            {
+                "request_id": request_id,
+                "session_id": request_id,
+                "frame_count": frame_count,
+                "fps_hint": fps_hint,
+                "title_template": f"Field {field_index} animation preview",
+            },
+        )
+
+    def _handle_animation_start(
+        self,
+        *,
+        request_id: str,
+        session_id: str | None,
+        total_frames: int | None,
+        fps_hint: float | None,
+        title_template: str | None,
+    ) -> None:
+        """Create/update session metadata when animation streaming starts."""
+        session = self._animation_session_controller.get_session(request_id)
+        if session is None:
+            session = self._animation_session_controller.create_session(request_id=request_id, session_id=session_id)
+        else:
+            session.session_id = session_id
+
+        parsed_total = int(total_frames) if isinstance(total_frames, int) else None
+        try:
+            parsed_fps = float(fps_hint) if fps_hint is not None else None
+        except (TypeError, ValueError):
+            parsed_fps = None
+
+        session.mark_started(parsed_total, parsed_fps, title_template)
+        self._active_animation_request_id = request_id
+        self._animation_is_playing = False
+        self._set_plot_loading(True, "Buffering animation frames...")
+        self._show_status_message("Synthetic preview mode active: buffering animation frames...")
+
+    def _handle_animation_frame(
+        self,
+        *,
+        request_id: str,
+        session_id: str | None,
+        frame_index: int,
+        png_bytes: bytes,
+    ) -> None:
+        """Buffer and show incoming animation frames."""
+        if not isinstance(png_bytes, (bytes, bytearray)):
+            return
+
+        session = self._animation_session_controller.get_session(request_id)
+        if session is None:
+            session = self._animation_session_controller.create_session(request_id=request_id, session_id=session_id)
+
+        session.add_frame(bytes(png_bytes))
+        if self._active_animation_request_id == request_id:
+            self.set_plot_image(bytes(png_bytes))
+            export_button = getattr(self, "anim_export_button", None)
+            if export_button is not None and getattr(self, "selected_plot_action", "plot") == "animation":
+                export_button.setEnabled(True)
+
+    def _handle_animation_end(
+        self,
+        *,
+        request_id: str,
+        session_id: str | None,
+        frames_emitted: int,
+    ) -> None:
+        """Finalize animation buffering and enable playback controls."""
+        _ = session_id
+        session = self._animation_session_controller.get_session(request_id)
+        if session is None:
+            return
+
+        session.mark_completed()
+        self._plot_request_in_flight = False
+        self._plot_request_expects_image = False
+        self._set_plot_loading(False)
+
+        if self._active_animation_request_id != request_id:
+            return
+
+        play_button = getattr(self, "anim_play_pause_button", None)
+        stop_button = getattr(self, "anim_stop_button", None)
+        export_button = getattr(self, "anim_export_button", None)
+        is_animation_mode = getattr(self, "selected_plot_action", "plot") == "animation"
+
+        if play_button is not None:
+            play_button.setText("Play")
+            play_button.setEnabled(is_animation_mode and session.frame_count() > 0)
+        if stop_button is not None:
+            stop_button.setEnabled(False)
+        if export_button is not None:
+            export_button.setEnabled(is_animation_mode and session.frame_count() > 0)
+
+        fps_text = f"{session.fps_hint:.1f}" if session.fps_hint else "default"
+        self._show_status_message(
+            f"Animation buffered: {frames_emitted} frame(s) ready (target {fps_text} fps)."
+        )
+
+    def _handle_animation_error(
+        self,
+        *,
+        request_id: str,
+        session_id: str | None,
+        frame_index: int | None,
+        error_message: str,
+    ) -> None:
+        """Mark animation session as failed and reset playback controls."""
+        _ = (session_id, frame_index)
+        session = self._animation_session_controller.get_session(request_id)
+        if session is not None:
+            session.mark_failed(error_message)
+
+        self._plot_request_in_flight = False
+        self._plot_request_expects_image = False
+        self._set_plot_loading(False)
+        self._reset_animation_preview_state()
+        self._show_status_message(f"Animation error: {error_message}", is_error=True)
+
+    def _advance_animation_playback(self) -> None:
+        """Timer callback: show next buffered frame during playback."""
+        session = self._current_animation_session()
+        if session is None:
+            self._animation_playback_timer.stop()
+            return
+
+        if session.playback_state != AnimationPlaybackState.PLAYING:
+            self._animation_playback_timer.stop()
+            return
+
+        frame = session.next_frame()
+        if frame is None:
+            options = self._current_animation_options()
+            loop_enabled = bool(options.get("loop_playback", True))
+            if loop_enabled and session.frame_count() > 0:
+                session.reset_playback()
+                frame = session.next_frame()
+
+            if frame is None:
+                self._animation_playback_timer.stop()
+                self._animation_is_playing = False
+                session.playback_state = AnimationPlaybackState.COMPLETED
+                play_button = getattr(self, "anim_play_pause_button", None)
+                stop_button = getattr(self, "anim_stop_button", None)
+                if play_button is not None:
+                    play_button.setText("Play")
+                if stop_button is not None:
+                    stop_button.setEnabled(False)
+                self._show_status_message("Animation playback completed.")
+                return
+
+        self.set_plot_image(frame)
+
+    def _on_animation_play_pause(self) -> None:
+        """Play, pause, or resume buffered animation frames."""
+        session = self._current_animation_session()
+        if session is None or session.frame_count() == 0:
+            self._show_status_message("No buffered animation frames are available yet.")
+            return
+
+        play_button = getattr(self, "anim_play_pause_button", None)
+        stop_button = getattr(self, "anim_stop_button", None)
+
+        if session.playback_state == AnimationPlaybackState.PLAYING:
+            session.pause_playback()
+            self._animation_playback_timer.stop()
+            self._animation_is_playing = False
+            if play_button is not None:
+                play_button.setText("Resume")
+            if stop_button is not None:
+                stop_button.setEnabled(True)
+            return
+
+        if session.playback_state in {
+            AnimationPlaybackState.BUFFERED,
+            AnimationPlaybackState.COMPLETED,
+            AnimationPlaybackState.STOPPED,
+            AnimationPlaybackState.STREAMING,
+            AnimationPlaybackState.IDLE,
+        }:
+            session.reset_playback()
+            session.playback_state = AnimationPlaybackState.PLAYING
+        elif session.playback_state == AnimationPlaybackState.PAUSED:
+            session.resume_playback()
+        else:
+            session.playback_state = AnimationPlaybackState.PLAYING
+
+        interval_ms = 120
+        if session.fps_hint and session.fps_hint > 0:
+            interval_ms = max(20, int(round(1000.0 / session.fps_hint)))
+        self._animation_playback_timer.setInterval(interval_ms)
+        self._animation_playback_timer.start()
+        self._animation_is_playing = True
+
+        options = self._current_animation_options()
+        loop_enabled = bool(options.get("loop_playback", True))
+        applied_fps = 1000.0 / interval_ms if interval_ms > 0 else 0.0
+
+        if play_button is not None:
+            play_button.setText("Pause")
+        if stop_button is not None:
+            stop_button.setEnabled(True)
+
+        self._show_status_message(
+            f"Animation playback started at {applied_fps:.1f} fps (loop {'on' if loop_enabled else 'off'})."
+        )
+
+    def _on_animation_stop(self) -> None:
+        """Stop playback and return to the first buffered frame."""
+        session = self._current_animation_session()
+        if session is None:
+            self._show_status_message("No active animation playback to stop.")
+            return
+
+        self._animation_playback_timer.stop()
+        self._animation_is_playing = False
+        session.playback_state = AnimationPlaybackState.STOPPED
+        session.reset_playback()
+
+        first_frame = session.get_frame(0)
+        if first_frame is not None:
+            self.set_plot_image(first_frame)
+
+        play_button = getattr(self, "anim_play_pause_button", None)
+        stop_button = getattr(self, "anim_stop_button", None)
+        if play_button is not None:
+            play_button.setText("Play")
+        if stop_button is not None:
+            stop_button.setEnabled(False)
+
+        self._show_status_message("Animation playback stopped.")
 
     def handle_worker_output(self) -> None:
         """Process worker stdout messages and route updates to UI."""

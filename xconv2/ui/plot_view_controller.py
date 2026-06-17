@@ -412,16 +412,34 @@ class PlotViewController:
         """Toggle export controls and plot canvas messaging for animation action."""
         selected_action = getattr(self.host, "selected_plot_action", "plot")
         is_animation = selected_action == "animation"
+        previous_action = getattr(self.host, "_previous_plot_action", None)
 
         export_stack = getattr(self.host, "export_controls_stack", None)
         if export_stack is not None:
             export_stack.setCurrentIndex(1 if is_animation else 0)
 
-        if is_animation:
+        play_pause_button = getattr(self.host, "anim_play_pause_button", None)
+        stop_button = getattr(self.host, "anim_stop_button", None)
+        export_button = getattr(self.host, "anim_export_button", None)
+
+        if play_pause_button is not None:
+            play_pause_button.setEnabled(is_animation)
+            if not is_animation:
+                play_pause_button.setText("Play")
+        if stop_button is not None:
+            stop_button.setEnabled(False)
+        if export_button is not None:
+            export_button.setEnabled(is_animation)
+
+        # Only clear the canvas when entering animation mode; otherwise frame
+        # updates would be wiped each time controls are refreshed.
+        if is_animation and previous_action != "animation":
             self.clear_plot_canvas("Animation mode selected. Configure options and press GO.")
-        elif getattr(self.host, "_plot_pixmap_original", None) is None:
+        elif not is_animation and getattr(self.host, "_plot_pixmap_original", None) is None:
             self.host.plot_frame.setPixmap(QPixmap())
             self.host.plot_frame.setText("Waiting for data...")
+
+        self.host._previous_plot_action = selected_action
 
     def set_plot_loading(self, is_loading: bool, message: str = "Rendering plot...") -> None:
         """Show or hide an inline loading overlay while worker plot tasks run."""
@@ -482,7 +500,12 @@ class PlotViewController:
             return
 
         self.host._plot_pixmap_original = pixmap
-        self.set_plot_action_options(has_existing_plot=True)
+        varying_dims = getattr(self.host, "last_varying_dims", None)
+        self.set_plot_action_options(
+            has_existing_plot=True,
+            supports_animation=varying_dims == 3,
+            varying_dims=varying_dims,
+        )
         self.set_plot_loading(False)
         self.refresh_plot_pixmap()
         QTimer.singleShot(0, self.fit_window_to_plot_aspect)

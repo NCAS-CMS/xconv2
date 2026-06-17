@@ -549,6 +549,7 @@ class CFVCore(QMainWindow):
         self._selection_info_expanded_from_width: int | None = None
         self._log_viewer_dialog: LogViewerDialog | None = None
         self._cache_manager_dialog: CacheManagerDialog | None = None
+        self._animation_is_playing: bool = False
 
         self.setup_ui()
         self._setup_tray_icon()
@@ -2329,6 +2330,64 @@ class CFVCore(QMainWindow):
             save_plot_path,
             save_data_path,
         )
+
+    def _on_animation_play_pause(self) -> None:
+        """Toggle animation playback state for the active panel session."""
+        self._animation_is_playing = not self._animation_is_playing
+        play_pause_button = getattr(self, "anim_play_pause_button", None)
+        stop_button = getattr(self, "anim_stop_button", None)
+
+        if play_pause_button is not None:
+            play_pause_button.setText("Pause" if self._animation_is_playing else "Play")
+        if stop_button is not None:
+            stop_button.setEnabled(self._animation_is_playing)
+
+        if self._animation_is_playing:
+            self._show_status_message("Animation playback started.")
+        else:
+            self._show_status_message("Animation playback paused.")
+
+    def _on_animation_stop(self) -> None:
+        """Stop animation playback and reset panel controls."""
+        self._animation_is_playing = False
+        play_pause_button = getattr(self, "anim_play_pause_button", None)
+        stop_button = getattr(self, "anim_stop_button", None)
+
+        if play_pause_button is not None:
+            play_pause_button.setText("Play")
+        if stop_button is not None:
+            stop_button.setEnabled(False)
+
+        self._show_status_message("Animation playback stopped.")
+
+    def _on_animation_export(self) -> None:
+        """Save the currently visible animation frame from the plot panel."""
+        plot_frame = getattr(self, "plot_frame", None)
+        pixmap = plot_frame.pixmap() if plot_frame is not None else None
+        if pixmap is None or pixmap.isNull():
+            self._show_status_message("No animation frame available to export.", is_error=True)
+            return
+
+        default_stem = self._default_plot_filename()
+        default_path = self._default_save_path("last_save_plot_dir", f"{default_stem}_frame.png")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Animation Frame",
+            default_path,
+            "PNG files (*.png);;All files (*)",
+        )
+        if not file_path:
+            return
+
+        if not Path(file_path).suffix:
+            file_path += ".png"
+
+        if pixmap.save(file_path, "PNG"):
+            self._remember_last_save_dir("last_save_plot_dir", file_path)
+            self._show_status_message(f"Saved animation frame to {file_path}")
+            return
+
+        self._show_status_message("Failed to save animation frame.", is_error=True)
 
     def _quit_application(self) -> None:
         """Quit the whole application, even when modal dialogs are open."""

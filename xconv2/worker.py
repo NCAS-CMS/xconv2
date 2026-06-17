@@ -141,6 +141,7 @@ def _ensure_worker_runtime_loaded() -> None:
         logger.exception("Failed to set cfplot viewer=None in worker")
 
     INTERFACE_EXPORTS = tuple(getattr(cf_interface, "__all__", ()))
+
     worker_globals.update({"cfp": cfp, "plt": plt, "np": np})
     worker_globals.update({name: getattr(cf_interface, name) for name in INTERFACE_EXPORTS})
     _WORKER_RUNTIME_LOADED = True
@@ -911,6 +912,10 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
         _handle_save_provenance_task(payload)
         return
 
+    if task_kind == "ANIM_SYNTHETIC":
+        _handle_synthetic_animation_task(payload)
+        return
+
     raise ValueError(f"Unknown worker control task kind: {task_kind}")
 
 
@@ -1167,6 +1172,82 @@ def _emit_animation_error(
         "failed_at": time.time(),
     }
     send_to_gui("ANIM_ERROR", payload)
+
+
+def _handle_synthetic_animation_task(payload: dict[str, Any]) -> None:
+    """Emit synthetic animation frames for GUI playback integration tests."""
+    _ensure_worker_runtime_loaded()
+
+    request_id = str(payload.get("request_id") or f"anim-{int(time.time() * 1000)}")
+    session_id = str(payload.get("session_id") or request_id)
+
+    try:
+        fps_hint = float(payload.get("fps_hint", 8.0) or 8.0)
+    except (TypeError, ValueError):
+        fps_hint = 8.0
+    fps_hint = max(1.0, min(30.0, fps_hint))
+
+    frame_count_raw = payload.get("frame_count", 18)
+    try:
+        frame_count = int(frame_count_raw)
+    except (TypeError, ValueError):
+        frame_count = 18
+    frame_count = max(2, min(240, frame_count))
+
+    title_template = str(payload.get("title_template") or "Synthetic Animation Preview")
+
+    fig = None
+    try:
+        _emit_animation_start(
+            request_id=request_id,
+            session_id=session_id,
+            total_frames=frame_count,
+            fps_hint=fps_hint,
+            title_template=title_template,
+        )
+
+        fig = plt.figure(figsize=(6.8, 4.2))
+        ax = fig.add_subplot(111)
+        x = np.linspace(0.0, 2.0 * np.pi, 240)
+
+        for frame_index in range(frame_count):
+            phase = (2.0 * np.pi * frame_index) / frame_count
+            y = np.sin(x + phase)
+
+            ax.clear()
+            ax.plot(x, y, color="#1f77b4", linewidth=2.0)
+            ax.set_ylim(-1.2, 1.2)
+            ax.set_xlim(0.0, float(2.0 * np.pi))
+            ax.grid(True, alpha=0.25)
+            ax.set_xlabel("x")
+            ax.set_ylabel("sin(x + phase)")
+            ax.set_title(f"{title_template} - Frame {frame_index + 1}/{frame_count}")
+            fig.tight_layout()
+
+            _emit_animation_frame(
+                request_id=request_id,
+                session_id=session_id,
+                frame_index=frame_index,
+                total_frames=frame_count,
+                frame_value_label=f"{frame_index + 1}/{frame_count}",
+            )
+
+        _emit_animation_end(
+            request_id=request_id,
+            session_id=session_id,
+            frames_emitted=frame_count,
+        )
+    except Exception as exc:
+        _emit_animation_error(
+            request_id=request_id,
+            session_id=session_id,
+            frame_index=None,
+            error_message=str(exc),
+        )
+        raise
+    finally:
+        if fig is not None:
+            plt.close(fig)
 
 
 def main():
