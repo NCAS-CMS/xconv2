@@ -39,14 +39,24 @@ class _DummyLabel:
 
 class _DummyComboController:
     def __init__(self) -> None:
-        self.calls: list[tuple[list[str], str | None]] = []
-        self.action_calls: list[bool] = []
+        self.calls: list[tuple[list[str], str | None, int | None]] = []
+        self.action_calls: list[tuple[bool, bool, int | None]] = []
 
-    def set_plot_type_options(self, options: list[str], selected: str | None) -> None:
-        self.calls.append((options, selected))
+    def set_plot_type_options(
+        self,
+        options: list[str],
+        selected: str | None,
+        varying_dims: int | None = None,
+    ) -> None:
+        self.calls.append((options, selected, varying_dims))
 
-    def set_plot_action_options(self, has_existing_plot: bool) -> None:
-        self.action_calls.append(has_existing_plot)
+    def set_plot_action_options(
+        self,
+        has_existing_plot: bool,
+        supports_animation: bool = False,
+        varying_dims: int | None = None,
+    ) -> None:
+        self.action_calls.append((has_existing_plot, supports_animation, varying_dims))
 
 
 class _DummySlider:
@@ -82,4 +92,4 @@ def test_refresh_plot_summary_enables_options_for_lineplot() -> None:
 
     assert host.selected_plot_kind == "lineplot"
     assert host.options_button.enabled is True
-    assert host.plot_view_controller.action_calls == [False]
+    assert host.plot_view_controller.action_calls == [(False, False, 1)]

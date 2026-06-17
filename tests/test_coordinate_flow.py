@@ -1099,3 +1099,294 @@ def test_handle_worker_output_task_complete_includes_elapsed(monkeypatch) -> Non
 
     assert dummy.shown_statuses == [("Task Complete (2.50s)", False)]
     assert list(dummy._pending_worker_task_starts) == []
+
+
+def test_refresh_plot_summary_3d_requests_animation_action_mode() -> None:
+    class _Slider:
+        def value(self) -> tuple[int, int]:
+            return (0, 3)
+
+    class _Label:
+        def __init__(self) -> None:
+            self.text = ""
+
+        def setText(self, text: str) -> None:
+            self.text = text
+
+    class _WidgetToggle:
+        def __init__(self) -> None:
+            self.visible = False
+            self.enabled = False
+
+        def show(self) -> None:
+            self.visible = True
+
+        def hide(self) -> None:
+            self.visible = False
+
+        def setEnabled(self, enabled: bool) -> None:
+            self.enabled = enabled
+
+    class _Recorder:
+        def __init__(self, host) -> None:
+            self.host = host
+            self.plot_type_calls: list[tuple[list[str], str | None, int | None]] = []
+            self.plot_action_calls: list[tuple[bool, bool, int | None]] = []
+
+        def set_plot_type_options(self, options: list[str], selected: str | None, varying_dims: int | None = None) -> None:
+            self.plot_type_calls.append((list(options), selected, varying_dims))
+
+        def set_plot_action_options(
+            self,
+            has_existing_plot: bool,
+            supports_animation: bool = False,
+            varying_dims: int | None = None,
+        ) -> None:
+            self.plot_action_calls.append((has_existing_plot, supports_animation, varying_dims))
+            if varying_dims == 3:
+                self.host.selected_plot_action = "animation"
+
+    host = types.SimpleNamespace(
+        controls={
+            "time": {"range_slider": _Slider()},
+            "level": {"range_slider": _Slider()},
+            "member": {"range_slider": _Slider()},
+        },
+        selected_collapse_methods={},
+        plot_summary_label=_Label(),
+        plot_info_button=_WidgetToggle(),
+        plot_button=_WidgetToggle(),
+        options_button=_WidgetToggle(),
+        save_target_combo=_WidgetToggle(),
+        save_go_button=_WidgetToggle(),
+        save_code_button=None,
+        save_plot_button=None,
+        available_plot_kinds=[],
+        selected_plot_kind=None,
+        selected_plot_action="plot",
+        last_varying_dims=2,
+        _plot_pixmap_original=None,
+    )
+    recorder = _Recorder(host)
+    host.plot_view_controller = recorder
+
+    controller = SelectionController(host)
+    controller.refresh_plot_summary()
+
+    assert host.selected_plot_action == "animation"
+    assert recorder.plot_type_calls[-1] == (["contour"], "contour", 3)
+    assert recorder.plot_action_calls[-1] == (False, True, 3)
+    assert "Selection Dimensions: 3D" in host.plot_summary_label.text
+    assert "Change dimensionality for other options" in host.plot_summary_label.text
+
+
+def test_refresh_plot_summary_2d_disables_animation_support_flag() -> None:
+    class _Slider:
+        def __init__(self, bounds: tuple[int, int]) -> None:
+            self._bounds = bounds
+
+        def value(self) -> tuple[int, int]:
+            return self._bounds
+
+    class _Label:
+        def __init__(self) -> None:
+            self.text = ""
+
+        def setText(self, text: str) -> None:
+            self.text = text
+
+    class _WidgetToggle:
+        def __init__(self) -> None:
+            self.enabled = False
+
+        def show(self) -> None:
+            return
+
+        def hide(self) -> None:
+            return
+
+        def setEnabled(self, enabled: bool) -> None:
+            self.enabled = enabled
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.plot_action_calls: list[tuple[bool, bool, int | None]] = []
+
+        def set_plot_type_options(self, options: list[str], selected: str | None, varying_dims: int | None = None) -> None:
+            _ = (options, selected, varying_dims)
+
+        def set_plot_action_options(
+            self,
+            has_existing_plot: bool,
+            supports_animation: bool = False,
+            varying_dims: int | None = None,
+        ) -> None:
+            self.plot_action_calls.append((has_existing_plot, supports_animation, varying_dims))
+
+    host = types.SimpleNamespace(
+        controls={
+            "time": {"range_slider": _Slider((0, 3))},
+            "lat": {"range_slider": _Slider((0, 2))},
+            "lon": {"range_slider": _Slider((1, 1))},
+        },
+        selected_collapse_methods={},
+        plot_summary_label=_Label(),
+        plot_info_button=_WidgetToggle(),
+        plot_button=_WidgetToggle(),
+        options_button=_WidgetToggle(),
+        save_target_combo=_WidgetToggle(),
+        save_go_button=_WidgetToggle(),
+        save_code_button=None,
+        save_plot_button=None,
+        available_plot_kinds=[],
+        selected_plot_kind=None,
+        selected_plot_action="plot",
+        last_varying_dims=None,
+        _plot_pixmap_original=None,
+        plot_view_controller=_Recorder(),
+    )
+
+    controller = SelectionController(host)
+    controller.refresh_plot_summary()
+
+    assert host.plot_view_controller.plot_action_calls[-1] == (False, False, 2)
+
+
+def test_plot_ops_animation_go_routes_to_synthetic_preview() -> None:
+    class _DummyListWidget:
+        def item(self, _index: int):
+            return None
+
+    class _DummyWorker:
+        def processId(self) -> int:
+            return 999
+
+    class _DummyHost:
+        def __init__(self) -> None:
+            self.field_list_widget = _DummyListWidget()
+            self.worker = _DummyWorker()
+            self.plot_options_by_kind = {"contour": {}}
+            self.selected_plot_action = "animation"
+            self._plot_request_in_flight = False
+            self._plot_request_expects_image = False
+            self._suppress_stale_error_status = False
+            self.synthetic_preview_calls: list[dict[str, object]] = []
+            self.sent_tasks: list[tuple[str, str | None, bool]] = []
+            self.status_messages: list[tuple[str, bool]] = []
+
+        def _build_plot_context(self):
+            return ({"time": (0, 10), "lat": (-10, 10), "lon": (0, 20)}, {}, "contour")
+
+        def _selected_field_index_for_operation(self, _operation: str) -> int | None:
+            return 2
+
+        def _field_identity_from_item(self, _item) -> str:
+            return "field-2"
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.status_messages.append((message, is_error))
+
+        def _show_vector_options_dialog(self, _field_index: int) -> None:
+            raise AssertionError("Vector options should not be requested")
+
+        def _set_plot_loading(self, _is_loading: bool, message: str = "") -> None:
+            _ = message
+
+        def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
+            self.sent_tasks.append((code, save_code_path, emit_image))
+
+        def _send_synthetic_animation_preview(self, *, field_index: int, selections, collapse_by_coord) -> None:
+            self.synthetic_preview_calls.append(
+                {
+                    "field_index": field_index,
+                    "selections": dict(selections),
+                    "collapse_by_coord": dict(collapse_by_coord),
+                }
+            )
+
+    host = _DummyHost()
+
+    from xconv2.main_window_components import plot_ops
+
+    plot_ops.request_plot_task(
+        host,
+        save_code_path=None,
+        save_plot_path=None,
+        save_data_path=None,
+        emit_image_override=None,
+        save_data_from_selection_fn=lambda *_: "SAVE_DATA",
+        plot_from_selection_fn=lambda *_args, **_kwargs: "PLOT_CODE",
+        build_vector_overplot_command_fn=lambda **_kwargs: "VECTOR_OVERPLOT",
+    )
+
+    assert len(host.synthetic_preview_calls) == 1
+    assert host.synthetic_preview_calls[0]["field_index"] == 2
+    assert host.sent_tasks == []
+    assert host.status_messages[0][0].startswith("Animation: using synthetic preview mode")
+
+
+def test_animation_playback_respects_loop_and_fps_interval() -> None:
+    class _FakeTimer:
+        def __init__(self) -> None:
+            self._active = False
+            self.interval_ms = 0
+
+        def setInterval(self, interval_ms: int) -> None:
+            self.interval_ms = interval_ms
+
+        def start(self) -> None:
+            self._active = True
+
+        def stop(self) -> None:
+            self._active = False
+
+        def isActive(self) -> bool:
+            return self._active
+
+    class _FakeButton:
+        def __init__(self) -> None:
+            self.text = ""
+            self.enabled = False
+
+        def setText(self, text: str) -> None:
+            self.text = text
+
+        def setEnabled(self, enabled: bool) -> None:
+            self.enabled = enabled
+
+    host = types.SimpleNamespace(
+        _animation_session_controller=__import__("xconv2.animation_session", fromlist=["AnimationSessionController"]).AnimationSessionController(),
+        _active_animation_request_id="req-1",
+        _animation_playback_timer=_FakeTimer(),
+        _animation_is_playing=False,
+        selected_plot_action="animation",
+        anim_play_pause_button=_FakeButton(),
+        anim_stop_button=_FakeButton(),
+        anim_export_button=_FakeButton(),
+        plot_options_by_kind={"animation": {"loop_playback": True}},
+    )
+    displayed_frames: list[bytes] = []
+    statuses: list[str] = []
+    host.set_plot_image = lambda frame: displayed_frames.append(frame)
+    host._show_status_message = lambda message, is_error=False: statuses.append(message)
+    host._set_plot_loading = lambda *_args, **_kwargs: None
+    host._current_animation_session = lambda: CFVMain._current_animation_session(host)
+    host._current_animation_options = lambda: CFVMain._current_animation_options(host)
+
+    session = host._animation_session_controller.create_session("req-1", "sess-1")
+    session.mark_started(total_frames=2, fps_hint=8.0, title_template="demo")
+    session.add_frame(b"frame-0")
+    session.add_frame(b"frame-1")
+    session.mark_completed()
+
+    CFVMain._on_animation_play_pause(host)
+    assert host._animation_playback_timer.isActive() is True
+    assert host._animation_playback_timer.interval_ms == 125
+    assert "8.0 fps" in statuses[-1]
+
+    CFVMain._advance_animation_playback(host)
+    CFVMain._advance_animation_playback(host)
+    CFVMain._advance_animation_playback(host)
+
+    assert displayed_frames == [b"frame-0", b"frame-1", b"frame-0"]
+    assert host._animation_playback_timer.isActive() is True
