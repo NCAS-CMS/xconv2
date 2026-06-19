@@ -291,8 +291,9 @@ def _coordinates_compatible_for_difference(fld_a: cf.Field, fld_b: cf.Field) -> 
     t_names_a, t_lengths_a = _time_coord_names_and_lengths(fld_a)
     t_names_b, t_lengths_b = _time_coord_names_and_lengths(fld_b)
 
-    non_t_a = [entry for entry in coords_a if entry[0] not in t_names_a]
-    non_t_b = [entry for entry in coords_b if entry[0] not in t_names_b]
+    # Ignore the 'key' element (last position) of coordinate info
+    non_t_a = [entry for entry in coords_a[::-1] if entry[0] not in t_names_a]
+    non_t_b = [entry for entry in coords_b[::-1] if entry[0] not in t_names_b]
     if non_t_a != non_t_b:
         return False
 
@@ -307,13 +308,19 @@ def _difference_coordinate_mismatch_details(fld_a: cf.Field, fld_b: cf.Field) ->
     t_names_a, t_lengths_a = _time_coord_names_and_lengths(fld_a)
     t_names_b, t_lengths_b = _time_coord_names_and_lengths(fld_b)
 
-    # Keep T-axis relaxed: values may differ, but coordinate lengths must match.
+    # Keep T-axis relaxed: values may differ, but coordinate lengths
+    # must match.
     details: list[str] = []
     if not _time_lengths_compatible_for_difference(t_lengths_a, t_lengths_b):
         details.append(f"T coordinate element counts differ (A={t_lengths_a}, B={t_lengths_b})")
 
-    non_t_a = {name: (values, units) for name, values, units in coords_a if name not in t_names_a}
-    non_t_b = {name: (values, units) for name, values, units in coords_b if name not in t_names_b}
+    # Ignore the 'key' element (last position) of coordinate info
+    non_t_a = {name: (values, units)
+               for name, values, units in coords_a[::-1]
+               if name not in t_names_a}
+    non_t_b = {name: (values, units)
+               for name, values, units in coords_b[::-1]
+               if name not in t_names_b}
 
     names_a = set(non_t_a)
     names_b = set(non_t_b)

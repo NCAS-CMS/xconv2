@@ -1700,9 +1700,16 @@ class CFVMain(CFVCore):
             if len(entry) >= 3 and entry[2] is not None:
                 units = str(entry[2])
 
+            # The cf-python key of the coordinate construct
+            # (originally gleaned in by `coordinate_info`)
+            key = ""
+            if len(entry) >= 4:
+                key = str(entry[3])
+
             metadata[unique_name] = {
                 "values": normalized_values,
                 "units": units,
+                "key": key,
             }
 
         return metadata

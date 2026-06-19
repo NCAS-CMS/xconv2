@@ -111,12 +111,13 @@ def coordinate_info(field: cf.Field) -> list[tuple[str, list[str], str]]:
 
         """
         for axis in field.domain_axes():
-            c = field.dimension_coordinate(
-                filter_by_axis=(axis,), default=None
+            key, c = field.dimension_coordinate(
+                filter_by_axis=(axis,), item=True, default=(None, None)
             )
             if c is None:
-                c = field.auxiliary_coordinate(
-                    filter_by_axis=(axis,), axis_mode="exact", default=None
+                key, c = field.auxiliary_coordinate(
+                    filter_by_axis=(axis,), axis_mode="exact",
+                    item=True, default=(None, None)
                 )
                 if c is None:
                     continue
@@ -133,18 +134,20 @@ def coordinate_info(field: cf.Field) -> list[tuple[str, list[str], str]]:
             if c.size <= 1:
                 continue
             
-            yield axis, c, c.array
+            yield axis, c, c.array, key
 
     def _append_coordinate_values(
             construct: object,
             values: list,
             axes: tuple[str]
+            key: str,
     ) -> None:
         """Append an entry to the 'coords' dictionary.
         
         construct: Dimension or auxiliary coordinate construct
         values: the values for the slider
         axes: `tuple` of the domain axis identifiers for the construct
+        key: The construct key (e.g. ``'dimensioncoordinate1'``)
         """
         name = str(construct.identity(default="unknown"))        
         units = str(getattr(construct, "Units", ""))
@@ -153,7 +156,7 @@ def coordinate_info(field: cf.Field) -> list[tuple[str, list[str], str]]:
         # UI formatting should round for display only.
         vals = [str(x) for x in values]
         
-        coords.setdefault(axes, []).append((name, vals, units))
+        coords.setdefault(axes, []).append((name, vals, units, key))
 
     def convert_coords_to_a_list(coords):
         """Convert the 'coords' dict to a list that can be used downstream."""
@@ -163,18 +166,20 @@ def coordinate_info(field: cf.Field) -> list[tuple[str, list[str], str]]:
             
         return coords_list
 
-    for axis, construct, arr in _iter_one_d_constructs(standard_name=True):
-        _append_coordinate_values(construct, arr, (axis,))    
+    for axis, construct, arr, key in _iter_one_d_constructs(
+            standard_name=True
+    ):
+        _append_coordinate_values(construct, arr, (axis,), key)    
         
     if set(coords) == data_axes_gt_1:
         # We have a 1-d coordinate with a standard_name for each size
         # > 1 axis        
         return  convert_coords_to_a_list(coords)
 
-    # Fallback for fields that expose only 2D coordinates (for example NEMO
-    # latitude/longitude auxiliary coordinates). Derive global bounds from each
-    # auxiliary coordinate and synthesize slider values from the resulting bbox
-    # limits.
+    # Fallback for fields that expose only 2D coordinates (for example
+    # NEMO latitude/longitude auxiliary coordinates). Derive global
+    # bounds from each auxiliary coordinate and synthesize slider
+    # values from the resulting bbox limits.
     two_d_coords = {}        
     for key, c in field.auxiliary_coordinates(
             filter_by_naxes=(2,), todict=True
@@ -205,14 +210,14 @@ def coordinate_info(field: cf.Field) -> list[tuple[str, list[str], str]]:
         count = max(marr.shape)
         vals = np.linspace(lo, hi, num=count)
 
-        two_d_coords.setdefault(tuple(sorted(axes)), []).append((c, vals))
+        two_d_coords.setdefault(tuple(sorted(axes)), []).append((c, vals, key))
         
-    for two_d_axes, construct_vals in two_d_coords.items():
-        if len(construct_vals) != 2:
+    for two_d_axes, construct_vals_key in two_d_coords.items():
+        if len(construct_vals_key) != 2:
             continue
 
-        for  construct, vals in construct_vals:
-            _append_coordinate_values( construct, vals, two_d_axes)
+        for construct, vals, key in construct_vals_key:
+            _append_coordinate_values(construct, vals, two_d_axes, key)
             # Remove existing 1-d coords entries for the 2-d axes
             for axis in two_d_axes:
                 coords.pop((axis,), None)
@@ -233,9 +238,11 @@ def coordinate_info(field: cf.Field) -> list[tuple[str, list[str], str]]:
     # Still here? Go back and look for 1-d coordinates without
     # standard names, but only for the ose axes that we haven't
     # already got 1-d or 2-d coordinates for.
-    for axis, construct, arr in _iter_one_d_constructs(standard_name=False):
-        if axis  not in existing_axes:
-            _append_coordinate_values(construct, arr, (axis,))    
+    for axis, construct, arr, key in _iter_one_d_constructs(
+            standard_name=False
+    ):
+        if axis not in existing_axes:
+            _append_coordinate_values(construct, arr, (axis,), key)    
             
     # Return a list
     return convert_coords_to_a_list(coords)
