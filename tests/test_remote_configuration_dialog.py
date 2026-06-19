@@ -3,7 +3,21 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+from PySide6.QtWidgets import QApplication, QMessageBox
+
 from xconv2.ui.dialogs import RemoteConfigurationDialog, RemoteOpenDialog
+
+
+def _ensure_qapp() -> QApplication:
+    app = QApplication.instance()
+    if app is not None:
+        return app
+
+    try:
+        return QApplication([])
+    except Exception as exc:  # pragma: no cover - environment specific
+        pytest.skip(f"Qt application setup unavailable: {exc}")
 
 
 def test_load_s3_locations_returns_alias_mapping(monkeypatch) -> None:
@@ -287,3 +301,101 @@ def test_apply_ssh_runtime_preferences_overrides_host_details() -> None:
     assert merged["alpha"]["hostname"] == "alpha.example.org"
     assert merged["alpha"]["remote_python"] == "conda run -n work26 python"
     assert merged["alpha"]["login_shell"] is True
+
+
+def test_edit_selected_https_prefills_add_new_fields() -> None:
+    _ensure_qapp()
+    dialog = RemoteConfigurationDialog(
+        None,
+        state={
+            "https_locations": {
+                "ceda": {
+                    "url": "https://data.example.org",
+                    "reductionist_url": "https://reductionist.example.org/ceda",
+                }
+            }
+        },
+    )
+
+    dialog.http_mode_combo.setCurrentText("Select from existing")
+    dialog.http_existing_combo.setCurrentText("ceda")
+    dialog._edit_selected_http_alias()
+
+    assert dialog.http_mode_combo.currentText() == "Add new"
+    assert dialog.http_alias_edit.text() == "ceda"
+    assert dialog.http_url_edit.text() == "https://data.example.org"
+    assert dialog.http_reductionist_url_edit.text() == "https://reductionist.example.org/ceda"
+
+
+def test_edit_selected_s3_prefills_add_new_fields(monkeypatch) -> None:
+    _ensure_qapp()
+
+    def _fake_get_locations():
+        return (
+            {
+                "ceda": {
+                    "url": "https://s3.example.org",
+                    "access_key": "AKIA",
+                    "secret_key": "SECRET",
+                    "api": "S3v4",
+                    "reductionist_url": "https://reductionist.example.org/s3",
+                }
+            },
+            {},
+        )
+
+    monkeypatch.setattr("xconv2.ui.dialogs.get_locations", _fake_get_locations)
+
+    dialog = RemoteConfigurationDialog(None)
+    dialog.s3_mode_combo.setCurrentText("Select from existing")
+    dialog.s3_existing_combo.setCurrentText("ceda")
+    dialog._edit_selected_s3_alias()
+
+    assert dialog.s3_mode_combo.currentText() == "Add new"
+    assert dialog.s3_alias_edit.text() == "ceda"
+    assert dialog.s3_url_edit.text() == "https://s3.example.org"
+    assert dialog.s3_access_key_edit.text() == "AKIA"
+    assert dialog.s3_secret_key_edit.text() == "SECRET"
+    assert dialog.s3_reductionist_url_edit.text() == "https://reductionist.example.org/s3"
+
+
+def test_edit_selected_ssh_prefills_add_new_fields(monkeypatch) -> None:
+    _ensure_qapp()
+
+    monkeypatch.setattr(
+        RemoteConfigurationDialog,
+        "_load_ssh_hosts",
+        classmethod(
+            lambda cls: {
+                "alpha": {
+                    "hostname": "alpha.example.org",
+                    "user": "alice",
+                    "identityfile": "~/.ssh/id_alpha",
+                    "proxyjump": "bastion.example.org",
+                }
+            }
+        ),
+    )
+
+    dialog = RemoteConfigurationDialog(None)
+    dialog.ssh_mode_combo.setCurrentText("Select from existing")
+    dialog.ssh_existing_combo.setCurrentText("alpha")
+    dialog._edit_selected_ssh_alias()
+
+    assert dialog.ssh_mode_combo.currentText() == "Add new"
+    assert dialog.ssh_alias_edit.text() == "alpha"
+    assert dialog.ssh_hostname_edit.text() == "alpha.example.org"
+    assert dialog.ssh_user_edit.text() == "alice"
+    assert dialog.ssh_identity_file_edit.text() == "~/.ssh/id_alpha"
+    assert dialog.ssh_proxy_jump_edit.text() == "bastion.example.org"
+
+
+def test_delete_selected_https_removes_alias_after_confirmation(monkeypatch) -> None:
+    _ensure_qapp()
+    dialog = RemoteConfigurationDialog(None, state={"https_locations": {"ceda": {"url": "https://data.example.org"}}})
+    dialog.http_existing_combo.setCurrentText("ceda")
+    monkeypatch.setattr("xconv2.ui.dialogs.QMessageBox.question", lambda *args, **kwargs: QMessageBox.Yes)
+
+    dialog._delete_selected_http_alias()
+
+    assert "ceda" not in dialog._http_locations

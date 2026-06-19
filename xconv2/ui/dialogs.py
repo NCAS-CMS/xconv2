@@ -1166,6 +1166,15 @@ class RemoteConfigurationDialog(QDialog):
         existing_layout.addRow("URL:", self.s3_existing_url)
         existing_layout.addRow("API:", self.s3_existing_api)
         existing_layout.addRow("(Optional) Reductionist URL:", self.s3_existing_reductionist_url)
+        s3_existing_actions = QHBoxLayout()
+        self.s3_edit_existing_button = QPushButton("Edit selected")
+        self.s3_delete_existing_button = QPushButton("Delete selected")
+        self.s3_edit_existing_button.clicked.connect(self._edit_selected_s3_alias)
+        self.s3_delete_existing_button.clicked.connect(self._delete_selected_s3_alias)
+        s3_existing_actions.addWidget(self.s3_edit_existing_button)
+        s3_existing_actions.addWidget(self.s3_delete_existing_button)
+        s3_existing_actions.addStretch(1)
+        existing_layout.addRow("", s3_existing_actions)
         layout.addWidget(self.s3_existing_group)
 
         self.s3_config_group = QGroupBox("Use config file")
@@ -1273,6 +1282,15 @@ class RemoteConfigurationDialog(QDialog):
         existing_layout.addRow("Host alias:", self.http_existing_combo)
         existing_layout.addRow("URL:", self.http_existing_url)
         existing_layout.addRow("(Optional) Reductionist URL:", self.http_existing_reductionist_url)
+        http_existing_actions = QHBoxLayout()
+        self.http_edit_existing_button = QPushButton("Edit selected")
+        self.http_delete_existing_button = QPushButton("Delete selected")
+        self.http_edit_existing_button.clicked.connect(self._edit_selected_http_alias)
+        self.http_delete_existing_button.clicked.connect(self._delete_selected_http_alias)
+        http_existing_actions.addWidget(self.http_edit_existing_button)
+        http_existing_actions.addWidget(self.http_delete_existing_button)
+        http_existing_actions.addStretch(1)
+        existing_layout.addRow("", http_existing_actions)
         layout.addWidget(self.http_existing_group)
 
         self.http_new_group = QGroupBox("Add new")
@@ -1321,6 +1339,40 @@ class RemoteConfigurationDialog(QDialog):
         self._update_http_selected_details()
         self._update_http_mode()
 
+    def _edit_selected_http_alias(self) -> None:
+        """Copy selected HTTPS alias details into Add new form for in-place editing."""
+        alias = self.http_existing_combo.currentText().strip()
+        details = self._http_locations.get(alias, {}) if alias else {}
+        if not alias or not isinstance(details, dict):
+            return
+
+        if self.http_mode_combo.currentText() != "Add new":
+            self.http_mode_combo.setCurrentText("Add new")
+        self.http_alias_edit.setText(alias)
+        self.http_url_edit.setText(str(details.get("url", "") or ""))
+        self.http_reductionist_url_edit.setText(str(details.get("reductionist_url", "") or ""))
+
+    def _delete_selected_http_alias(self) -> None:
+        """Delete selected HTTPS alias from dialog state and refresh controls."""
+        alias = self.http_existing_combo.currentText().strip()
+        if not alias or alias not in self._http_locations:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Delete HTTPS short name",
+            f"Delete HTTPS short name '{alias}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self._http_locations.pop(alias, None)
+        aliases = list(self._http_locations.keys())
+        self._set_combo_items(self.http_existing_combo, aliases, "No HTTPS configurations found")
+        self._update_http_selected_details()
+
     def _build_ssh_tab(self) -> QWidget:
         """Build SSH configuration controls."""
         tab = QWidget()
@@ -1356,6 +1408,15 @@ class RemoteConfigurationDialog(QDialog):
         existing_layout.addRow("User:", self.ssh_existing_user)
         existing_layout.addRow("Identity File:", self.ssh_existing_identity)
         existing_layout.addRow("ProxyJump:", self.ssh_existing_proxyjump)
+        ssh_existing_actions = QHBoxLayout()
+        self.ssh_edit_existing_button = QPushButton("Edit selected")
+        self.ssh_delete_existing_button = QPushButton("Delete selected")
+        self.ssh_edit_existing_button.clicked.connect(self._edit_selected_ssh_alias)
+        self.ssh_delete_existing_button.clicked.connect(self._delete_selected_ssh_alias)
+        ssh_existing_actions.addWidget(self.ssh_edit_existing_button)
+        ssh_existing_actions.addWidget(self.ssh_delete_existing_button)
+        ssh_existing_actions.addStretch(1)
+        existing_layout.addRow("", ssh_existing_actions)
         layout.addWidget(self.ssh_existing_group)
 
         self.ssh_new_group = QGroupBox("Add new")
@@ -1613,6 +1674,44 @@ class RemoteConfigurationDialog(QDialog):
         self._update_s3_selected_details()
         self._update_s3_mode()
 
+    def _edit_selected_s3_alias(self) -> None:
+        """Copy selected S3 alias details into Add new form for in-place editing."""
+        alias = self.s3_existing_combo.currentText().strip()
+        details = self._s3_locations.get(alias, {}) if alias else {}
+        if not alias or not isinstance(details, dict):
+            return
+
+        if self.s3_mode_combo.currentText() != "Add new":
+            self.s3_mode_combo.setCurrentText("Add new")
+        self.s3_alias_edit.setText(alias)
+        self.s3_url_edit.setText(str(details.get("url", "") or ""))
+        self.s3_access_key_edit.setText(str(details.get("access_key", "") or ""))
+        self.s3_secret_key_edit.setText(str(details.get("secret_key", "") or ""))
+        self.s3_reductionist_url_edit.setText(str(details.get("reductionist_url", "") or ""))
+
+    def _delete_selected_s3_alias(self) -> None:
+        """Delete selected S3 alias from dialog state and refresh controls."""
+        alias = self.s3_existing_combo.currentText().strip()
+        if not alias or alias not in self._s3_locations:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Delete S3 short name",
+            f"Delete S3 short name '{alias}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self._s3_locations.pop(alias, None)
+        aliases = list(self._s3_locations.keys())
+        self._set_combo_items(self.s3_existing_combo, aliases, "No existing configurations")
+        self._set_combo_items(self.s3_config_combo, aliases, "No config file entries")
+        self._update_s3_selected_details()
+        self._update_s3_config_details()
+
     def _select_saved_ssh_alias(self, alias: str, details: dict[str, Any]) -> None:
         """Switch UI state to an existing SSH selection after saving a new alias."""
         self._ssh_hosts[alias] = details
@@ -1629,6 +1728,54 @@ class RemoteConfigurationDialog(QDialog):
         self.ssh_mode_combo.setCurrentText("Select from existing")
         self._update_ssh_selected_details()
         self._update_ssh_mode()
+
+    def _edit_selected_ssh_alias(self) -> None:
+        """Copy selected SSH alias details into Add new form for in-place editing."""
+        alias = self.ssh_existing_combo.currentText().strip()
+        details = self._ssh_hosts.get(alias, {}) if alias else {}
+        if not alias or not isinstance(details, dict):
+            return
+
+        if self.ssh_mode_combo.currentText() != "Add new":
+            self.ssh_mode_combo.setCurrentText("Add new")
+        self.ssh_alias_edit.setText(alias)
+        self.ssh_hostname_edit.setText(str(details.get("hostname", "") or ""))
+        self.ssh_user_edit.setText(str(details.get("user", "") or ""))
+        identity_path = details.get("identity_file") or details.get("identityfile")
+        self.ssh_identity_file_edit.setText(str(identity_path or ""))
+        self.ssh_proxy_jump_edit.setText(str(details.get("proxyjump", "") or ""))
+        options = details.get("remote_python_options")
+        if isinstance(options, dict):
+            option_map = {str(key): str(value) for key, value in options.items()}
+        elif isinstance(options, list):
+            option_map = {str(item): str(item) for item in options if str(item).strip()}
+        else:
+            option_map = {"python3": "python3"}
+        preferred = str(details.get("remote_python", "python3"))
+        self._set_ssh_remote_python_options(option_map, preferred_command=preferred)
+        self.ssh_login_shell_check.setChecked(self._coerce_bool(details.get("login_shell"), default=False))
+
+    def _delete_selected_ssh_alias(self) -> None:
+        """Delete selected SSH alias from dialog state and refresh controls."""
+        alias = self.ssh_existing_combo.currentText().strip()
+        if not alias or alias not in self._ssh_hosts:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Delete SSH short name",
+            f"Delete SSH short name '{alias}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self._ssh_hosts.pop(alias, None)
+        self._ssh_runtime_preferences.pop(alias, None)
+        aliases = list(self._ssh_hosts.keys())
+        self._set_combo_items(self.ssh_existing_combo, aliases, "No ssh hosts found")
+        self._update_ssh_selected_details()
 
     def _choose_ssh_identity_file(self) -> None:
         """Browse for an SSH identity file path."""
@@ -2112,7 +2259,7 @@ class RemoteOpenDialog(QDialog):
         layout.addWidget(self.protocol_tabs)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
-        self.configure_button = buttons.addButton("Config New Remote", QDialogButtonBox.ActionRole)
+        self.configure_button = buttons.addButton("Config Remote", QDialogButtonBox.ActionRole)
         self.open_button = buttons.addButton("Open", QDialogButtonBox.AcceptRole)
         buttons.rejected.connect(self.reject)
         self.configure_button.clicked.connect(self._configure_new_remote)
