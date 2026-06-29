@@ -48,6 +48,7 @@ __all__ = [
     "filter_type_entries",
     "format_size",
     "is_zarr_path",
+    "list_directory_entries",
     "normalize_remote_datasets_for_cf_read",
     "normalize_remote_entries",
     "remote_descriptor_hash",
@@ -147,6 +148,51 @@ def _zarr_reader_input_for_filesystem(filesystem: Any, path: str, protocol: str)
     return mapper_path
 
 
+def _http_listing_attempts(path: str) -> list[str]:
+    """Return ordered HTTP listing candidates for a remote path.
+
+    For extensionless URL paths, assume directory semantics first by trying the
+    trailing-slash form, then fall back to the original path. For file-like
+    paths (e.g. ".nc"), keep the existing order and only try slash as fallback.
+    """
+    parsed = urlparse(path)
+    if parsed.scheme not in {"http", "https"} or path.endswith("/"):
+        return [path]
+
+    leaf = PurePosixPath(parsed.path).name
+    looks_like_directory = bool(leaf) and "." not in leaf
+    slash_path = path + "/"
+    if looks_like_directory:
+        return [slash_path, path]
+    return [path, slash_path]
+
+
+def list_directory_entries(filesystem: Any, path: str, *, detail: bool = True) -> Any:
+    """List directory-like entries with HTTP-aware slash fallback ordering."""
+    attempts = _http_listing_attempts(path)
+    last_exc: Exception | None = None
+
+    for index, candidate in enumerate(attempts):
+        try:
+            return filesystem.ls(candidate, detail=detail)
+        except Exception as exc:
+            last_exc = exc
+            if index + 1 < len(attempts):
+                logger.debug(
+                    "ls() failed for %s, retrying with %s: %s",
+                    candidate,
+                    attempts[index + 1],
+                    exc,
+                )
+
+    if len(attempts) > 1 and last_exc is not None:
+        logger.warning("ls() failed for %s and %s: %s", attempts[0], attempts[1], last_exc)
+    if last_exc is not None:
+        raise last_exc
+
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Classes
 # ---------------------------------------------------------------------------
@@ -192,29 +238,10 @@ class RemoteAccessSession:
 
     def list_entries(self, path: str) -> list[RemoteEntry]:
         """List and normalize directory entries from the backing filesystem.
-        
-        For HTTP listings, retries with trailing "/" if the initial request fails,
-        since some OldDAP2 servers require it for directory URLs.
+
+        HTTP directory URLs are handled with extension-aware slash fallback.
         """
-        try:
-            listing = self.filesystem.ls(path, detail=True)
-        except Exception as exc:
-            # Retry HTTP directory URLs with trailing slash
-            parsed = urlparse(path)
-            is_http_candidate = parsed.scheme in ("http", "https")
-            if is_http_candidate and not path.endswith("/"):
-                try:
-                    logger.debug(
-                        f"Initial ls() failed for {path}, retrying with trailing slash: {exc}"
-                    )
-                    listing = self.filesystem.ls(path + "/", detail=True)
-                except Exception as retry_exc:
-                    logger.warning(
-                        f"ls() failed for {path} and {path + '/'}: {retry_exc}"
-                    )
-                    raise
-            else:
-                raise
+        listing = list_directory_entries(self.filesystem, path, detail=True)
         
         if not isinstance(listing, list):
             return []
