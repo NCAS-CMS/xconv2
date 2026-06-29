@@ -25,6 +25,7 @@ dependencies = [
     "setuptools>80",  # cf-plot imports distutils
     "superqt",
     "zarr",
+    "pystac-client",
 ]
 
 [project.optional-dependencies]
