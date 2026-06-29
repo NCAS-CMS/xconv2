@@ -107,15 +107,24 @@ class RemoteFilesystemSpec:
 # ---------------------------------------------------------------------------
 
 def _maybe_wrap_ppfive(filesystem: Any, path: str, protocol: str) -> Any:
-    """Return a ppfive.File (via FsspecReader) or a plain open handle for the path."""
-    if protocol in {"http", "s3"} and PurePosixPath(path).suffix.lower() in _PP_FORMAT_EXTENSIONS:
+    """Return a ppfive.File or a plain open handle for the path."""
+    if (
+            protocol in {"http", "s3"}
+            and PurePosixPath(path).suffix.lower() in _PP_FORMAT_EXTENSIONS
+    ):
+        fh = filesystem.open(path, "rb")
         try:
             import ppfive  # type: ignore[import]
-            from ppfive.io.fsspec_reader import FsspecReader  # type: ignore[import]
-            return ppfive.File(FsspecReader(filesystem, path))
+
+            return ppfive.File(fh)
+
         except ImportError:
-            logger.warning("ppfive is not installed; reading %s without ppfive wrapper", path)
-    return filesystem.open(path, "rb")
+            logger.warning(
+                f"ppfive is not installed; reading {path} without ppfive "
+                "wrapper"
+            )
+
+    return fh
 
 
 def _is_zarr_dataset_path(path: str) -> bool:

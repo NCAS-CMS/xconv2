@@ -8,20 +8,20 @@ dependencies:
   - python >=3.12
   - pip !=21.3
   - cartopy  # no pip wheel
+  - esmpy
   - fsspec
+  - numpy
   - pandas
   - paramiko
+  - prov
+  - pyfive
   - pyside6
+  - rdflib
   - s3fs
   - setuptools >80  # cfplot imports distutils
   - superqt
-  - pyside6
-  - esmpy
   - udunits2  # no pip wheel; required by cf-python/cf-units
-  - zarr
-  - rdflib
-  - prov
-  - pyfive 
+  - zarr 
   # testing
   - pytest
   # move these to conda-forge deps when released
