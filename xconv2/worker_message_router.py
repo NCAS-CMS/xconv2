@@ -100,8 +100,12 @@ class WorkerMessageRouter:
 
     @staticmethod
     def _decode_payload(line: str) -> object:
-        raw_payload = line.split(":", 1)[1]
-        return pickle.loads(base64.b64decode(raw_payload))
+        try:
+            raw_payload = line.split(":", 1)[1]
+            return pickle.loads(base64.b64decode(raw_payload))
+        except Exception as e:
+            logger.warning("Failed to decode payload: %s", e)
+            return None
 
     def handle_line(self, line: str) -> None:
         """Process a single worker stdout line."""
