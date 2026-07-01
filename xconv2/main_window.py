@@ -431,53 +431,6 @@ class CFVMain(CFVCore):
         if export_button is not None:
             export_button.setEnabled(is_animation_mode)
 
-    def _send_synthetic_animation_preview(
-        self,
-        *,
-        field_index: int,
-        selections: dict[str, tuple[object, object]],
-        collapse_by_coord: dict[str, str],
-    ) -> None:
-        """Request synthetic ANIM_* events so GUI playback can be tested without cf-plot callbacks."""
-        _ = (selections, collapse_by_coord)
-        animation_options = self.plot_options_by_kind.get("animation")
-        options = dict(animation_options) if isinstance(animation_options, dict) else {}
-
-        max_frames = options.get("max_frames", 0)
-        try:
-            frame_count = int(max_frames)
-        except (TypeError, ValueError):
-            frame_count = 0
-        if frame_count <= 0:
-            frame_count = 18
-        frame_count = max(2, min(frame_count, 240))
-
-        fps_hint_raw = options.get("fps_hint", 8)
-        try:
-            fps_hint = float(fps_hint_raw)
-        except (TypeError, ValueError):
-            fps_hint = 8.0
-
-        request_id = str(uuid.uuid4())
-        self._active_animation_request_id = request_id
-        self._animation_session_controller.create_session(request_id=request_id, session_id=request_id)
-
-        self._plot_request_in_flight = True
-        self._plot_request_expects_image = False
-        self._suppress_stale_error_status = False
-        self._set_plot_loading(True, "Generating synthetic animation preview...")
-        self._show_status_message("Synthetic preview mode active: generating animation frames...")
-        self._send_worker_control_task(
-            "ANIM_SYNTHETIC",
-            {
-                "request_id": request_id,
-                "session_id": request_id,
-                "frame_count": frame_count,
-                "fps_hint": fps_hint,
-                "title_template": f"Field {field_index} animation preview",
-            },
-        )
-
     def _handle_animation_start(
         self,
         *,
@@ -504,7 +457,7 @@ class CFVMain(CFVCore):
         self._active_animation_request_id = request_id
         self._animation_is_playing = False
         self._set_plot_loading(True, "Buffering animation frames...")
-        self._show_status_message("Synthetic preview mode active: buffering animation frames...")
+        self._show_status_message("Animation stream started: buffering frames...")
 
     def _handle_animation_frame(
         self,

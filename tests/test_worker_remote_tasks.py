@@ -21,6 +21,16 @@ class _FakeFilesystem:
         return BytesIO(self.payload)
 
 
+def test_extract_task_headers_parses_animation_flag() -> None:
+    headers = worker._extract_task_headers(
+        "#ANIMATION:1\n#EMIT_IMAGE:0\nprint('hello')\n"
+    )
+
+    assert headers.animation_enabled is True
+    assert headers.emit_image is False
+    assert headers.code == "print('hello')\n"
+
+
 def _build_example_netcdf_bytes(tmp_path: Path, *, tracking_id: str | None = None) -> bytes:
     """Create a tiny NetCDF payload from a cf example field for IO-oriented tests."""
     field = cf.example_field(0)

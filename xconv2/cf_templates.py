@@ -267,8 +267,10 @@ def plot_from_selection(
     """
     if plot_kind not in {"lineplot", "contour", "vector"}:
         raise ValueError(f"Unsupported plot kind: {plot_kind}")
-    if plot_action not in {"plot", "overplot"}:
+    if plot_action not in {"plot", "overplot", "animation"}:
         raise ValueError(f"Unsupported plot action: {plot_action}")
+    if plot_action == "animation" and plot_kind != "contour":
+        raise ValueError("Animation plot action is only supported for contour plots")
 
     prep_code = _pfld_from_selection_code(selections, collapse_by_coord)
 
@@ -402,6 +404,7 @@ def _pfld_from_selection_code(
     selection_code = textwrap.dedent(
         """
         pfld = get_data_for_plotting(fld, selection_spec, collapse_by_coord)
+        pfld = pfld.squeeze()
         """
     ).lstrip()
 

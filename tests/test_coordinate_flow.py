@@ -1252,7 +1252,7 @@ def test_refresh_plot_summary_2d_disables_animation_support_flag() -> None:
     assert host.plot_view_controller.plot_action_calls[-1] == (False, False, 2)
 
 
-def test_plot_ops_animation_go_routes_to_synthetic_preview() -> None:
+def test_plot_ops_animation_go_routes_to_worker_animation_task() -> None:
     class _DummyListWidget:
         def item(self, _index: int):
             return None
@@ -1270,8 +1270,7 @@ def test_plot_ops_animation_go_routes_to_synthetic_preview() -> None:
             self._plot_request_in_flight = False
             self._plot_request_expects_image = False
             self._suppress_stale_error_status = False
-            self.synthetic_preview_calls: list[dict[str, object]] = []
-            self.sent_tasks: list[tuple[str, str | None, bool]] = []
+            self.sent_tasks: list[tuple[str, str | None, bool, bool]] = []
             self.status_messages: list[tuple[str, bool]] = []
 
         def _build_plot_context(self):
@@ -1292,17 +1291,23 @@ def test_plot_ops_animation_go_routes_to_synthetic_preview() -> None:
         def _set_plot_loading(self, _is_loading: bool, message: str = "") -> None:
             _ = message
 
-        def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
-            self.sent_tasks.append((code, save_code_path, emit_image))
+        def _contour_title_fontsize(self) -> float:
+            return 10.0
 
-        def _send_synthetic_animation_preview(self, *, field_index: int, selections, collapse_by_coord) -> None:
-            self.synthetic_preview_calls.append(
-                {
-                    "field_index": field_index,
-                    "selections": dict(selections),
-                    "collapse_by_coord": dict(collapse_by_coord),
-                }
-            )
+        def _page_title_fontsize(self) -> float:
+            return 10.0
+
+        def _annotation_fontsize(self) -> float:
+            return 8.0
+
+        def _send_worker_task(
+            self,
+            code: str,
+            save_code_path: str | None = None,
+            emit_image: bool = True,
+            animation_enabled: bool = False,
+        ) -> None:
+            self.sent_tasks.append((code, save_code_path, emit_image, animation_enabled))
 
     host = _DummyHost()
 
@@ -1319,10 +1324,7 @@ def test_plot_ops_animation_go_routes_to_synthetic_preview() -> None:
         build_vector_overplot_command_fn=lambda **_kwargs: "VECTOR_OVERPLOT",
     )
 
-    assert len(host.synthetic_preview_calls) == 1
-    assert host.synthetic_preview_calls[0]["field_index"] == 2
-    assert host.sent_tasks == []
-    assert host.status_messages[0][0].startswith("Animation: using synthetic preview mode")
+    assert host.sent_tasks == [("_cfview_field_index = 2\nfld = f[2]\nPLOT_CODE", None, False, True)]
 
 
 def test_animation_playback_respects_loop_and_fps_interval() -> None:

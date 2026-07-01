@@ -28,6 +28,9 @@ class _FakeField:
         self.subspace_calls.append(kwargs)
         return self
 
+    def squeeze(self) -> "_FakeField":
+        return self
+
     def collapse(self, instruction: str, weights: bool = False) -> "_FakeField":
         self.collapse_calls.append((instruction, weights))
         return self
@@ -313,6 +316,19 @@ def test_plot_from_selection_contour_includes_plot_action() -> None:
     )
 
     assert "contour_plot_action = 'overplot'" in code
+    assert "plot_action=contour_plot_action" in code
+
+
+def test_plot_from_selection_contour_accepts_animation_action() -> None:
+    code = plot_from_selection(
+        selections={"latitude": ("-90", "90"), "longitude": ("0", "359")},
+        collapse_by_coord={},
+        plot_kind="contour",
+        plot_options={"mode": "default"},
+        plot_action="animation",
+    )
+
+    assert "contour_plot_action = 'animation'" in code
     assert "plot_action=contour_plot_action" in code
 
 
