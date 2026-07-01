@@ -1,57 +1,82 @@
-# Core Window Refactor Summary
+# Core and Main Window Architecture
 
-Date: 2026-03-08
-Branch: `refactor/core-window-phase1-phase2`
+This note reflects the current split between presentation (`CFVCore`) and
+worker-backed orchestration (`CFVMain`).
 
-## Overview
+## Current architecture
 
-`xconv2/core_window.py` was refactored in three phases to reduce class size and separate concerns by feature. The core window now acts as a coordinator that delegates behavior to focused UI controllers.
+The app is now intentionally layered:
 
-## Final Structure
+- `xconv2/core_window.py` (`CFVCore`):
 
-- `xconv2/core_window.py`
-- Coordinator for window lifecycle, top-level wiring, and extension hooks used by `CFVMain`.
+  - Pure GUI composition, controller wiring, menu/status plumbing, cache manager UI,
+    recent-file UX, and local settings/state helpers.
 
-- `xconv2/ui/settings_store.py`
-- Settings load/save, validation, legacy migration, recent-file persistence, and default save-path helpers.
+- `xconv2/main_window.py` (`CFVMain`):
 
-- `xconv2/ui/menu_controller.py`
-- Menu bar construction and recent-menu refresh logic.
+  - Worker process lifecycle (`QProcess`), IPC request submission, worker message
+    routing integration, and orchestration methods called from menu/actions.
 
-- `xconv2/ui/selection_controller.py`
-- Slider and collapse UI behavior, selected-range labels, and plot-summary enable/disable logic.
+- `xconv2/worker_message_router.py`:
 
-- `xconv2/ui/field_metadata_controller.py`
-- Field list population, field detail display, property parsing, property table dialog, and CSV export.
+  - Parses worker stdout protocol lines and dispatches by message type.
+  - `WorkerStatusHandler` centralizes `STATUS:` behavior and plot/task completion
+    side effects.
 
-- `xconv2/ui/plot_view_controller.py`
-- Plot panel widgets, render/update of plot image, resize/aspect fitting, and save code/save plot button flows.
+- `xconv2/main_window_components/*.py`:
 
-- `xconv2/ui/contour_options_controller.py`
-- Contour options dialog, annotation chooser, color-scale chooser, and scale-preview rendering.
+  - Feature-specific helper modules used by thin `CFVMain` wrappers.
+  - Current modules:
+    - `plot_ops.py`
+    - `remote_flow_ops.py`
+    - `remote_auth_ops.py`
+    - `replay_ops.py`
 
-## UML Artifacts
+- `xconv2/ui/*.py` controllers:
 
-- `docs/uml/core_window.puml`
-- `docs/uml/core_window_gui_worker_signals.puml`
-- `docs/uml/core_window_options_sequence.puml`
+  - `MenuController`, `SelectionController`, `FieldMetadataController`,
+    `PlotViewController`, `ContourOptionsController`, `LineplotOptionsController`,
+    `VectorOptionsController`, `SettingsStore`.
 
-These diagrams provide both class-level structure and key sequence flows for interaction paths.
+## Why this layout
 
-## Implementation Notes
+- `CFVCore` stays presentation-focused and can be reasoned about as a GUI shell.
+- `CFVMain` keeps worker orchestration in one host class, while high-churn feature
+  logic moves into focused component modules.
+- Method names in `CFVMain` remain stable wrappers, preserving test seams and
+  monkeypatch points for integration-style tests.
 
-- Public method names on `CFVCore` were retained where practical, with internal delegation added to controllers.
-- Worker orchestration remains in `xconv2/main_window.py`.
-- Dialog and feature behavior was preserved while moving logic into separate files.
+## UML
 
-## Refactor Commit History
+Class map:
 
-- `2fb1273` - refactor: extract menu and settings from core window
-- `9ba1ddd` - refactor: extract selection and field metadata controllers
-- `1925cea` - refactor: extract plot view and contour options controllers
+![Core and main window class map](../uml/svg/CoreWindowCurrentClass.svg)
 
-## Next Steps
+Source: `docs/uml/alpha_core_window.pu`
 
-- Add targeted unit tests for each controller class to reduce reliance on broad integration testing.
-- Introduce narrow host protocols (typing `Protocol`) for controller dependencies to reduce coupling.
-- Optionally split `ContourOptionsController` into smaller dialog-builder components if it continues to grow.
+Main-window component map:
+
+![Main window component map](../uml/svg/MainWindowComponentMap.svg)
+
+Source: `docs/uml/main_window_component_map.pu`
+
+GUI-worker protocol and routing flow:
+
+![GUI worker protocol and routing flow](../uml/svg/CoreWindowGuiWorkerSignals.svg)
+
+Source: `docs/uml/core_window_gui_worker_signals.puml`
+
+Options flow (worker range fetch -> dialog -> render):
+
+![Options flow sequence](../uml/svg/CoreWindowPhase3OptionsSequence.svg)
+
+Source: `docs/uml/core_window_options_sequence.puml`
+
+## Notes for future refactors
+
+- Keep `CFVMain` methods as stable delegating wrappers when extracting logic,
+  so tests can continue patching host methods.
+- Prefer module-level helper imports (as used now) over many per-function imports
+  for readability at the top of `main_window.py`.
+- If additional host classes are introduced later, re-evaluate whether some
+  component helpers should become reusable classes or protocols.

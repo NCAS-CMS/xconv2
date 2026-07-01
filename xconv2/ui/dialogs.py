@@ -9,6 +9,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
+    QAbstractItemView,
+    QDoubleSpinBox,
     QFileDialog,
     QComboBox,
     QDialog,
@@ -16,11 +18,17 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -30,6 +38,32 @@ from xconv2.aaa.aaa_config import get_locations
 from xconv2.tooltips import REMOTE_CONFIGURATION
 # p5rem is imported lazily inside _discover_ssh_remote_python to avoid loading
 # paramiko at GUI startup.
+
+BASIC_MOVING_OPERATIONS = ("mean", "sum", "integral")
+WINDOW_MODES = ("reflect", "constant", "nearest", "mirror", "wrap")
+BASIC_WINDOWS = (
+    "barthann",
+    "bartlett",
+    "blackman",
+    "boxcar",
+    "flattop",
+    "hamming",
+    "hann",
+    "parzen",
+    "taylor",
+    "triang",
+    "tukey",
+)
+
+WINDOW_DOCS_URL = "https://docs.scipy.org/doc/scipy/reference/signal.windows.html#module-scipy.signal.windows"
+MOVING_WINDOW_DOCS_URL = (
+    "https://ncas-cms.github.io/cf-python/method/cf.Field.moving_window.html#cf.Field.moving_window"
+)
+CONVOLUTION_DOCS_URL = (
+    "https://ncas-cms.github.io/cf-python/method/cf.Field.convolution_filter.html#cf.Field.convolution_filter"
+)
+APPLY_WINDOW_DOC_SUMMARY = "Apply a scipy window via cf-python convolution_filter along one axis."
+APPLY_MOVING_WINDOW_DOC_SUMMARY = "Apply a moving-window reduction using cf-python moving_window."
 
 
 class InfoMessageDialog(QDialog):
@@ -88,6 +122,267 @@ class InfoMessageDialog(QDialog):
         """Show the info dialog."""
         dialog = cls(parent, title, content)
         dialog.show()
+
+
+class SaveSelectedFieldsDialog(QDialog):
+    """Dialog for saving selected fields to NetCDF or Zarr."""
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        *,
+        selected_rows: list[dict[str, object]],
+        default_destination: str,
+        default_output_filename: str,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Save Selected Fields")
+        self.resize(900, 460)
+
+        self._selected_rows = selected_rows
+
+        layout = QVBoxLayout(self)
+
+        header = QLabel("Save selected fields and output chunk shapes:")
+        header.setStyleSheet("font-weight: 600;")
+        layout.addWidget(header)
+
+        self.selected_table = QTableWidget(len(selected_rows), 2, self)
+        self.selected_table.setHorizontalHeaderLabels(["Identity", "Output chunk shape"])
+        self.selected_table.verticalHeader().setVisible(False)
+        self.selected_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.selected_table.setFocusPolicy(Qt.NoFocus)
+        self.selected_table.setAlternatingRowColors(True)
+        self.selected_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+            | QAbstractItemView.EditTrigger.SelectedClicked
+        )
+
+        for row_idx, row in enumerate(selected_rows):
+            identity_text = str(row.get("identity", ""))
+            chunk_text = str(row.get("chunk_shape", "")).strip()
+
+            identity_item = QTableWidgetItem(identity_text)
+            identity_item.setFlags(identity_item.flags() & ~Qt.ItemIsEditable)
+            self.selected_table.setItem(row_idx, 0, identity_item)
+            self.selected_table.setItem(row_idx, 1, QTableWidgetItem(chunk_text))
+
+        header_view = self.selected_table.horizontalHeader()
+        header_view.setSectionResizeMode(0, QHeaderView.Stretch)
+        header_view.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.selected_table.setMinimumHeight(220)
+        layout.addWidget(self.selected_table)
+
+        chunk_hint = QLabel("Edit chunk shapes using tuple syntax, for example: (64, 64) or (1, 180, 360).")
+        chunk_hint.setWordWrap(True)
+        layout.addWidget(chunk_hint)
+
+        form = QFormLayout()
+
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(["nc", "zarr"])
+        self.format_combo.currentIndexChanged.connect(self._on_output_format_changed)
+        form.addRow("Output format", self.format_combo)
+
+        self.output_filename_edit = QLineEdit(default_output_filename)
+        self.output_filename_edit.setMinimumWidth(420)
+        form.addRow("Output filename", self.output_filename_edit)
+
+        destination_row = QHBoxLayout()
+        destination_row.setContentsMargins(0, 0, 0, 0)
+        self.destination_edit = QLineEdit(default_destination)
+        self.destination_edit.setMinimumWidth(620)
+        browse_button = QPushButton("Browse...")
+        browse_button.clicked.connect(self._browse_destination)
+        destination_row.addWidget(self.destination_edit, 1)
+        destination_row.addWidget(browse_button)
+
+        destination_widget = QWidget()
+        destination_widget.setLayout(destination_row)
+        form.addRow("Destination folder", destination_widget)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._validate_and_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_output_format_changed(self, _index: int) -> None:
+        """Keep suggested output filename suffix in sync with selected output format."""
+        raw_name = self.output_filename_edit.text().strip()
+        if not raw_name:
+            return
+
+        expected_suffix = ".zarr" if self.output_format == "zarr" else ".nc"
+        lower_name = raw_name.lower()
+
+        if lower_name.endswith(".nc") or lower_name.endswith(".zarr"):
+            stem = raw_name.rsplit(".", 1)[0]
+            self.output_filename_edit.setText(f"{stem}{expected_suffix}")
+            return
+
+        self.output_filename_edit.setText(f"{raw_name}{expected_suffix}")
+
+    def _browse_destination(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Choose destination folder",
+            self.destination_edit.text().strip(),
+        )
+        if folder:
+            self.destination_edit.setText(folder)
+
+    def _validate_and_accept(self) -> None:
+        destination = self.destination_edit.text().strip()
+        if not destination:
+            QMessageBox.warning(self, "Destination required", "Please choose a destination folder.")
+            return
+
+        output_filename = self.output_filename_edit.text().strip()
+        if not output_filename:
+            QMessageBox.warning(self, "Filename required", "Please enter an output filename.")
+            return
+        if Path(output_filename).name != output_filename:
+            QMessageBox.warning(
+                self,
+                "Invalid filename",
+                "Output filename must not include directory separators.",
+            )
+            return
+
+        path = Path(destination).expanduser()
+        if not path.exists() or not path.is_dir():
+            QMessageBox.warning(self, "Invalid destination", "Destination folder does not exist.")
+            return
+
+        self.accept()
+
+    @property
+    def output_format(self) -> str:
+        return self.format_combo.currentText().strip().lower()
+
+    @property
+    def destination_folder(self) -> str:
+        return self.destination_edit.text().strip()
+
+    @property
+    def output_filename(self) -> str:
+        return self.output_filename_edit.text().strip()
+
+    @property
+    def output_chunk_shapes(self) -> list[str]:
+        values: list[str] = []
+        for row_idx in range(self.selected_table.rowCount()):
+            item = self.selected_table.item(row_idx, 1)
+            values.append(item.text().strip() if item is not None else "")
+        return values
+
+
+class ReplayOperationsDialog(QDialog):
+    """Dialog for choosing which persisted field operations to replay."""
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        *,
+        operation_labels: list[str],
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Replay Field Operations")
+        self.resize(760, 420)
+
+        layout = QVBoxLayout(self)
+        header = QLabel("Select operations to replay")
+        header.setStyleSheet("font-weight: 600;")
+        layout.addWidget(header)
+
+        hint = QLabel("Unchecked operations will be skipped.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.operations_list = QListWidget(self)
+        self.operations_list.setSelectionMode(QAbstractItemView.NoSelection)
+        self.operations_list.setAlternatingRowColors(True)
+        for index, label in enumerate(operation_labels, start=1):
+            item = QListWidgetItem(f"{index}. {label}")
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            self.operations_list.addItem(item)
+        layout.addWidget(self.operations_list, 1)
+
+        controls = QHBoxLayout()
+        controls.addStretch(1)
+        select_all = QPushButton("Select All")
+        clear_all = QPushButton("Clear All")
+        select_all.clicked.connect(self._select_all)
+        clear_all.clicked.connect(self._clear_all)
+        controls.addWidget(select_all)
+        controls.addWidget(clear_all)
+        layout.addLayout(controls)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._validate_and_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _set_all(self, state: Qt.CheckState) -> None:
+        for idx in range(self.operations_list.count()):
+            item = self.operations_list.item(idx)
+            if item is not None:
+                item.setCheckState(state)
+
+    def _select_all(self) -> None:
+        self._set_all(Qt.Checked)
+
+    def _clear_all(self) -> None:
+        self._set_all(Qt.Unchecked)
+
+    def selected_indices(self) -> list[int]:
+        selected: list[int] = []
+        for idx in range(self.operations_list.count()):
+            item = self.operations_list.item(idx)
+            if item is not None and item.checkState() == Qt.Checked:
+                selected.append(idx)
+        return selected
+
+    def _validate_and_accept(self) -> None:
+        if not self.selected_indices():
+            QMessageBox.warning(self, "No operations selected", "Select at least one operation to replay.")
+            return
+        self.accept()
+
+
+class ZarrSaveWarningDialog(QDialog):
+    """Confirm zarr output through an explicit opt-in warning step."""
+
+    def __init__(self, parent: QWidget | None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Zarr Output Confirmation")
+        self.resize(480, 360)
+
+        layout = QVBoxLayout(self)
+
+        clipster_path = Path(__file__).parent.parent / "assets" / "clipster.svg"
+        if clipster_path.exists():
+            clipster_pixmap = QPixmap(str(clipster_path))
+            if not clipster_pixmap.isNull():
+                clipster_pixmap = clipster_pixmap.scaledToWidth(480, Qt.SmoothTransformation)
+                image_label = QLabel()
+                image_label.setAlignment(Qt.AlignCenter)
+                image_label.setPixmap(clipster_pixmap)
+                layout.addWidget(image_label)
+
+        buttons_row = QHBoxLayout()
+        buttons_row.addStretch(1)
+        cancel_button = QPushButton("Cancel")
+        proceed_button = QPushButton("If I must")
+        cancel_button.clicked.connect(self.reject)
+        proceed_button.clicked.connect(self.accept)
+        buttons_row.addWidget(cancel_button)
+        buttons_row.addWidget(proceed_button)
+        layout.addLayout(buttons_row)
 
 
 def create_info_button(
@@ -1923,3 +2218,494 @@ class RemoteOpenDialog(QDialog):
             return None, False, next_state
         next_state["configure_new_remote"] = False
         return config, True, next_state
+
+
+class RegridDialog(QDialog):
+    """Dialog for configuring a regrid operation on the selected fields."""
+
+    _LATLON_ENTRY = "lat/lon"
+    _HEALPIX_ENTRY = "healpix"
+    _SELECTED_FIELD_ENTRY = "selected field"
+    _REGRID_METHODS = (
+        "linear",
+        "bilinear",
+        "conservative_1st",
+        "conservative",
+        "conservative_2nd",
+        "patch",
+        "nearest_stod",
+        "nearest_dtos",
+    )
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        selected_fields: list[dict[str, object]],
+        on_submit: Callable[[dict[str, object]], None] | None = None,
+    ) -> None:
+        super().__init__(parent)
+        # Close automatically when the parent (main window) is destroyed
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setWindowTitle("Regrid")
+        self.setMinimumWidth(480)
+
+        self._selected_fields = selected_fields
+        self._on_submit = on_submit
+        self._configured = False
+
+        # Load regrid targets JSON
+        _json_path = Path(__file__).parent.parent / "assets" / "regrid_targets.json"
+        try:
+            with _json_path.open() as fh:
+                self._regrid_targets: dict[str, object] = json.load(fh)
+        except Exception:
+            self._regrid_targets = {}
+
+        layout = QVBoxLayout(self)
+
+        # --- Selected fields list ---
+        fields_label = QLabel("Selected fields:")
+        fields_label.setStyleSheet("font-weight: 600;")
+        layout.addWidget(fields_label)
+
+        self._fields_list = QListWidget()
+        self._fields_list.setSelectionMode(QAbstractItemView.NoSelection)
+        self._fields_list.setFocusPolicy(Qt.NoFocus)
+        for row in selected_fields:
+            self._fields_list.addItem(str(row.get("identity", "")))
+        self._fields_list.setFixedHeight(
+            min(max(len(selected_fields), 1), 6) * self._fields_list.sizeHintForRow(0) + 4
+        )
+        layout.addWidget(self._fields_list)
+
+        # --- Target dropdown ---
+        target_row = QFormLayout()
+        self._target_combo = QComboBox()
+        _preset_keys = list(self._regrid_targets.keys())
+        self._target_combo.addItems(_preset_keys)
+        self._target_combo.addItem(self._LATLON_ENTRY)
+        self._target_combo.addItem(self._HEALPIX_ENTRY)
+        self._target_combo.addItem(self._SELECTED_FIELD_ENTRY)
+        target_row.addRow("Target:", self._target_combo)
+        layout.addLayout(target_row)
+
+        # --- Configure button ---
+        configure_btn = QPushButton("Configure")
+        configure_btn.clicked.connect(self._on_configure)
+        layout.addWidget(configure_btn)
+
+        # --- Shared post-configure options ---
+        self._post_config_widget = QWidget()
+        _post_config_layout = QFormLayout(self._post_config_widget)
+        _post_config_layout.setContentsMargins(0, 0, 0, 0)
+        self._method_combo = QComboBox()
+        self._method_combo.addItems(list(self._REGRID_METHODS))
+        _post_config_layout.addRow("Method:", self._method_combo)
+        self._post_config_widget.hide()
+        layout.addWidget(self._post_config_widget)
+
+        # --- Configuration detail area (stacked) ---
+        self._detail_stack = QStackedWidget()
+        layout.addWidget(self._detail_stack)
+
+        # Page 0 – empty placeholder
+        self._detail_stack.addWidget(QWidget())
+
+        # Page 1 – JSON preset display
+        self._preset_label = QLabel()
+        self._preset_label.setWordWrap(True)
+        self._preset_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._preset_label.setStyleSheet(
+            "background: #1e1e1e; color: #d4d4d4; font-family: monospace;"
+            " padding: 6px; border-radius: 4px;"
+        )
+        self._detail_stack.addWidget(self._preset_label)
+
+        # Page 2 – "selected field" picker
+        _sf_widget = QWidget()
+        _sf_layout = QVBoxLayout(_sf_widget)
+        _sf_layout.setContentsMargins(0, 0, 0, 0)
+        _sf_label = QLabel("Select the target field:")
+        _sf_layout.addWidget(_sf_label)
+        self._source_field_combo = QComboBox()
+        _sf_layout.addWidget(self._source_field_combo)
+        self._chosen_field_label = QLabel()
+        self._chosen_field_label.setStyleSheet("font-style: italic; color: #aaa;")
+        _sf_layout.addWidget(self._chosen_field_label)
+        self._detail_stack.addWidget(_sf_widget)
+
+        # Page 3 – lat/lon manual entry
+        _ll_widget = QWidget()
+        _ll_layout = QFormLayout(_ll_widget)
+        _ll_layout.setContentsMargins(0, 0, 0, 0)
+
+        self._nx_spin = QSpinBox()
+        self._nx_spin.setRange(1, 99999)
+        self._nx_spin.setValue(360)
+        _ll_layout.addRow("nx:", self._nx_spin)
+
+        self._lon1_spin = QDoubleSpinBox()
+        self._lon1_spin.setRange(-360.0, 360.0)
+        self._lon1_spin.setDecimals(4)
+        self._lon1_spin.setValue(0.0)
+        _ll_layout.addRow("lon1:", self._lon1_spin)
+
+        self._deltax_spin = QDoubleSpinBox()
+        self._deltax_spin.setRange(0.0001, 360.0)
+        self._deltax_spin.setDecimals(4)
+        self._deltax_spin.setValue(1.0)
+        _ll_layout.addRow("deltax:", self._deltax_spin)
+
+        self._ny_spin = QSpinBox()
+        self._ny_spin.setRange(1, 99999)
+        self._ny_spin.setValue(180)
+        _ll_layout.addRow("ny:", self._ny_spin)
+
+        self._lat1_spin = QDoubleSpinBox()
+        self._lat1_spin.setRange(-90.0, 90.0)
+        self._lat1_spin.setDecimals(4)
+        self._lat1_spin.setValue(-90.0)
+        _ll_layout.addRow("lat1:", self._lat1_spin)
+
+        self._deltay_spin = QDoubleSpinBox()
+        self._deltay_spin.setRange(0.0001, 180.0)
+        self._deltay_spin.setDecimals(4)
+        self._deltay_spin.setValue(1.0)
+        _ll_layout.addRow("deltay:", self._deltay_spin)
+
+        self._detail_stack.addWidget(_ll_widget)
+
+        # Page 4 – HEALPix entry
+        _hp_widget = QWidget()
+        _hp_layout = QFormLayout(_hp_widget)
+        _hp_layout.setContentsMargins(0, 0, 0, 0)
+        self._healpix_level_spin = QSpinBox()
+        self._healpix_level_spin.setRange(0, 29)
+        self._healpix_level_spin.setValue(6)
+        _hp_layout.addRow("Level:", self._healpix_level_spin)
+        self._detail_stack.addWidget(_hp_widget)
+
+        self._detail_stack.setCurrentIndex(0)
+
+        # --- Source field selection signal ---
+        self._source_field_combo.currentIndexChanged.connect(self._on_source_field_changed)
+
+        # --- Go button ---
+        go_btn = QPushButton("Go")
+        go_btn.setStyleSheet("font-weight: 600;")
+        go_btn.clicked.connect(self._on_go)
+        layout.addWidget(go_btn)
+
+    # ------------------------------------------------------------------
+    # Slots
+    # ------------------------------------------------------------------
+
+    def _on_configure(self) -> None:
+        """Show the relevant configuration panel for the chosen target."""
+        choice = self._target_combo.currentText()
+
+        if choice == self._SELECTED_FIELD_ENTRY:
+            self._source_field_combo.clear()
+            parent_fields = getattr(self.parent(), "field_list_widget", None)
+            if parent_fields is not None and hasattr(parent_fields, "count") and hasattr(parent_fields, "item"):
+                for idx in range(parent_fields.count()):
+                    item = parent_fields.item(idx)
+                    if item is None:
+                        continue
+                    self._source_field_combo.addItem(str(item.text()), int(idx))
+            else:
+                for row in self._selected_fields:
+                    self._source_field_combo.addItem(
+                        str(row.get("identity", "")),
+                        int(row.get("index", -1)),
+                    )
+
+            if self._source_field_combo.count() <= 0:
+                QMessageBox.warning(self, "No fields", "No fields are available to use as a regrid target.")
+                return
+
+            self._chosen_field_label.clear()
+            self._detail_stack.setCurrentIndex(2)
+            self._post_config_widget.show()
+            self._configured = True
+
+        elif choice == self._LATLON_ENTRY:
+            self._detail_stack.setCurrentIndex(3)
+            self._post_config_widget.show()
+            self._configured = True
+
+        elif choice == self._HEALPIX_ENTRY:
+            self._detail_stack.setCurrentIndex(4)
+            self._post_config_widget.show()
+            self._configured = True
+
+        else:
+            # Preset JSON key
+            value = self._regrid_targets.get(choice)
+            text = json.dumps(value, indent=2) if value is not None else "(no data)"
+            self._preset_label.setText(text)
+            self._detail_stack.setCurrentIndex(1)
+            self._post_config_widget.show()
+            self._configured = True
+
+    def _on_source_field_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        name = self._source_field_combo.itemText(index)
+        self._chosen_field_label.setText(f"Target field: {name}")
+
+    def _build_regrid_config(self) -> dict[str, object]:
+        """Build worker-facing JSON-serializable regrid configuration."""
+        choice = self._target_combo.currentText()
+        selected_indices = [
+            int(row.get("index", -1))
+            for row in self._selected_fields
+            if int(row.get("index", -1)) >= 0
+        ]
+
+        config: dict[str, object] = {
+            "target": choice,
+            "field_indices": selected_indices,
+            "method": self._method_combo.currentText(),
+        }
+
+        if choice == self._SELECTED_FIELD_ENTRY:
+            config["target_spec"] = {
+                "target_field_index": int(self._source_field_combo.currentData()),
+            }
+            config["target_field_name"] = self._source_field_combo.currentText()
+        elif choice == self._LATLON_ENTRY:
+            config["target_spec"] = {
+                "longitude": {
+                    "nx": self._nx_spin.value(),
+                    "lon1": self._lon1_spin.value(),
+                    "delta": self._deltax_spin.value(),
+                },
+                "latitude": {
+                    "ny": self._ny_spin.value(),
+                    "lat1": self._lat1_spin.value(),
+                    "delta": self._deltay_spin.value(),
+                },
+            }
+        elif choice == self._HEALPIX_ENTRY:
+            config["target_spec"] = {
+                "level": self._healpix_level_spin.value(),
+            }
+        else:
+            config["target_key"] = choice
+            config["target"] = "regular lonlat"
+            config["target_spec"] = self._normalize_regrid_target_spec(
+                self._regrid_targets.get(choice)
+            )
+
+        return config
+
+    @staticmethod
+    def _normalize_regrid_target_spec(target_spec: object) -> dict[str, object]:
+        """Convert preset target JSON into the worker-facing lon/lat schema."""
+        if isinstance(target_spec, dict):
+            longitude = target_spec.get("longitude")
+            latitude = target_spec.get("latitude")
+            if isinstance(longitude, dict) and isinstance(latitude, dict):
+                return {
+                    "longitude": {
+                        "nx": longitude.get("nx"),
+                        "lon1": longitude.get("lon1"),
+                        "delta": longitude.get("delta", longitude.get("deltax")),
+                    },
+                    "latitude": {
+                        "ny": latitude.get("ny"),
+                        "lat1": latitude.get("lat1"),
+                        "delta": latitude.get("delta", latitude.get("deltay")),
+                    },
+                }
+
+        if isinstance(target_spec, list):
+            merged: dict[str, object] = {}
+            for item in target_spec:
+                if isinstance(item, dict):
+                    merged.update(item)
+
+            longitude = merged.get("longitude")
+            latitude = merged.get("latitude")
+            if isinstance(longitude, dict) and isinstance(latitude, dict):
+                return {
+                    "longitude": {
+                        "nx": longitude.get("nx"),
+                        "lon1": longitude.get("lon1"),
+                        "delta": longitude.get("delta", longitude.get("deltax")),
+                    },
+                    "latitude": {
+                        "ny": latitude.get("ny"),
+                        "lat1": latitude.get("lat1"),
+                        "delta": latitude.get("delta", latitude.get("deltay")),
+                    },
+                }
+
+        raise ValueError("Invalid preset regrid target specification.")
+
+    def _on_go(self) -> None:
+        if not self._configured:
+            QMessageBox.warning(self, "Not configured", "Press Configure before running regrid.")
+            return
+
+        if self._target_combo.currentText() == self._SELECTED_FIELD_ENTRY:
+            if self._source_field_combo.count() <= 0:
+                QMessageBox.warning(self, "Missing target field", "Choose a target field before running regrid.")
+                return
+
+            selected_indices = [
+                int(row.get("index", -1))
+                for row in self._selected_fields
+                if int(row.get("index", -1)) >= 0
+            ]
+            if not selected_indices:
+                QMessageBox.warning(self, "Missing source field", "Select at least one source field to regrid.")
+                return
+
+        config = self._build_regrid_config()
+        if self._on_submit is not None:
+            self._on_submit(config)
+            self.close()
+            return
+
+        QMessageBox.information(self, "Regrid configuration", json.dumps(config, indent=2))
+
+
+class FilterDialog(QDialog):
+    """Dialog for configuring and running one field filtering operation."""
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        *,
+        field_label: str,
+        available_axes: list[str],
+        on_submit: Callable[[dict[str, object]], None] | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setWindowTitle("Filter")
+        self.setMinimumWidth(560)
+
+        self._on_submit = on_submit
+
+        layout = QVBoxLayout(self)
+
+        header = QLabel(f"Configure filter for field: {field_label}")
+        header.setWordWrap(True)
+        header.setStyleSheet("font-weight: 600;")
+        layout.addWidget(header)
+
+        form = QFormLayout()
+        self._method_combo = QComboBox()
+        self._method_combo.addItem("Convolution", "convolution")
+        self._method_combo.addItem("Moving Window", "moving_window")
+        form.addRow("Method:", self._method_combo)
+
+        self._axis_combo = QComboBox()
+        self._axis_combo.addItems(available_axes)
+        form.addRow("Axis:", self._axis_combo)
+
+        self._size_spin = QSpinBox()
+        self._size_spin.setRange(1, 999)
+        self._size_spin.setValue(3)
+        form.addRow("Size:", self._size_spin)
+        layout.addLayout(form)
+
+        self._method_doc_label = QLabel()
+        self._method_doc_label.setWordWrap(True)
+        self._method_doc_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self._method_doc_label.setOpenExternalLinks(True)
+        layout.addWidget(self._method_doc_label)
+
+        self._method_behavior_label = QLabel()
+        self._method_behavior_label.setWordWrap(True)
+        self._method_behavior_label.setStyleSheet("color: #444; font-style: italic;")
+        layout.addWidget(self._method_behavior_label)
+
+        self._detail_stack = QStackedWidget()
+        layout.addWidget(self._detail_stack)
+
+        convolution_page = QWidget()
+        convolution_form = QFormLayout(convolution_page)
+        self._window_combo = QComboBox()
+        self._window_combo.addItems(list(BASIC_WINDOWS))
+        convolution_form.addRow("Window:", self._window_combo)
+        self._detail_stack.addWidget(convolution_page)
+
+        moving_page = QWidget()
+        moving_form = QFormLayout(moving_page)
+        self._moving_method_combo = QComboBox()
+        self._moving_method_combo.addItems(list(BASIC_MOVING_OPERATIONS))
+        moving_form.addRow("Operation:", self._moving_method_combo)
+        self._moving_mode_combo = QComboBox()
+        self._moving_mode_combo.addItem("(none)", "")
+        for mode in WINDOW_MODES:
+            self._moving_mode_combo.addItem(mode, mode)
+        moving_form.addRow("Mode:", self._moving_mode_combo)
+        self._weights_checkbox = QCheckBox("Use weights")
+        moving_form.addRow("Weights:", self._weights_checkbox)
+        self._detail_stack.addWidget(moving_page)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._method_combo.currentIndexChanged.connect(self._sync_method_ui)
+        self._sync_method_ui()
+
+    def _sync_method_ui(self) -> None:
+        method = str(self._method_combo.currentData())
+        if method == "moving_window":
+            self._detail_stack.setCurrentIndex(1)
+            doc = APPLY_MOVING_WINDOW_DOC_SUMMARY
+            docs = (
+                f'<a href="{MOVING_WINDOW_DOCS_URL}">cf-python moving_window docs</a>'
+            )
+            behavior = (
+                "Behavior: moving window does not update coordinate bounds; "
+                "it should record the operation in cell methods."
+            )
+        else:
+            self._detail_stack.setCurrentIndex(0)
+            doc = APPLY_WINDOW_DOC_SUMMARY
+            docs = (
+                f'<a href="{CONVOLUTION_DOCS_URL}">cf-python convolution_filter docs</a> | '
+                f'<a href="{WINDOW_DOCS_URL}">scipy.signal windows docs</a>'
+            )
+            behavior = (
+                "Behavior: convolution updates relevant coordinate bounds to reflect "
+                "filter width."
+            )
+
+        self._method_doc_label.setText(f"<b>Description</b><br>{doc}<br><br><b>References</b><br>{docs}")
+        self._method_behavior_label.setText(behavior)
+
+    def _on_accept(self) -> None:
+        method = str(self._method_combo.currentData())
+        config: dict[str, object] = {
+            "method": method,
+            "axis": self._axis_combo.currentText(),
+            "size": int(self._size_spin.value()),
+        }
+
+        if method == "moving_window":
+            config["moving_method"] = self._moving_method_combo.currentText()
+            mode = str(self._moving_mode_combo.currentData() or "")
+            if mode:
+                config["mode"] = mode
+            if self._weights_checkbox.isChecked():
+                config["weights"] = True
+        else:
+            config["window"] = self._window_combo.currentText()
+
+        if self._on_submit is not None:
+            self._on_submit(config)
+            self.accept()
+            return
+
+        QMessageBox.information(self, "Filter configuration", json.dumps(config, indent=2))
+        self.accept()
+

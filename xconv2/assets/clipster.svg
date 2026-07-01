@@ -1,0 +1,71 @@
+<svg width="680" viewBox="0 0 680 440" xmlns="http://www.w3.org/2000/svg">
+  <title>Clipster — paperclip assistant with speech bubble</title>
+  <desc>A cartoon paperclip character with expressive eyes and a speech bubble saying "Are you sure?"</desc>
+
+  <!-- ── Speech bubble ── -->
+  <rect x="300" y="90" width="210" height="56" rx="14" fill="#fff" stroke="#bbb" stroke-width="1.2"/>
+  <polygon points="320,146 300,171 345,146" fill="#fff" stroke="#bbb" stroke-width="1.2" stroke-linejoin="round"/>
+  <polygon points="321,147 302,169 344,147" fill="#fff" stroke="none"/>
+  <text x="405" y="124" text-anchor="middle" font-family="sans-serif" font-size="16" font-weight="500" fill="#1a1a1a">Are you sure?</text>
+
+  <!-- ══ Paperclip body ══ -->
+  <g transform="translate(200, 90)">
+    <path d="
+      M -28 270
+      Q -52 270 -52 240
+      L -52 60
+      Q -52 20 -14 20
+      Q 28 20 28 60
+      L 28 200
+      Q 28 230 0 230
+      Q -28 230 -28 200
+      L -28 80
+      Q -28 56 -6 56
+      Q 16 56 16 80
+      L 16 200
+    " fill="none" stroke="rgb(24,111,77)" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="
+      M -22 270
+      Q -44 270 -44 240
+      L -44 60
+      Q -44 28 -14 28
+    " fill="none" stroke="rgb(60,160,120)" stroke-width="7" stroke-linecap="round" opacity="0.7"/>
+    <path d="
+      M 28 200
+      Q 28 230 0 230
+      Q -28 230 -28 200
+      L -28 80
+    " fill="none" stroke="rgb(14,70,48)" stroke-width="8" stroke-linecap="round" opacity="0.5"/>
+  </g>
+
+  <!-- ══ Face ══ -->
+  <ellipse cx="184" cy="218" rx="14" ry="16" fill="white" stroke="rgb(14,70,48)" stroke-width="1.5"/>
+  <ellipse cx="216" cy="218" rx="14" ry="16" fill="white" stroke="rgb(14,70,48)" stroke-width="1.5"/>
+  <ellipse cx="186" cy="220" rx="7" ry="9" fill="#1a2a1a"/>
+  <ellipse cx="218" cy="220" rx="7" ry="9" fill="#1a2a1a"/>
+  <circle cx="189" cy="216" r="2.5" fill="white"/>
+  <circle cx="221" cy="216" r="2.5" fill="white"/>
+
+  <!-- Eyebrows -->
+  <path d="M 173 199 Q 184 193 195 198" fill="none" stroke="#1a2a1a" stroke-width="3" stroke-linecap="round"/>
+  <path d="M 205 198 Q 216 193 227 199" fill="none" stroke="#1a2a1a" stroke-width="3" stroke-linecap="round"/>
+
+  <!-- Mouth -->
+  <path d="M 186 238 Q 200 248 214 238" fill="none" stroke="#1a2a1a" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- Cheeks -->
+  <ellipse cx="176" cy="238" rx="9" ry="6" fill="#f08080" opacity="0.35"/>
+  <ellipse cx="224" cy="238" rx="9" ry="6" fill="#f08080" opacity="0.35"/>
+
+  <!-- ══ Arms ══ -->
+  <path d="M 160 260 Q 120 240 100 210" fill="none" stroke="rgb(24,111,77)" stroke-width="16" stroke-linecap="round"/>
+  <circle cx="97" cy="204" r="12" fill="rgb(24,111,77)" stroke="rgb(14,70,48)" stroke-width="1.5"/>
+  <path d="M 88 197 Q 86 188 91 185" fill="none" stroke="rgb(14,70,48)" stroke-width="3" stroke-linecap="round"/>
+  <path d="M 95 193 Q 93 183 98 181" fill="none" stroke="rgb(14,70,48)" stroke-width="3" stroke-linecap="round"/>
+  <path d="M 103 194 Q 103 184 107 183" fill="none" stroke="rgb(14,70,48)" stroke-width="3" stroke-linecap="round"/>
+
+  <path d="M 240 260 Q 270 240 285 215" fill="none" stroke="rgb(24,111,77)" stroke-width="16" stroke-linecap="round"/>
+  <circle cx="289" cy="208" r="12" fill="rgb(24,111,77)" stroke="rgb(14,70,48)" stroke-width="1.5"/>
+  <path d="M 289 196 Q 290 183 293 178" fill="none" stroke="rgb(14,70,48)" stroke-width="3.5" stroke-linecap="round"/>
+
+</svg>

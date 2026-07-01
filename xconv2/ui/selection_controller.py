@@ -108,6 +108,14 @@ class SelectionController:
     def __init__(self, host: "CFVCore") -> None:
         self.host = host
 
+    @staticmethod
+    def _slider_display_name(name: str) -> str:
+        """Return a user-facing coordinate name without mutating the key name."""
+        display_name = name
+        if display_name.lower().startswith("long_name="):
+            display_name = display_name[10:].strip()
+        return display_name.capitalize()
+
     def _set_save_controls_enabled(self, enabled: bool) -> None:
         """Enable or disable save mode selector and save action button."""
         save_combo = getattr(self.host, "save_target_combo", None)
@@ -157,10 +165,7 @@ class SelectionController:
         self.host.available_plot_kinds = []
         self.host.selected_plot_kind = None
 
-        for i in reversed(range(self.host.sidebar.count())):
-            widget = self.host.sidebar.itemAt(i).widget()
-            if widget is not None:
-                widget.setParent(None)
+        self._clear_sidebar_layout()
 
         for name, entry in metadata.items():
             if isinstance(entry, dict):
@@ -181,7 +186,8 @@ class SelectionController:
             header_row = QHBoxLayout()
             header_row.setContentsMargins(0, 0, 0, 0)
             header_row.setSpacing(4)
-            name_label = QLabel(f"{name.upper()}:")
+            name_label = QLabel(f"{self._slider_display_name(name)}:")
+            name_label.setStyleSheet("font-weight: 600;")
             collapse_label = QLabel("collapse")
             collapse_checkbox = QCheckBox("")
             collapse_checkbox.setToolTip("Select a collapse method")
@@ -202,6 +208,8 @@ class SelectionController:
             bounds_end_label = QLabel(str(values[-1]))
             bounds_start_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             bounds_end_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+
 
             slider = KeyboardRangeSlider(
                 Qt.Horizontal,
@@ -239,6 +247,40 @@ class SelectionController:
         self.host._set_slider_scroll_visible_rows(len(self.host.controls))
         self.refresh_plot_summary()
         logger.info("Built %d dynamic sliders", len(self.host.controls))
+
+    def _clear_sidebar_layout(self) -> None:
+        """Remove all existing slider widgets from the sidebar layout."""
+        layout = getattr(self.host, "sidebar", None)
+        if layout is None:
+            return
+
+        while layout.count():
+            item = layout.takeAt(0)
+            if item is None:
+                continue
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget is not None:
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
+            elif child_layout is not None:
+                self._clear_nested_layout(child_layout)
+
+    def _clear_nested_layout(self, layout: QVBoxLayout | QHBoxLayout) -> None:
+        """Recursively clear a nested layout and delete its widgets."""
+        while layout.count():
+            item = layout.takeAt(0)
+            if item is None:
+                continue
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget is not None:
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
+            elif child_layout is not None:
+                self._clear_nested_layout(child_layout)
 
     def _focus_adjacent_slider(self, current_name: str, offset: int) -> None:
         """Move keyboard focus to the previous/next slider in display order."""
@@ -336,10 +378,13 @@ class SelectionController:
         start_idx, end_idx = control["range_slider"].value()
         lo_idx = int(min(start_idx, end_idx))
         hi_idx = int(max(start_idx, end_idx))
-        selected_count = hi_idx - lo_idx
+        singleton_idx = self._singleton_index(lo_idx, hi_idx, len(values))
+        if singleton_idx is not None:
+            selected_count = 1
+        else:
+            selected_count = (hi_idx - lo_idx) + 1
         self.host.selected_counts[name] = selected_count
 
-        singleton_idx = self._singleton_index(lo_idx, hi_idx, len(values))
         if singleton_idx is not None:
             lo_text = self.format_slider_label_value(values[singleton_idx], units, delta)
             hi_text = lo_text
@@ -453,7 +498,9 @@ class SelectionController:
             self.host.last_varying_dims = None
             self.host.available_plot_kinds = []
             self.host.selected_plot_kind = None
+            self.host.selected_plot_action = "plot"
             self.host.plot_view_controller.set_plot_type_options([], None)
+            self.host.plot_view_controller.set_plot_action_options(has_existing_plot=False)
             self.host.plot_button.setEnabled(False)
             self.host.options_button.setEnabled(False)
             self._set_save_controls_enabled(False)
@@ -499,6 +546,9 @@ class SelectionController:
         self.host.selected_plot_kind = selected_kind
         self.host.last_varying_dims = varying_dims
         self.host.plot_view_controller.set_plot_type_options(available_plot_kinds, selected_kind)
+        self.host.plot_view_controller.set_plot_action_options(
+            has_existing_plot=getattr(self.host, "_plot_pixmap_original", None) is not None
+        )
 
         if varying_dims == 0:
             self.host.plot_summary_label.setText(f"{dims_text} \nTotal collapse, plot not possible")
@@ -512,7 +562,7 @@ class SelectionController:
             )
             self.host.plot_info_button.show()
             self.host.plot_button.setEnabled(True)
-            self.host.options_button.setEnabled(selected_kind in {"contour", "lineplot"})
+            self.host.options_button.setEnabled(selected_kind in {"contour", "lineplot", "vector"})
             self._set_save_controls_enabled(True)
         elif varying_dims == 2:
             self.host.plot_summary_label.setText(
@@ -520,7 +570,7 @@ class SelectionController:
             )
             self.host.plot_info_button.show()
             self.host.plot_button.setEnabled(True)
-            self.host.options_button.setEnabled(selected_kind in {"contour", "lineplot"})
+            self.host.options_button.setEnabled(selected_kind in {"contour", "lineplot", "vector"})
             self._set_save_controls_enabled(True)
         else:
             self.host.plot_summary_label.setText(

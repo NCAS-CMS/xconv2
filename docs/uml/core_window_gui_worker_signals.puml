@@ -1,89 +1,115 @@
-@startuml CoreWindowPhase3GuiWorkerSignals
-title GUI <-> Worker Signals and Message Protocol
+@startuml CoreWindowGuiWorkerSignals
+title GUI <-> Worker Signals, Router, and Task Protocol
 
 actor User
 participant "CFVCore UI" as GUI
 participant "CFVMain\n(QProcess wrapper)" as Main
+participant "WorkerMessageRouter" as Router
 participant "QProcess worker" as Proc
 participant "cf-worker\n(worker.py main loop)" as Worker
 
 == Worker lifecycle wiring ==
-Main -> Proc : readyReadStandardOutput.connect(handle_worker_output)
-Main -> Proc : readyReadStandardError.connect(handle_worker_error)
-Main -> Proc : errorOccurred.connect(handle_worker_process_error)
-Main -> Proc : finished.connect(handle_worker_finished)
+Main -> Proc : readyReadStandardOutput.connect\n(handle_worker_output)
+Main -> Proc : readyReadStandardError.connect\n(handle_worker_error)
+Main -> Proc : errorOccurred.connect\n(handle_worker_process_error)
+Main -> Proc : finished.connect\n(handle_worker_finished)
 Main -> Proc : start("cf-worker")
 
 == Open file metadata flow ==
 User -> GUI : Open file
-GUI -> Main : on_file_selected(path)
-Main -> Proc : write(task + "#END_TASK\\n")
-Proc -> Worker : stdin task block
-Worker -> Proc : stdout "METADATA:<b64pickle>"
+GUI -> Main : on_file_selected\n(path)
+Main -> Proc : write\n(task + "#END_TASK\\n")
+Proc -> Worker : stdin\ntask block
+Worker -> Proc : stdout\n"METADATA:<b64pickle>"
 Proc -> Main : readyReadStandardOutput
-Main -> Main : handle_worker_output() -> populate_field_list(...)
-Worker -> Proc : stdout "STATUS:Task Complete"
+Main -> Router : handle_line\n("METADATA:...")
+Router -> Main : populate_field_list(...)
+Worker -> Proc : stdout\n"STATUS:Task Complete"
 Proc -> Main : readyReadStandardOutput
+Main -> Router : handle_line\n("STATUS:Task Complete")
 
 == Field coordinate flow ==
 User -> GUI : Click field
 GUI -> Main : on_field_clicked(item)
 Main -> Main : _reset_ui_for_new_field_selection()
 Main -> GUI : _set_plot_loading(False)
-Main -> GUI : _clear_plot_canvas("Waiting for data...")
-Main -> GUI : _show_status_message("Task Complete")
-Main -> Proc : write(coordinate_list + "#END_TASK\\n")
-Proc -> Worker : stdin task block
-Worker -> Proc : stdout "COORD:<b64pickle>"
+Main -> GUI : _clear_plot_canvas\n("Waiting for data...")
+Main -> GUI : _show_status_message\n("Task Complete")
+Main -> Proc : write\n(coordinate_list + "#END_TASK\\n")
+Proc -> Worker : stdin\ntask block
+Worker -> Proc : stdout\n"COORD:<b64pickle>"
 Proc -> Main : readyReadStandardOutput
-Main -> Main : handle_worker_output() -> build_dynamic_sliders(...)
-Worker -> Proc : stdout "STATUS:Error - <stale previous task>"
+Main -> Router : handle_line\n("COORD:...")
+Router -> Main : build_dynamic_sliders(...)
+Worker -> Proc : stdout\n"STATUS:Error\n - <stale previous task>"
 Proc -> Main : readyReadStandardOutput
-Main -> Main : handle_worker_output() -> ignore stale error while suppression enabled
+Main -> Router : handle_line\n("STATUS:Error - ...")
+Router -> Main : ignore stale status\nwhen suppression flag is set
 
 == Plot update flow ==
 User -> GUI : Click Plot
 GUI -> Main : _request_plot_update()
-Main -> GUI : _set_plot_loading(True, "Rendering plot...")
-Main -> Proc : write(plot_from_selection + "#END_TASK\\n")
-Proc -> Worker : stdin task block
-Worker -> Proc : stdout "IMG_READY:<b64pickle_png_bytes>"
+Main -> GUI : _set_plot_loading\n(True, "Rendering plot...")
+Main -> Proc : write\n(plot_from_selection + "#END_TASK\\n")
+Proc -> Worker : stdin\ntask block
+Worker -> Proc : stdout\n"IMG_READY:\n<b64pickle_png_bytes>"
 Proc -> Main : readyReadStandardOutput
-Main -> Main : handle_worker_output() -> set_plot_image(...)
+Main -> Router : handle_line\n  ("IMG_READY:...")
+Router -> Main : set_plot_image(...)
 Main -> GUI : _set_plot_loading(False)
-Worker -> Proc : stdout "STATUS:Task Complete"
+Worker -> Proc : stdout\n"STATUS:Task Complete"
 Proc -> Main : readyReadStandardOutput
+Main -> Router : handle_line\n("STATUS:Task Complete")
 
 == Plot error flow ==
-Worker -> Proc : stdout "STATUS:Error - <message>"
+Worker -> Proc : stdout\n"STATUS:Error\n - <message>"
 Proc -> Main : readyReadStandardOutput
-Main -> GUI : _show_status_message(..., is_error=True)
-Main -> GUI : _clear_plot_canvas("Plot failed.")
-Main -> GUI : _set_plot_loading(False)
+Main -> Router : handle_line\n("STATUS:Error - ...")
+Router -> GUI : _show_status_message\n(..., is_error=True)
+Router -> GUI : _clear_plot_canvas\n("Plot failed.")
+Router -> GUI : _set_plot_loading\n(False)
 
 == Options context flow (contour) ==
 User -> GUI : Click Options
 GUI -> Main : _request_plot_options()
-Main -> Proc : write(contour_range_from_selection + "#END_TASK\\n")
-Proc -> Worker : stdin task block
-Worker -> Proc : stdout "CONTOUR_RANGE:<b64pickle>"
+Main -> Proc : write\n(contour_range_from_selection + "#END_TASK\\n")
+Proc -> Worker : stdin\ntask block
+Worker -> Proc : stdout\n"CONTOUR_RANGE:\n<b64pickle>"
 Proc -> Main : readyReadStandardOutput
-Main -> GUI : _show_contour_options_dialog(min,max,title)
-GUI -> Main : _request_plot_update() (dialog accepted)
-Main -> GUI : _set_plot_loading(True, "Rendering plot...")
+Main -> Router : handle_line\n("CONTOUR_RANGE:...")
+Router -> GUI : _show_contour_options_dialog\n(min,max,title)
+GUI -> Main : _request_plot_update()\n(dialog accepted)
+Main -> GUI : _set_plot_loading\n(True, "Rendering plot...")
+
+== Remote control task flow ==
+User -> GUI : Browse Remote / Open URI
+GUI -> Main : _open_remote_from_config(...)\n or _open_uri_entry(...)
+Main -> Proc : #TASK_KIND:REMOTE_PREPARE\n (+ payload)
+Proc -> Worker : _handle_control_task\n("REMOTE_PREPARE")
+Worker -> Proc : REMOTE_STATUS\n{phase=preparing/ready/failed}
+Proc -> Main : readyReadStandardOutput
+Main -> Router : handle_line\n("REMOTE_STATUS:...")
+Router -> Main : update login dialog + quit pending\n QEventLoop on ready/failed
+
+Main -> Proc : #TASK_KIND:REMOTE_LIST\n (+ payload path)
+Proc -> Worker : _handle_control_task\n("REMOTE_LIST")
+Worker -> Proc : REMOTE_LIST_RESULT\n{entries,error}
+Proc -> Main : readyReadStandardOutput
+Main -> Router : handle_line\n("REMOTE_LIST_RESULT:...")
+Router -> Main : set pending list result \n+ quit nested loop
 
 == Error/termination signals ==
 Worker -> Proc : stderr traceback/log lines
 Proc -> Main : readyReadStandardError
 Main -> Main : handle_worker_error()
-Proc -> Main : errorOccurred(ProcessError)
+Proc -> Main : errorOccurred\n(ProcessError)
 Main -> Main : handle_worker_process_error(...)
-Main -> GUI : _show_status_message(..., is_error=True)
-Main -> GUI : _clear_plot_canvas(...)
-Main -> GUI : _set_plot_loading(False)
+Main -> GUI : _show_status_message\n(..., is_error=True)
+Main -> GUI : _clear_plot_canvas\n(...)
+Main -> GUI : _set_plot_loading\n(False)
 Proc -> Main : finished(exit_code, exit_status)
 Main -> Main : handle_worker_finished(...)
-Main -> GUI : _show_status_message(..., is_error=True)
-Main -> GUI : _clear_plot_canvas(...)
-Main -> GUI : _set_plot_loading(False)
+Main -> GUI : _show_status_message\n(..., is_error=True)
+Main -> GUI : _clear_plot_canvas\n(...)
+Main -> GUI : _set_plot_loading\n(False)
 @enduml

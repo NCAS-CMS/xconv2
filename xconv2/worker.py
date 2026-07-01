@@ -10,27 +10,17 @@ import json
 import re
 import textwrap
 import time
+import resource
 from io import BytesIO
 from pathlib import Path
 from typing import Any, NamedTuple
 
-import matplotlib
-import numpy as np
-from matplotlib.backend_bases import FigureManagerBase
-
-# Worker renders to bytes/files only, so force a headless backend and
-# avoid spawning a separate matplotlib GUI app/window (e.g. extra dock icon).
-matplotlib.use("Agg", force=True)
-
 import cf
-import cfplot as cfp
-from matplotlib import pyplot as plt
-
-from . import xconv_cf_interface
-from . import lineplot as xconv_lineplot
+ 
 from . import cell_method_handler as xconv_cell_method_handler
 from . import __version__
 from .logging_utils import apply_scoped_runtime_logging, configure_logging
+from .workflow.provenance_export import handle_save_provenance_task as _handle_save_provenance_task_impl
 from .remote_access import (
     RemoteAccessSession,
     create_filesystem,
@@ -38,39 +28,17 @@ from .remote_access import (
     normalize_remote_datasets_for_cf_read as _normalize_remote_datasets_for_cf_read_shared,
 )
 
-# cf-plot may still call show(); in Agg mode this is non-interactive and noisy.
-plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
-plt.ioff()
-# Some plotting paths call the backend manager directly; force no-op.
-FigureManagerBase.show = lambda self: None  # type: ignore[assignment]
-# LinePlot imports pyplot in its own module namespace; disable there too.
-xconv_lineplot.plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
-xconv_lineplot.plt.ioff()
-warnings.filterwarnings(
-    "ignore",
-    message="FigureCanvasAgg is non-interactive, and thus cannot be shown",
-    category=UserWarning,
-)
-
-# Ensure cf-plot never tries to open an external viewer (e.g. ImageMagick
-# display) when running worker-generated contour plots.
-try:
-    cfp.setvars(viewer=None)
-    cfp.plotvars.viewer = None
-except Exception:
-    logger = logging.getLogger(__name__)
-    logger.exception("Failed to set cfplot viewer=None in worker")
-
 
 logger = logging.getLogger(__name__)
 SAVE_TASK_HEADER = "#SAVE_TASK_CODE_PATH_B64:"
 EMIT_IMAGE_HEADER = "#EMIT_IMAGE:"
 TASK_KIND_HEADER = "#TASK_KIND:"
 TASK_PAYLOAD_HEADER = "#TASK_PAYLOAD_B64:"
-INTERFACE_EXPORTS = tuple(getattr(xconv_cf_interface, "__all__", ()))
+INTERFACE_EXPORTS: tuple[str, ...] = ()
 OMIT4SAVE_TOKEN = "#omit4save"
 REMOTE_SESSION_TTL_SECONDS = 180.0
 REMOTE_SESSION_MAX = 4
+_WORKER_RUNTIME_LOADED = False
 
 
 class TaskHeaders(NamedTuple):
@@ -107,21 +75,85 @@ class RemoteSessionEntry:
 
 remote_session_pool: dict[str, RemoteSessionEntry] = {}
 
-# This dictionary persists data (like 'f') between GUI commands
-worker_globals = {
-    'cf': cf,
-    'cfp': cfp,
-    'plt': plt,
-    'np': np,
-}
+_HANDLED_TASK_EXCEPTIONS = (ValueError, IndexError)
 
-# Expose helper functions/constants from the interface module to generated code.
-worker_globals.update(
-    {
-        name: getattr(xconv_cf_interface, name)
-        for name in INTERFACE_EXPORTS
-    }
-)
+# This dictionary persists data (like 'f') between GUI commands.
+worker_globals: dict[str, Any] = {'cf': cf}
+
+
+def _ensure_worker_runtime_loaded() -> None:
+    """Load the heavy scientific runtime on demand."""
+    global _WORKER_RUNTIME_LOADED
+    global INTERFACE_EXPORTS
+    global worker_globals
+    global matplotlib
+    global FigureManagerBase
+    global np
+    global cfp
+    global plt
+    global cf_interface
+    global xconv_lineplot
+
+    if _WORKER_RUNTIME_LOADED:
+        return
+
+    import matplotlib as _matplotlib
+
+    # Worker renders to bytes/files only, so force a headless backend and
+    # avoid spawning a separate matplotlib GUI app/window (e.g. extra dock icon).
+    _matplotlib.use("Agg", force=True)
+
+    import numpy as _np
+    from matplotlib.backend_bases import FigureManagerBase as _FigureManagerBase
+    import cfplot as _cfp
+    from matplotlib import pyplot as _plt
+    from . import cf_interface as _cf_interface
+    from .cf_interface import lineplot as _xconv_lineplot
+
+    matplotlib = _matplotlib
+    FigureManagerBase = _FigureManagerBase
+    np = _np
+    cfp = _cfp
+    plt = _plt
+    cf_interface = _cf_interface
+    xconv_lineplot = _xconv_lineplot
+
+    # cf-plot may still call show(); in Agg mode this is non-interactive and noisy.
+    plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
+    plt.ioff()
+    # Some plotting paths call the backend manager directly; force no-op.
+    FigureManagerBase.show = lambda self: None  # type: ignore[assignment]
+    # LinePlot imports pyplot in its own module namespace; disable there too.
+    xconv_lineplot.plt.show = lambda *args, **kwargs: None  # type: ignore[assignment]
+    xconv_lineplot.plt.ioff()
+    warnings.filterwarnings(
+        "ignore",
+        message="FigureCanvasAgg is non-interactive, and thus cannot be shown",
+        category=UserWarning,
+    )
+
+    # Ensure cf-plot never tries to open an external viewer (e.g. ImageMagick
+    # display) when running worker-generated contour plots.
+    try:
+        cfp.setvars(viewer=None)
+        cfp.plotvars.viewer = None
+    except Exception:
+        logger.exception("Failed to set cfplot viewer=None in worker")
+
+    INTERFACE_EXPORTS = tuple(getattr(cf_interface, "__all__", ()))
+    worker_globals.update({"cfp": cfp, "plt": plt, "np": np})
+    worker_globals.update({name: getattr(cf_interface, name) for name in INTERFACE_EXPORTS})
+    _WORKER_RUNTIME_LOADED = True
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily expose deferred runtime modules while keeping import-time light."""
+    if name in {"cf_interface", "xconv_lineplot", "cfp", "plt", "np", "matplotlib", "FigureManagerBase"}:
+        _ensure_worker_runtime_loaded()
+        value = globals().get(name)
+        if value is not None:
+            return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 def send_to_gui(prefix, data=None):
     """Helper to format messages for the GUI pipe."""
@@ -132,6 +164,34 @@ def send_to_gui(prefix, data=None):
     else:
         print(prefix, flush=True)
         logger.debug("Sent message to GUI: %s", prefix)
+
+
+def _worker_rss_mb() -> float:
+    """Return current worker RSS in MiB (best effort)."""
+    try:
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    except Exception:
+        return 0.0
+
+    # macOS reports bytes; Linux reports KiB.
+    if sys.platform == "darwin":
+        return float(rss) / (1024.0 * 1024.0)
+    return float(rss) / 1024.0
+
+
+def _log_task_memory(prefix: str, *, started: float, rss_before_mb: float) -> None:
+    """Log task timing and RSS deltas for crash/leak diagnostics."""
+    rss_after_mb = _worker_rss_mb()
+    elapsed = max(0.0, time.monotonic() - started)
+    delta = rss_after_mb - rss_before_mb
+    logger.info(
+        "MEM_DIAG %s elapsed=%.3fs rss_before=%.1fMiB rss_after=%.1fMiB delta=%+.1fMiB",
+        prefix,
+        elapsed,
+        rss_before_mb,
+        rss_after_mb,
+        delta,
+    )
 
 
 def _extract_task_headers(code: str) -> TaskHeaders:
@@ -396,6 +456,298 @@ def _apply_worker_logging_configuration(
     )
 
 
+def _replay_source_files_for_operation(operation: dict[str, Any]) -> list[str]:
+    """Return ordered source URIs/paths referenced by one replay operation."""
+    kind = str(operation.get("kind", "")).strip().lower()
+
+    if kind in {"unary_xy", "apply_selection", "filter"}:
+        source_file = operation.get("source_file")
+        if isinstance(source_file, str) and source_file.strip():
+            return [source_file.strip()]
+        return []
+
+    if kind in {"binary", "regrid"}:
+        source_files = operation.get("source_files")
+        if isinstance(source_files, list):
+            return [str(item).strip() for item in source_files if isinstance(item, str) and str(item).strip()]
+        return []
+
+    return []
+
+
+def _replay_resolve_field_reference_index(
+    fields: list,
+    provenance: list[dict[str, Any]],
+    field_ref: dict[str, Any],
+    fallback_index: object,
+) -> int | None:
+    """Resolve a persisted field reference against current worker replay state."""
+    identity_raw = field_ref.get("identity")
+    identity = identity_raw.strip() if isinstance(identity_raw, str) else ""
+
+    source_raw = field_ref.get("source_file")
+    source_file = source_raw.strip() if isinstance(source_raw, str) else ""
+
+    generated_raw = field_ref.get("generated")
+    generated_filter = generated_raw if isinstance(generated_raw, bool) else None
+
+    occurrence_raw = field_ref.get("occurrence")
+    try:
+        occurrence_target = int(occurrence_raw)
+    except (TypeError, ValueError):
+        occurrence_target = 1
+    if occurrence_target < 1:
+        occurrence_target = 1
+
+    if identity:
+        rows = cf_interface.field_info(fields)
+        seen = 0
+        for idx, row in enumerate(rows):
+            row_identity_raw = row.get("identity") if isinstance(row, dict) else None
+            row_identity = row_identity_raw.strip() if isinstance(row_identity_raw, str) else ""
+            if row_identity != identity:
+                continue
+
+            prov = provenance[idx] if idx < len(provenance) else {}
+            if source_file:
+                prov_source_raw = prov.get("source_file") if isinstance(prov, dict) else ""
+                prov_source = prov_source_raw.strip() if isinstance(prov_source_raw, str) else ""
+                if prov_source != source_file:
+                    continue
+
+            if generated_filter is not None:
+                prov_generated = bool(prov.get("generated", False)) if isinstance(prov, dict) else False
+                if prov_generated != generated_filter:
+                    continue
+
+            seen += 1
+            if seen == occurrence_target:
+                return idx
+
+    if isinstance(fallback_index, int) and 0 <= fallback_index < len(fields):
+        return fallback_index
+    return None
+
+
+def _replay_normalize_loaded_fields(loaded: Any) -> list:
+    """Normalize cf.read output into a plain list of fields."""
+    _ensure_worker_runtime_loaded()
+    if isinstance(loaded, cf.FieldList):
+        return list(loaded)
+    if isinstance(loaded, (list, tuple)):
+        return list(loaded)
+    return [loaded]
+
+
+def _handle_replay_fields_task(payload: dict[str, Any]) -> None:
+    """Replay persisted field operations entirely on the worker side."""
+    _ensure_worker_runtime_loaded()
+    operations_raw = payload.get("operations")
+    if not isinstance(operations_raw, list) or not operations_raw:
+        raise ValueError("REPLAY_FIELDS requires a non-empty operations list")
+
+    operations = [op for op in operations_raw if isinstance(op, dict)]
+    if not operations:
+        raise ValueError("REPLAY_FIELDS operations list contains no valid mappings")
+
+    replay_sources: list[str] = []
+    for operation in operations:
+        for source in _replay_source_files_for_operation(operation):
+            if source not in replay_sources:
+                replay_sources.append(source)
+
+    remote_open_requests_raw = payload.get("remote_open_requests")
+    remote_open_requests: dict[str, dict[str, Any]] = {}
+    if isinstance(remote_open_requests_raw, list):
+        for request in remote_open_requests_raw:
+            if not isinstance(request, dict):
+                continue
+            uri_raw = request.get("uri")
+            uri = uri_raw.strip() if isinstance(uri_raw, str) else ""
+            if uri:
+                remote_open_requests[uri] = request
+
+    fields: list = []
+    provenance: list[dict[str, Any]] = []
+
+    for source in replay_sources:
+        request = remote_open_requests.get(source)
+        if isinstance(request, dict):
+            session_id = str(request.get("session_id", "")).strip()
+            descriptor_hash = str(request.get("descriptor_hash", "")).strip()
+            descriptor = request.get("descriptor")
+            paths = request.get("paths")
+            if not isinstance(descriptor, dict) or not session_id or not descriptor_hash:
+                raise ValueError(f"Replay remote preload request is invalid for source: {source}")
+            if isinstance(paths, list):
+                datasets = [str(item) for item in paths if str(item)]
+            else:
+                datasets = []
+            if not datasets:
+                raise ValueError(f"Replay remote preload paths missing for source: {source}")
+
+            entry = _prepare_remote_session(
+                session_id=session_id,
+                descriptor_hash=descriptor_hash,
+                descriptor=descriptor,
+            )
+            entry.last_used = time.monotonic()
+            loaded_fields = _replay_normalize_loaded_fields(
+                _read_remote_fields(
+                    entry=entry,
+                    descriptor=descriptor,
+                    datasets=datasets[0] if len(datasets) == 1 else datasets,
+                )
+            )
+        else:
+            loaded_fields = _replay_normalize_loaded_fields(cf.read(source))
+
+        fields.extend(loaded_fields)
+        provenance.extend({"source_file": source, "generated": False} for _ in loaded_fields)
+
+    worker_globals["f"] = fields
+    worker_globals["_cfview_file_path"] = replay_sources[-1] if replay_sources else ""
+    worker_globals["_cfview_field_index"] = None
+    initial_rows = cf_interface.field_info(fields)
+    for idx, row in enumerate(initial_rows):
+        if not isinstance(row, dict):
+            continue
+        prov = provenance[idx] if idx < len(provenance) else {}
+        source_file = prov.get("source_file") if isinstance(prov, dict) else ""
+        generated = bool(prov.get("generated", False)) if isinstance(prov, dict) else False
+        row["source_file"] = source_file if isinstance(source_file, str) else ""
+        row["generated"] = generated
+    send_to_gui("METADATA", initial_rows)
+
+    applied = 0
+    skipped = 0
+
+    for operation in operations:
+        kind = str(operation.get("kind", "")).strip().lower()
+        metadata_rows: list[dict[str, object]] | None = None
+
+        if kind == "unary_xy":
+            resolved_index = _replay_resolve_field_reference_index(
+                fields,
+                provenance,
+                operation.get("field_ref") if isinstance(operation.get("field_ref"), dict) else {},
+                operation.get("field_index"),
+            )
+            operation_key = operation.get("operation")
+            if isinstance(resolved_index, int) and isinstance(operation_key, str) and operation_key.strip():
+                metadata_rows = cf_interface.append_unary_xy_field_operation(fields, resolved_index, operation_key)
+
+        elif kind == "binary":
+            resolved_a = _replay_resolve_field_reference_index(
+                fields,
+                provenance,
+                operation.get("field_ref_a") if isinstance(operation.get("field_ref_a"), dict) else {},
+                operation.get("index_a"),
+            )
+            resolved_b = _replay_resolve_field_reference_index(
+                fields,
+                provenance,
+                operation.get("field_ref_b") if isinstance(operation.get("field_ref_b"), dict) else {},
+                operation.get("index_b"),
+            )
+            operation_key = operation.get("operation")
+            source_files_raw = operation.get("source_files")
+            source_files = [str(item) for item in source_files_raw if isinstance(item, str)] if isinstance(source_files_raw, list) else []
+            if (
+                isinstance(resolved_a, int)
+                and isinstance(resolved_b, int)
+                and isinstance(operation_key, str)
+                and operation_key.strip()
+            ):
+                metadata_rows = cf_interface.append_binary_field_operation(
+                    fields,
+                    resolved_a,
+                    resolved_b,
+                    operation_key,
+                    source_files=source_files,
+                )
+
+        elif kind == "filter":
+            resolved_index = _replay_resolve_field_reference_index(
+                fields,
+                provenance,
+                operation.get("field_ref") if isinstance(operation.get("field_ref"), dict) else {},
+                operation.get("field_index"),
+            )
+            config = operation.get("config")
+            if isinstance(resolved_index, int) and isinstance(config, dict):
+                metadata_rows = cf_interface.append_filter_field_operation(
+                    fields,
+                    resolved_index,
+                    config,
+                )
+
+        elif kind == "apply_selection":
+            resolved_index = _replay_resolve_field_reference_index(
+                fields,
+                provenance,
+                operation.get("field_ref") if isinstance(operation.get("field_ref"), dict) else {},
+                operation.get("field_index"),
+            )
+            selections = operation.get("selections")
+            collapse_by_coord = operation.get("collapse_by_coord")
+            if (
+                isinstance(resolved_index, int)
+                and isinstance(selections, dict)
+                and isinstance(collapse_by_coord, dict)
+            ):
+                metadata_rows = cf_interface.append_selection_field_operation(
+                    fields,
+                    resolved_index,
+                    selections,
+                    collapse_by_coord,
+                )
+
+        elif kind == "regrid":
+            config = operation.get("config")
+            if isinstance(config, dict):
+                config_copy = dict(config)
+                field_refs = operation.get("field_refs")
+                if isinstance(field_refs, list) and field_refs:
+                    resolved_indices: list[int] = []
+                    for raw_ref in field_refs:
+                        if not isinstance(raw_ref, dict):
+                            continue
+                        resolved = _replay_resolve_field_reference_index(fields, provenance, raw_ref, None)
+                        if isinstance(resolved, int):
+                            resolved_indices.append(resolved)
+                    if resolved_indices:
+                        config_copy["field_indices"] = resolved_indices
+
+                metadata_rows = cf_interface.regrid_from_config(fields, json.dumps(config_copy, sort_keys=True))
+
+        if isinstance(metadata_rows, list) and metadata_rows:
+            for row in metadata_rows:
+                if isinstance(row, dict):
+                    row["source_file"] = ""
+                    row["generated"] = True
+            send_to_gui("METADATA_APPEND", metadata_rows)
+            provenance.extend({"source_file": "", "generated": True} for _ in metadata_rows)
+            applied += 1
+        else:
+            skipped += 1
+
+    send_to_gui(f"STATUS:Replay complete: applied {applied} operation(s), skipped {skipped}.")
+
+
+def _handle_save_provenance_task(payload: dict[str, Any]) -> None:
+    """Build field-specific provenance and save to disk in requested format."""
+    status_message = _handle_save_provenance_task_impl(
+        payload,
+        replay_source_files_for_operation=_replay_source_files_for_operation,
+        prepare_remote_session=_prepare_remote_session,
+        replay_normalize_loaded_fields=_replay_normalize_loaded_fields,
+        read_remote_fields=_read_remote_fields,
+        resolve_field_reference_index=_replay_resolve_field_reference_index,
+    )
+    send_to_gui(status_message)
+
+
 def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) -> None:
     """Execute a typed worker control task."""
     payload = task_payload or {}
@@ -480,7 +832,10 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
         if not isinstance(descriptor, dict) or not session_id or not descriptor_hash:
             raise ValueError("REMOTE_OPEN requires session_id, descriptor_hash, and descriptor")
 
+        _ensure_worker_runtime_loaded()
+
         uri = str(payload.get("uri", ""))
+        append = bool(payload.get("append", False))
         raw_paths = payload.get("paths")
         if isinstance(raw_paths, list):
             paths = [str(item) for item in raw_paths if str(item)]
@@ -521,9 +876,17 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
         worker_globals["_cfview_file_path"] = uri
         worker_globals["_cfview_field_index"] = None
         worker_globals["_cfview_remote_descriptor"] = descriptor
-        worker_globals["f"] = fields
-
-        send_to_gui("METADATA", xconv_cf_interface.field_info(fields))
+        if append:
+            existing = worker_globals.get("f")
+            if existing is None:
+                worker_globals["f"] = fields
+            else:
+                existing.extend(fields)
+                worker_globals["f"] = existing
+            send_to_gui("METADATA", cf_interface.field_info(fields))
+        else:
+            worker_globals["f"] = fields
+            send_to_gui("METADATA", cf_interface.field_info(fields))
         send_to_gui(
             "REMOTE_OPEN_RESULT",
             {
@@ -540,11 +903,20 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
         )
         return
 
+    if task_kind == "REPLAY_FIELDS":
+        _handle_replay_fields_task(payload)
+        return
+
+    if task_kind == "SAVE_PROVENANCE":
+        _handle_save_provenance_task(payload)
+        return
+
     raise ValueError(f"Unknown worker control task kind: {task_kind}")
 
 
 def _build_saved_plot_script(exec_code: str) -> str:
     """Build a reproducible script with worker state preamble plus plot code."""
+    _ensure_worker_runtime_loaded()
     lines: list[str] = [
         "from __future__ import annotations",
         "import cf",
@@ -554,7 +926,7 @@ def _build_saved_plot_script(exec_code: str) -> str:
 
     helper_sources: dict[str, str] = {}
     for name in INTERFACE_EXPORTS:
-        obj = getattr(xconv_cf_interface, name, None)
+        obj = getattr(cf_interface, name, None)
         if obj is None or not callable(obj):
             continue
         try:
@@ -579,7 +951,7 @@ def _build_saved_plot_script(exec_code: str) -> str:
                 queue.append(candidate)
 
     # Collect auxiliary functions from cell_method_handler that are referenced by
-    # inlined helpers but are not exported from xconv_cf_interface directly.
+    # inlined helpers but are not exported from cf_interface directly.
     aux_module_funcs: list[tuple[str, object]] = [
         (name, obj)
         for name, obj in vars(xconv_cell_method_handler).items()
@@ -613,7 +985,7 @@ def _build_saved_plot_script(exec_code: str) -> str:
             "import numpy as np",
             "import pandas as pd",
             "",
-            "# Inlined LinePlot class from xconv2.lineplot for standalone execution.",
+            "# Inlined LinePlot class from xconv2.cf_interface.lineplot for standalone execution.",
             "",
         ])
         try:
@@ -639,7 +1011,7 @@ def _build_saved_plot_script(exec_code: str) -> str:
 
     lines.extend([
         "",
-        "# Inlined helpers from xconv2.xconv_cf_interface for standalone execution.",
+        "# Inlined helpers from xconv2.cf_interface for standalone execution.",
         "",
     ])
 
@@ -685,6 +1057,7 @@ def _build_saved_plot_script(exec_code: str) -> str:
 
 def _emit_latest_plot_image() -> None:
     """Send the latest matplotlib figure to GUI as PNG bytes, if available."""
+    _ensure_worker_runtime_loaded()
     fig_numbers = plt.get_fignums()
     logger.info(
         "PLOT_DIAG worker_emit pid=%s backend=%s fig_count=%d",
@@ -702,7 +1075,6 @@ def _emit_latest_plot_image() -> None:
     buffer.seek(0)
     send_to_gui("IMG_READY", buffer.getvalue())
     buffer.close()
-    plt.close("all")
 
 
 def main():
@@ -717,44 +1089,20 @@ def main():
 
     logger.info("Worker starting")
     logger.info("Log file: %s", log_file)
-    try:
-        logger.info(
-            "MATPLOTLIB_PATHS cache=%s config=%s env[MPLCONFIGDIR]=%s env[XDG_CACHE_HOME]=%s env[HOME]=%s",
-            matplotlib.get_cachedir(),
-            matplotlib.get_configdir(),
-            os.environ.get("MPLCONFIGDIR"),
-            os.environ.get("XDG_CACHE_HOME"),
-            os.environ.get("HOME"),
-        )
-    except Exception:
-        logger.exception("Failed to log matplotlib cache/config paths")
-    try:
-        import cfdm
-
-        logger.info(
-            "Worker runtime python=%s cf=%s (%s) cfdm=%s (%s)",
-            sys.executable,
-            getattr(cf, "__version__", "unknown"),
-            getattr(cf, "__file__", "unknown"),
-            getattr(cfdm, "__version__", "unknown"),
-            getattr(cfdm, "__file__", "unknown"),
-        )
-    except Exception:
-        logger.exception("Failed to log worker cf/cfdm runtime details")
     logger.info(
         "PLOT_DIAG worker_runtime version=%s module_dir=%s backend=%s",
         __version__,
         Path(__file__).resolve().parent,
-        matplotlib.get_backend(),
+        "deferred",
     )
 
     # Expose helper in the exec namespace so GUI-issued tasks can emit messages.
     worker_globals['send_to_gui'] = send_to_gui
-    # Signal that all heavy imports (cf, cfplot, scipy, …) have completed and
-    # the worker is ready to accept tasks.  The GUI shows "Initialising worker…"
-    # until this line is received.
-    send_to_gui("STATUS:Worker Initialized (Pure-Python/pyfive)")
+    # Signal that the lightweight worker control loop is ready. Heavy imports
+    # are loaded lazily when the first data/plot task needs them.
+    send_to_gui("STATUS:Worker Initialized")
     print("READY", flush=True)
+    logger.info("MEM_DIAG worker_initialized rss=%.1fMiB", _worker_rss_mb())
 
     current_block = []
 
@@ -781,6 +1129,7 @@ def main():
 
             if task_kind is not None:
                 task_start = time.monotonic()
+                rss_before_mb = _worker_rss_mb()
                 try:
                     _handle_control_task(task_kind, task_payload)
                     send_to_gui("STATUS:Task Complete")
@@ -788,6 +1137,38 @@ def main():
                         "Control task complete kind=%s elapsed=%.3fs",
                         task_kind,
                         time.monotonic() - task_start,
+                    )
+                    _log_task_memory(
+                        f"control kind={task_kind}",
+                        started=task_start,
+                        rss_before_mb=rss_before_mb,
+                    )
+                except _HANDLED_TASK_EXCEPTIONS as exc:
+                    error_line = f"{type(exc).__name__}: {exc}"
+                    send_to_gui(
+                        "REMOTE_OPEN_RESULT",
+                        {
+                            "session_id": str((task_payload or {}).get("session_id", "")),
+                            "uri": str((task_payload or {}).get("uri", "")),
+                            "ok": False,
+                            "error": error_line,
+                        },
+                    )
+                    descriptor_hash = str((task_payload or {}).get("descriptor_hash", ""))
+                    session_id = str((task_payload or {}).get("session_id", ""))
+                    if descriptor_hash and session_id:
+                        _send_remote_status(
+                            "failed",
+                            session_id=session_id,
+                            descriptor_hash=descriptor_hash,
+                            message=error_line,
+                        )
+                    send_to_gui(f"STATUS:Error - {error_line}")
+                    logger.error("Control task handled error kind=%s: %s", task_kind, error_line)
+                    _log_task_memory(
+                        f"control_failed kind={task_kind}",
+                        started=task_start,
+                        rss_before_mb=rss_before_mb,
                     )
                 except Exception:
                     err = traceback.format_exc()
@@ -812,11 +1193,17 @@ def main():
                         )
                     send_to_gui(f"STATUS:Error - {error_line}")
                     logger.exception("Control task failed: %s", task_kind)
+                    _log_task_memory(
+                        f"control_failed kind={task_kind}",
+                        started=task_start,
+                        rss_before_mb=rss_before_mb,
+                    )
                 current_block = []
                 continue
 
             if save_path:
                 try:
+                    _ensure_worker_runtime_loaded()
                     destination = Path(save_path).expanduser()
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     script_text = _build_saved_plot_script(exec_code)
@@ -828,6 +1215,9 @@ def main():
                     send_to_gui(f"STATUS:Error - failed to save plot code: {save_path}")
 
             try:
+                task_start = time.monotonic()
+                rss_before_mb = _worker_rss_mb()
+                _ensure_worker_runtime_loaded()
                 # Execute the code block in our persistent global namespace
                 logger.info(
                     "PLOT_DIAG worker_exec_start pid=%s backend=%s emit_image=%s",
@@ -840,11 +1230,30 @@ def main():
                     _emit_latest_plot_image()
                 send_to_gui("STATUS:Task Complete")
                 logger.info("Task complete")
+                _log_task_memory(
+                    "exec_task",
+                    started=task_start,
+                    rss_before_mb=rss_before_mb,
+                )
+            except _HANDLED_TASK_EXCEPTIONS as exc:
+                error_line = f"{type(exc).__name__}: {exc}"
+                send_to_gui(f"STATUS:Error - {error_line}")
+                logger.error("Task handled error: %s", error_line)
+                _log_task_memory(
+                    "exec_task_failed",
+                    started=task_start,
+                    rss_before_mb=rss_before_mb,
+                )
             except Exception:
                 # Send the full error back to the GUI for debugging
                 err = traceback.format_exc()
                 send_to_gui(f"STATUS:Error - {err.splitlines()[-1]}")
                 logger.exception("Task failed")
+                _log_task_memory(
+                    "exec_task_failed",
+                    started=task_start,
+                    rss_before_mb=rss_before_mb,
+                )
 
             current_block = []
         else:

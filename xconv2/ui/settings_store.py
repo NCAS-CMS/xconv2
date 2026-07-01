@@ -32,6 +32,7 @@ class SettingsStore:
             "recent_files": [],
             "recent_uri_aliases": {},
             "remote_s3_reductionist_locations": {},
+            "last_vector_options": {},
             "max_recent_files": self.default_max_recent_files,
             "last_remote_configuration": {
                 "protocol_index": 0,
@@ -176,6 +177,10 @@ class SettingsStore:
             }
         else:
             settings["remote_s3_reductionist_locations"] = {}
+
+        last_vector_options = settings.get("last_vector_options")
+        if not isinstance(last_vector_options, dict):
+            settings["last_vector_options"] = {}
 
         self._migrate_https_settings(settings)
 

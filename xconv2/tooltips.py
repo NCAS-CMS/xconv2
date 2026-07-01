@@ -27,6 +27,24 @@ above the plot area.</p>
 """,
 )
 
+FIELDS_HELP: tuple[str, str] = (
+    "Fields Information",
+    """<p><b>Fields Information</b></p>
+    <p> This panel shows the fields that have been loaded into, or derived within, the application.</p>
+    <p> The fields are listed in a flat list.  
+    Information about any given field can be obtained by clicking on it, and information will appear 
+    in the panel to the right of the field list. </p>
+    <p> In single-file mode, if you open a new file, all the existing fields will be cleared and replaced with
+    fields from the new file.</p>
+    <p>In multi-file mode, if you open a new file, the fields from that file will be added 
+    to the existing list of fields, with field backgrounds coloured according to their source. The file dropdown which
+    appears in multi-file mode provides the association between source file and field background colour.
+    When fields are generated within <i>xconv2</i>, they will also appear in this panel, with a white background. 
+    </p>    
+    <p> Fields can be removed from this list by right clicking on them and selecting "Remove" from the context menu. </p>
+   """, 
+)
+
 PLOTTING_AND_EXPORTING: tuple[str, str] = (
     "Plotting and Exporting",
     """<p><b>Plotting and Exporting</b></p>

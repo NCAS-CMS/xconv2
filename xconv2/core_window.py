@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 from PySide6.QtCore import QProcess, QTimer, Qt, QUrl
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QButtonGroup,
     QCheckBox,
@@ -43,9 +44,11 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QStatusBar,
+    QStackedWidget,
     QSpinBox,
     QStyle,
     QSystemTrayIcon,
@@ -54,17 +57,19 @@ from PySide6.QtWidgets import (
     QToolButton,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from . import __version__
 from .ui.contour_options_controller import ContourOptionsController
 from .ui.field_metadata_controller import FieldMetadataController
 from .ui.lineplot_options_controller import LineplotOptionsController
+from .ui.vector_options_controller import VectorOptionsController
 from .ui.menu_controller import MenuController
 from .ui.plot_view_controller import PlotViewController
 from .ui.selection_controller import SelectionController
 from .ui.dialogs import OpenGlobDialog, OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog, create_info_button
-from .tooltips import CACHE_MANAGEMENT, SELECTION_HELP
+from .tooltips import CACHE_MANAGEMENT, FIELDS_HELP, SELECTION_HELP
 # RemoteFileNavigatorDialog is imported lazily (inside the methods that open it)
 # to avoid loading p5rem/paramiko at GUI startup.
 from .ui.settings_store import SettingsStore
@@ -87,6 +92,38 @@ DEFAULT_MAX_RECENT_FILES = 10
 SETTINGS_VERSION = 1
 STATUSBAR_NORMAL_STYLE = ""
 STATUSBAR_ERROR_STYLE = "QStatusBar { color: #c62828; font-weight: 600; }"
+
+
+class CopyableStatusBar(QStatusBar):
+    """Status bar whose message text is selectable and copyable."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._message_label = QLabel("")
+        self._message_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
+        )
+        self._message_label.setToolTip("Select status text to copy.")
+        self.addWidget(self._message_label, 1)
+
+        copy_status_action = QAction("Copy Status Message", self)
+        copy_status_action.triggered.connect(
+            lambda: QApplication.clipboard().setText(self._message_label.text())
+        )
+        self._message_label.addAction(copy_status_action)
+        self._message_label.setContextMenuPolicy(Qt.ActionsContextMenu)
+
+    def showMessage(self, message: str, timeout: int = 0) -> None:  # type: ignore[override]
+        _ = timeout
+        self._message_label.setText(message)
+        self.messageChanged.emit(message)
+
+    def clearMessage(self) -> None:  # type: ignore[override]
+        self._message_label.clear()
+        self.messageChanged.emit("")
+
+    def currentMessage(self) -> str:  # type: ignore[override]
+        return self._message_label.text()
 
 
 
@@ -467,6 +504,7 @@ class CFVCore(QMainWindow):
         self.plot_view_controller = PlotViewController(self)
         self.contour_options_controller = ContourOptionsController(self)
         self.lineplot_options_controller = LineplotOptionsController(self)
+        self.vector_options_controller = VectorOptionsController(self)
         self._settings = self._load_settings()
         self.setWindowTitle(self.base_window_title)
         self.resize(1000, 700)
@@ -482,10 +520,23 @@ class CFVCore(QMainWindow):
         self.last_varying_dims: int | None = None
         self.available_plot_kinds: list[str] = []
         self.selected_plot_kind: str | None = None
+        self.selected_plot_action: str = "plot"
         self.plot_options_by_kind: dict[str, dict[str, object]] = {}
+        persisted_vector_options = self._settings.get("last_vector_options")
+        if isinstance(persisted_vector_options, dict):
+            self.plot_options_by_kind["vector"] = dict(persisted_vector_options)
+        self._last_contour_plot_context: dict[str, object] | None = None
         self._plot_pixmap_original: QPixmap | None = None
         self.current_selection_info_text = "No selection info available."
         self.slider_scroll_area: QScrollArea | None = None
+        self.selection_mode_stack: QStackedWidget | None = None
+        self.selection_mode: str = "single"
+        self.coordinate_bounds_input: QPlainTextEdit | None = None
+        self.file_open_mode: str = "single"
+        self.single_file_mode_radio: QRadioButton | None = None
+        self.multi_file_mode_radio: QRadioButton | None = None
+        self.open_files_button: QPushButton | None = None
+        self.open_files_menu: QMenu | None = None
         self.selection_info_toggle_button: QToolButton | None = None
         self._selection_info_visible = True
         self._selection_info_expanded_from_width: int | None = None
@@ -609,11 +660,11 @@ class CFVCore(QMainWindow):
             "High-performance data viewer and simple data converter."
             "</p>"
             "<p> Provides a graphical interface to explore and plot CF-compliant (and near compliant) datasets, " 
-            "stored in NetCDF, Zarr, or Met Office pp/fields files. Supports file conversion and simple" 
+            "stored in NetCDF, Zarr, or Met Office pp/fields files. Supports file conversion and simple " 
             "data manipulation. All data saved will be CF-compliant." 
             "</p>"
             "<p>Maintained by NCAS-Computational Modelling Services (NCAS-CMS) at the University of Reading. "
-            "Powered by cf-python, pyfive, and Dask."
+            "Powered by cf-python, cf-plot, pyfive, fsspec, and Dask."
             "</p>"
         )
         heading.setTextFormat(Qt.RichText)
@@ -1381,48 +1432,259 @@ class CFVCore(QMainWindow):
 
     def _create_fields_frame(self) -> QGroupBox:
         """Create framed fields list section."""
-        frame = QGroupBox("Fields")
+        frame = QGroupBox()
         layout = QVBoxLayout(frame)
 
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(8)
+        fields_label = QLabel("Fields")
+        fields_label.setStyleSheet("font-weight: 600;")
+        header_row.addWidget(fields_label)
+        fields_info_button = create_info_button(
+            self,
+            *FIELDS_HELP,
+            icon_size=18,
+        )
+        header_row.addWidget(fields_info_button)
+        header_row.addStretch(1)
+
+        self.single_file_mode_radio = QRadioButton("single-file")
+        self.multi_file_mode_radio = QRadioButton("multi-file")
+        self.single_file_mode_radio.setChecked(True)
+        self.single_file_mode_radio.toggled.connect(
+            lambda checked: self._on_file_open_mode_changed("single", checked)
+        )
+        self.multi_file_mode_radio.toggled.connect(
+            lambda checked: self._on_file_open_mode_changed("multi", checked)
+        )
+
+        header_row.addWidget(self.single_file_mode_radio)
+        header_row.addWidget(self.multi_file_mode_radio)
+
+        self.open_files_button = self._create_open_files_button()
+        self.open_files_button.setVisible(False)
+        header_row.addWidget(self.open_files_button)
+        layout.addLayout(header_row)
+
         self.field_list_widget = QListWidget()
+        self.field_list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.field_list_widget.itemClicked.connect(self.on_field_clicked)
+        self.field_list_widget.itemSelectionChanged.connect(self.on_field_selection_changed)
+        self.field_list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.field_list_widget.customContextMenuRequested.connect(self._show_field_list_context_menu)
         self._set_field_list_visible_rows(self._field_list_rows())
         self._set_field_list_hint("Open a file to see fields")
+        self._refresh_open_files_menu()
 
         layout.addWidget(self.field_list_widget)
         return frame
 
+    def _create_open_files_button(self) -> QPushButton:
+        """Create fixed-width Files dropdown button for currently loaded files."""
+        button = QPushButton()
+        button.setText("Files ")
+        button.setFlat(False)
+        button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+        text_width = button.fontMetrics().horizontalAdvance("Files ")
+        button.setFixedWidth(text_width + 30)
+
+        self.open_files_menu = QMenu(button)
+        button.setMenu(self.open_files_menu)
+        return button
+
+    def _refresh_open_files_menu(self) -> None:
+        """Refresh Files dropdown entries from currently loaded file paths."""
+        menu = getattr(self, "open_files_menu", None)
+        if menu is None:
+            return
+
+        menu.clear()
+
+        loaded = list(getattr(self, "_loaded_file_paths", []))
+        if not loaded:
+            empty_action = menu.addAction("No open files")
+            empty_action.setEnabled(False)
+            return
+
+        source_colors = getattr(self, "_field_source_color_by_path", None)
+        color_map = source_colors if isinstance(source_colors, dict) else {}
+
+        for path in loaded:
+            parsed = urlparse(path)
+            filename = Path(parsed.path).name if parsed.scheme else Path(path).name
+            display = filename or path
+            color = color_map.get(path)
+            menu.addAction(self._build_open_file_menu_entry(menu, display, path, color))
+
+    def _build_open_file_menu_entry(
+        self,
+        menu: QMenu,
+        display: str,
+        full_path: str,
+        color: object,
+    ) -> QWidgetAction:
+        """Create a non-interactive dropdown row for an open file entry."""
+        action = QWidgetAction(menu)
+        row = QWidget(menu)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(0)
+
+        label = QLabel(display)
+        label.setToolTip(full_path)
+        label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        if hasattr(color, "name"):
+            label.setStyleSheet(
+                f"QLabel {{ background-color: {color.name()}; padding: 2px 6px; border-radius: 3px; }}"
+            )
+        else:
+            label.setStyleSheet("QLabel { padding: 2px 6px; }")
+
+        layout.addWidget(label)
+        action.setDefaultWidget(row)
+        return action
+
+    def _on_file_open_mode_changed(self, mode: str, checked: bool) -> None:
+        """Update file-open mode from radio-button toggles."""
+        if not checked:
+            return
+        self.file_open_mode = "multi" if mode == "multi" else "single"
+        self._sync_open_files_button_visibility()
+
+    def _set_file_open_mode(self, mode: str) -> None:
+        """Set file-open mode and synchronize radio-button state."""
+        normalized_mode = "multi" if mode == "multi" else "single"
+        self.file_open_mode = normalized_mode
+
+        single_radio = getattr(self, "single_file_mode_radio", None)
+        multi_radio = getattr(self, "multi_file_mode_radio", None)
+        if single_radio is not None:
+            single_radio.blockSignals(True)
+            single_radio.setChecked(normalized_mode == "single")
+            single_radio.blockSignals(False)
+        if multi_radio is not None:
+            multi_radio.blockSignals(True)
+            multi_radio.setChecked(normalized_mode == "multi")
+            multi_radio.blockSignals(False)
+
+        self._sync_open_files_button_visibility()
+
+    def _sync_open_files_button_visibility(self) -> None:
+        """Show the Files dropdown only when multi-file mode is active."""
+        button = getattr(self, "open_files_button", None)
+        if button is not None:
+            button.setVisible(getattr(self, "file_open_mode", "single") == "multi")
+
     def _create_selection_frame(self) -> QGroupBox:
         """Create framed selection details and slider controls section."""
-        frame = QGroupBox("Selection")
+        frame = QGroupBox()
         layout = QVBoxLayout(frame)
+        layout.setContentsMargins(9, 6, 9, 9)
+        layout.setSpacing(4)
 
-        controls_row = QHBoxLayout()
-        
-        # Info button for selection help
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(6)
+        selection_label = QLabel("Selection")
+        selection_label.setStyleSheet("font-weight: 600;")
+        header_row.addWidget(selection_label)
+
         selection_info_button = create_info_button(
             self,
             *SELECTION_HELP,
-            icon_size=18
+            icon_size=18,
         )
-        
+        header_row.addWidget(selection_info_button)
+        header_row.addStretch(1)
+        layout.addLayout(header_row)
+
+        controls_row = QHBoxLayout()
+        controls_row.setContentsMargins(0, 0, 0, 0)
+        controls_row.setSpacing(6)
+
         properties_button = QPushButton("Properties")
         properties_button.clicked.connect(self._show_selection_properties)
         reset_button = QPushButton("Reset all sliders")
         reset_button.setToolTip("Reset all range sliders to full coordinate extent")
         reset_button.clicked.connect(self._reset_all_sliders)
+        self.selection_reset_button = reset_button
         self.selection_info_toggle_button = QToolButton()
         self.selection_info_toggle_button.setAutoRaise(True)
         self.selection_info_toggle_button.clicked.connect(self._toggle_selection_info_panel)
-        controls_row.addWidget(selection_info_button)
         controls_row.addWidget(properties_button)
         controls_row.addWidget(reset_button)
         controls_row.addStretch(1)
         controls_row.addWidget(self.selection_info_toggle_button)
 
         layout.addLayout(controls_row)
-        layout.addWidget(self._create_slider_scroll_area())
+
+        self.selection_mode_stack = QStackedWidget()
+        self.selection_mode_stack.addWidget(self._create_slider_scroll_area())
+        self.selection_mode_stack.addWidget(self._create_multi_field_bounds_panel())
+        layout.addWidget(self.selection_mode_stack)
+        self._set_selection_panel_mode("single")
         return frame
+
+    def _create_multi_field_bounds_panel(self) -> QWidget:
+        """Create text-entry panel for coordinate subspace commands."""
+        panel = QWidget()
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(6, 0, 6, 0)
+        panel_layout.setSpacing(4)
+
+        hint = QLabel(
+            "Enter one coordinate bounds command per line.\n"
+            "Formats: coord=lo:hi, coord: lo,hi, or coord lo hi"
+        )
+        hint.setWordWrap(True)
+
+        self.coordinate_bounds_input = QPlainTextEdit()
+        self.coordinate_bounds_input.setPlaceholderText(
+            "time=2000-01-01:2000-12-31\nlatitude=-20:20\nlongitude=30,120"
+        )
+        self.coordinate_bounds_input.textChanged.connect(self._on_coordinate_bounds_input_changed)
+
+        panel_layout.addWidget(hint)
+        panel_layout.addWidget(self.coordinate_bounds_input)
+        return panel
+
+    def _set_selection_panel_mode(self, mode: str) -> None:
+        """Switch selection panel between slider and bounds-entry modes."""
+        normalized_mode = "multi" if mode == "multi" else "single"
+        self.selection_mode = normalized_mode
+
+        selection_mode_stack = getattr(self, "selection_mode_stack", None)
+        if selection_mode_stack is not None:
+            selection_mode_stack.setCurrentIndex(1 if normalized_mode == "multi" else 0)
+
+        reset_button = getattr(self, "selection_reset_button", None)
+        if reset_button is not None:
+            if normalized_mode == "multi":
+                reset_button.setText("Clear bounds")
+                reset_button.setToolTip("Clear coordinate bounds commands")
+            else:
+                reset_button.setText("Reset all sliders")
+                reset_button.setToolTip("Reset all range sliders to full coordinate extent")
+
+    def _coordinate_subspace_command_text(self) -> str:
+        """Return raw coordinate-bounds command text from the selection panel."""
+        if self.coordinate_bounds_input is None:
+            return ""
+        return self.coordinate_bounds_input.toPlainText().strip()
+
+    def _clear_coordinate_subspace_commands(self) -> None:
+        """Clear coordinate-bounds command text without triggering parser side effects."""
+        if self.coordinate_bounds_input is None:
+            return
+        self.coordinate_bounds_input.blockSignals(True)
+        self.coordinate_bounds_input.clear()
+        self.coordinate_bounds_input.blockSignals(False)
+
+    def _on_coordinate_bounds_input_changed(self) -> None:
+        """Hook for worker-backed windows when coordinate bounds text changes."""
 
     def _create_field_list_area(self) -> QWidget:
         """Backward-compat shim kept for now; use framed builders above."""
@@ -1454,6 +1716,10 @@ class CFVCore(QMainWindow):
 
     def _reset_all_sliders(self) -> None:
         """Reset all slider ranges to full extent and refresh summary state."""
+        if getattr(self, "selection_mode", "single") == "multi":
+            self._clear_coordinate_subspace_commands()
+            self._on_coordinate_bounds_input_changed()
+            return
         self.selection_controller.reset_all_sliders()
 
     def _set_field_list_hint(self, text: str) -> None:
@@ -1606,7 +1872,7 @@ class CFVCore(QMainWindow):
 
     def _setup_status_bar(self) -> None:
         """Create and initialize the status bar."""
-        self.status = QStatusBar()
+        self.status = CopyableStatusBar(self)
         self.setStatusBar(self.status)
         self._show_status_message("System Ready. Initialize S3 Load.")
 
@@ -1616,9 +1882,21 @@ class CFVCore(QMainWindow):
         self.status.setStyleSheet(style)
         self.status.showMessage(message)
 
-    def populate_field_list(self, fields: Sequence[object]) -> None:
+    def populate_field_list(
+        self,
+        fields: Sequence[object],
+        *,
+        append: bool = False,
+        source_file: str | None = None,
+        generated: bool = False,
+    ) -> None:
         """Populate the field list UI from worker metadata."""
-        self.field_metadata_controller.populate_field_list(fields)
+        self.field_metadata_controller.populate_field_list(
+            fields,
+            append=append,
+            source_file=source_file,
+            generated=generated,
+        )
 
     def on_field_clicked(self, item: QListWidgetItem) -> None:
         """Display selected field details in the output panel."""
@@ -1648,6 +1926,12 @@ class CFVCore(QMainWindow):
         """Clear field, slider, details, and plot UI for a fresh dataset open."""
         self.current_file_path = None
         self.setWindowTitle(self.base_window_title)
+        set_mode = getattr(self, "_set_selection_panel_mode", None)
+        if callable(set_mode):
+            set_mode("single")
+        clear_bounds = getattr(self, "_clear_coordinate_subspace_commands", None)
+        if callable(clear_bounds):
+            clear_bounds()
         self.current_selection_info_text = "No selection info available."
         info_widget = getattr(self, "plot_info_output", None)
         if info_widget is not None:
@@ -1680,6 +1964,24 @@ class CFVCore(QMainWindow):
         self._record_recent_file(file_path)
         self.on_file_selected(file_path)
 
+    def _choose_files(self) -> None:
+        """Select multiple files and dispatch to worker-backed loaders."""
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Data Files",
+            "",
+            "NetCDF files (*.nc *.nc4 *.cdf);;All files (*)",
+        )
+        if not file_paths:
+            return
+
+        for file_path in file_paths:
+            self._record_recent_file(file_path)
+
+        self.setWindowTitle(f"{self.base_window_title}: {len(file_paths)} files")
+        logger.info("Selected %d files", len(file_paths))
+        self.on_files_selected(file_paths)
+
 
     def _choose_folder(self) -> None:
         folder_path = QFileDialog.getExistingDirectory(
@@ -1701,6 +2003,83 @@ class CFVCore(QMainWindow):
             "Not implemented",
             f"{capability} is not implemented yet.",
         )
+
+    def _show_field_list_context_menu(self, pos) -> None:
+        """Show context actions for the field list."""
+        if self.field_list_widget is None:
+            return
+
+        item = self.field_list_widget.itemAt(pos)
+        if item is not None and not item.isSelected():
+            self.field_list_widget.clearSelection()
+            item.setSelected(True)
+            self.field_list_widget.setCurrentItem(item)
+
+        selected_items = self.field_list_widget.selectedItems()
+        if not selected_items:
+            return
+
+        menu = QMenu(self.field_list_widget)
+        remove_action = menu.addAction("Remove selected field(s)")
+        chosen = menu.exec(self.field_list_widget.mapToGlobal(pos))
+        if chosen == remove_action:
+            self._remove_selected_fields()
+
+    def _remove_selected_fields(self) -> None:
+        """Remove selected fields from the current list (worker-backed windows override)."""
+        self._show_not_implemented_dialog("Remove selected fields")
+
+    def _field_ops_apply_selection(self) -> None:
+        """Placeholder action for Field Ops -> Apply Selection."""
+        self._show_not_implemented_dialog("Field Ops: Apply Selection")
+
+    def _field_ops_add_bounds(self) -> None:
+        """Create missing dimension-coordinate bounds on the selected field."""
+        self._show_not_implemented_dialog("Field Ops: Add Bounds")
+
+    def _field_ops_regrid(self) -> None:
+        """Placeholder action for Field Ops -> Regrid."""
+        self._show_not_implemented_dialog("Field Ops: Regrid")
+
+    def _field_ops_replay_last_operations(self) -> None:
+        """Placeholder action for Field Ops -> Replay Last Field Operations."""
+        self._show_not_implemented_dialog("Field Ops: Replay Last Field Operations")
+
+    def _field_ops_maths(self) -> None:
+        """Placeholder action for Field Ops -> Maths."""
+        self._show_not_implemented_dialog("Field Ops: Maths")
+
+    def _field_ops_maths_difference_ab(self) -> None:
+        """Placeholder action for Field Ops -> Maths -> Difference (A-B)."""
+        self._show_not_implemented_dialog("Field Ops: Maths -> Difference (A-B)")
+
+    def _field_ops_maths_difference_ba(self) -> None:
+        """Placeholder action for Field Ops -> Maths -> Difference (B-A)."""
+        self._show_not_implemented_dialog("Field Ops: Maths -> Difference (B-A)")
+
+    def _field_ops_maths_grad(self) -> None:
+        """Placeholder action for Field Ops -> Maths -> Grad."""
+        self._show_not_implemented_dialog("Field Ops: Maths -> Grad")
+
+    def _field_ops_maths_laplacian(self) -> None:
+        """Placeholder action for Field Ops -> Maths -> Laplacian."""
+        self._show_not_implemented_dialog("Field Ops: Maths -> Laplacian")
+
+    def _field_ops_maths_filter(self) -> None:
+        """Placeholder action for Field Ops -> Maths -> Filter."""
+        self._show_not_implemented_dialog("Field Ops: Maths -> Filter")
+
+    def _file_ops_save_selected(self) -> None:
+        """Placeholder action for File Ops -> Save Selected."""
+        self._show_not_implemented_dialog("File Ops: Save Selected")
+
+    def _input_load_and_run_prov(self) -> None:
+        """Placeholder action for Input -> Load & Run Prov."""
+        self._show_not_implemented_dialog("Input: Load & Run Prov")
+
+    def _file_ops_save_selected_provenance(self) -> None:
+        """Placeholder action for File Ops -> Save Selected Provenance."""
+        self._show_not_implemented_dialog("File Ops: Save Selected Provenance")
 
     def _choose_glob(self) -> None:
         """Open files using a user-provided local glob expression."""
@@ -1841,6 +2220,21 @@ class CFVCore(QMainWindow):
         """Hook for worker-backed implementations after file selection."""
         logger.debug("File selected in core UI: %s", file_path)
 
+    def on_files_selected(self, file_paths: Sequence[str]) -> None:
+        """Hook for worker-backed implementations after multi-file selection."""
+        logger.debug("Files selected in core UI: %d", len(file_paths))
+
+    def on_field_selection_changed(self) -> None:
+        """Update detail panel when list selection changes."""
+        selected_items = self.field_list_widget.selectedItems()
+        if len(selected_items) == 1:
+            self.field_metadata_controller.on_field_clicked(selected_items[0])
+        elif len(selected_items) > 1:
+            self.field_metadata_controller.set_selection_info_text(
+                f"{len(selected_items)} fields selected.\n"
+                "Use coordinate bounds mode for multi-field operations."
+            )
+
     def _request_plot_update(self) -> None:
         """Hook for worker-backed implementations."""
 
@@ -1863,6 +2257,10 @@ class CFVCore(QMainWindow):
     def _show_lineplot_options_dialog(self) -> None:
         """Show lineplot options dialog and persist selected options."""
         self.lineplot_options_controller.show_lineplot_options_dialog()
+
+    def _show_vector_options_dialog(self, current_field_index: int) -> None:
+        """Show vector options dialog and persist selected options."""
+        self.vector_options_controller.show_vector_options_dialog(current_field_index)
 
     def _show_annotation_properties_chooser(
         self,

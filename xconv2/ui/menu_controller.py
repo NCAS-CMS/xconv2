@@ -67,7 +67,7 @@ class MenuController:
         quit_action.triggered.connect(self.host._quit_application)
         xconv_menu.addAction(quit_action)
 
-        file_menu = menu_bar.addMenu("&File")
+        file_menu = menu_bar.addMenu("&Input")
 
 
         open_file_action = QAction("Open File... ", self.host)
@@ -92,10 +92,66 @@ class MenuController:
         open_uris_action.triggered.connect(self.host._choose_uris)
         file_menu.addAction(open_uris_action)
 
+        load_run_prov_action = QAction("Load & Run Prov", self.host)
+        load_run_prov_action.triggered.connect(self.host._input_load_and_run_prov)
+        file_menu.addAction(load_run_prov_action)
+
         self.host.recent_menu = file_menu.addMenu("Recent")
         self.refresh_recent_menu()
 
         file_menu.addSeparator()
+
+        field_ops_menu = menu_bar.addMenu("Operations")
+        apply_selection_action = QAction("Apply Selection", self.host)
+        apply_selection_action.triggered.connect(self.host._field_ops_apply_selection)
+        field_ops_menu.addAction(apply_selection_action)
+
+        add_bounds_action = QAction("Add Bounds", self.host)
+        add_bounds_action.triggered.connect(self.host._field_ops_add_bounds)
+        field_ops_menu.addAction(add_bounds_action)
+
+        regrid_action = QAction("Regrid", self.host)
+        regrid_action.triggered.connect(self.host._field_ops_regrid)
+        field_ops_menu.addAction(regrid_action)
+
+        replay_action = QAction("Replay Last Field Operations", self.host)
+        replay_action.triggered.connect(self.host._field_ops_replay_last_operations)
+        field_ops_menu.addAction(replay_action)
+
+        field_ops_menu.addSeparator()
+
+        maths_menu = field_ops_menu.addMenu("Maths")
+
+        difference_ab_action = QAction("Difference (A-B)", self.host)
+        difference_ab_action.triggered.connect(self.host._field_ops_maths_difference_ab)
+        maths_menu.addAction(difference_ab_action)
+
+        difference_ba_action = QAction("Difference (B-A)", self.host)
+        difference_ba_action.triggered.connect(self.host._field_ops_maths_difference_ba)
+        maths_menu.addAction(difference_ba_action)
+
+        maths_menu.addSeparator()
+
+        grad_action = QAction("Grad", self.host)
+        grad_action.triggered.connect(self.host._field_ops_maths_grad)
+        maths_menu.addAction(grad_action)
+
+        laplacian_action = QAction("Laplacian", self.host)
+        laplacian_action.triggered.connect(self.host._field_ops_maths_laplacian)
+        maths_menu.addAction(laplacian_action)
+
+        filter_action = QAction("Filter", self.host)
+        filter_action.triggered.connect(self.host._field_ops_maths_filter)
+        maths_menu.addAction(filter_action)
+
+        file_ops_menu = menu_bar.addMenu("Output")
+        save_selected_action = QAction("Save Selected", self.host)
+        save_selected_action.triggered.connect(self.host._file_ops_save_selected)
+        file_ops_menu.addAction(save_selected_action)
+
+        save_selected_prov_action = QAction("Save Selected Provenance", self.host)
+        save_selected_prov_action.triggered.connect(self.host._file_ops_save_selected_provenance)
+        file_ops_menu.addAction(save_selected_prov_action)
 
         self._setup_help_menu(menu_bar, menu_font_size_px, menu_font_weight)
 

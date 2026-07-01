@@ -1024,7 +1024,7 @@ class RemoteFileNavigatorDialog(QDialog):
         """Call filesystem ls and return normalized entries before UI filtering."""
         if self._list_callback is not None:
             return self._list_callback(path)
-        listing = self._filesystem.ls(path, detail=True)
+        listing = remote_core.list_directory_entries(self._filesystem, path, detail=True)
         if not isinstance(listing, list):
             raise RuntimeError(f"Unexpected listing result for {path!r}")
         entries = normalize_remote_entries(listing)
@@ -1102,7 +1102,7 @@ class RemoteFileNavigatorDialog(QDialog):
         item.setData(0, self._ROLE_DATA, data)
 
     def _on_selection_changed(self) -> None:
-        """Update selection state and enable Open only for files."""
+        """Update selection state and enable Open for files and Zarr stores."""
         selected = self.tree.selectedItems()
         if not selected:
             self._selected_uri = ""
@@ -1118,19 +1118,22 @@ class RemoteFileNavigatorDialog(QDialog):
 
         path = str(data.get("path", ""))
         is_dir = bool(data.get("is_dir"))
-        self._selected_path = "" if is_dir else path
-        self._selected_uri = "" if is_dir else build_remote_uri(self._spec, path)
+        is_zarr = bool(data.get("is_zarr"))
+        openable = bool(path) and (not is_dir or is_zarr)
+
+        self._selected_path = path if openable else ""
+        self._selected_uri = build_remote_uri(self._spec, path) if openable else ""
         self.selection_label.setText(path or "No file selected")
-        self.open_button.setEnabled(not is_dir and bool(path))
+        self.open_button.setEnabled(openable)
 
     def _on_item_double_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
-        """Open a file immediately on double click."""
+        """Open a file or Zarr store immediately on double click."""
         data = item.data(0, self._ROLE_DATA) or {}
-        if isinstance(data, dict) and not bool(data.get("is_dir")):
+        if isinstance(data, dict) and (not bool(data.get("is_dir")) or bool(data.get("is_zarr"))):
             self.accept()
 
     def selected_uri(self) -> str:
-        """Return the currently selected remote file URI."""
+        """Return the currently selected remote file or Zarr-store URI."""
         return self._selected_uri
 
     def selected_path(self) -> str:
@@ -1138,9 +1141,9 @@ class RemoteFileNavigatorDialog(QDialog):
         return self._selected_path
 
     def accept(self) -> None:  # type: ignore[override]
-        """Require a file selection before closing with success."""
+        """Require an openable file or Zarr-store selection before closing with success."""
         if not self._selected_uri:
-            QMessageBox.warning(self, "No file selected", "Select a remote file before opening.")
+            QMessageBox.warning(self, "No file selected", "Select a remote file or Zarr store before opening.")
             return
         super().accept()
 
@@ -1186,7 +1189,7 @@ class RemoteFileNavigatorDialog(QDialog):
                 cache=config.get("cache") if isinstance(config, dict) else None,
             )
             _log_line(f"Checking remote root: {spec.root_path or '/'}")
-            listing = filesystem.ls(spec.root_path, detail=True)
+            listing = remote_core.list_directory_entries(filesystem, spec.root_path, detail=True)
             if not isinstance(listing, list):
                 raise RuntimeError(f"Unexpected listing result for {spec.root_path!r}")
             _log_line("Login ready. Opening file picker...")

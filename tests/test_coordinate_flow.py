@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QMessageBox, QStyle
 from xconv2.cache_utils import prune_disk_cache
 from xconv2.main_window import CFVMain
 from xconv2.core_window import CFVCore
+from xconv2.ui.selection_controller import SelectionController
 from xconv2.ui.plot_view_controller import PlotViewController
 
 
@@ -55,9 +56,16 @@ class _FakeWorker:
 class _FakeRangeSlider:
     def __init__(self, bounds: tuple[int, int]) -> None:
         self._bounds = bounds
+        self.signal_blocks: list[bool] = []
 
     def value(self) -> tuple[int, int]:
         return self._bounds
+
+    def setValue(self, bounds: tuple[int, int]) -> None:
+        self._bounds = bounds
+
+    def blockSignals(self, state: bool) -> None:
+        self.signal_blocks.append(state)
 
 
 @dataclass
@@ -123,14 +131,22 @@ class _DummyCoordRequestMain:
 class _DummyPlotOptionsMain:
     _context: tuple[dict[str, tuple[object, object]], dict[str, str], str] | None
     lineplot_dialog_calls: int = 0
+    vector_dialog_calls: list[int] = field(default_factory=list)
     sent_tasks: list[str] = field(default_factory=list)
     status_messages: list[str] = field(default_factory=list)
+    selected_field_index: int | None = 0
 
     def _build_plot_context(self):
         return self._context
 
     def _show_lineplot_options_dialog(self) -> None:
         self.lineplot_dialog_calls += 1
+
+    def _selected_field_index_for_operation(self, _operation: str) -> int | None:
+        return self.selected_field_index
+
+    def _show_vector_options_dialog(self, field_index: int) -> None:
+        self.vector_dialog_calls.append(field_index)
 
     def _send_worker_task(self, code: str, emit_image: bool = True) -> None:
         _ = emit_image
@@ -177,6 +193,49 @@ class _DummyVisibilityPanel:
 
     def isHidden(self) -> bool:
         return not self.visible
+
+
+class _FakeLayoutItem:
+    def __init__(self, widget: object | None = None, layout: object | None = None) -> None:
+        self._widget = widget
+        self._layout = layout
+
+    def widget(self):
+        return self._widget
+
+    def layout(self):
+        return self._layout
+
+
+class _FakeLayout:
+    def __init__(self, items: list[_FakeLayoutItem]) -> None:
+        self._items = list(items)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def takeAt(self, index: int):
+        if not self._items:
+            return None
+        if index != 0:
+            raise AssertionError("test fake expects takeAt(0)")
+        return self._items.pop(0)
+
+
+class _FakeWidget:
+    def __init__(self) -> None:
+        self.deleted = False
+        self.parent = object()
+        self.hidden = False
+
+    def hide(self) -> None:
+        self.hidden = True
+
+    def setParent(self, parent: object | None) -> None:
+        self.parent = parent
+
+    def deleteLater(self) -> None:
+        self.deleted = True
 
 
 @dataclass
@@ -376,6 +435,21 @@ def test_clear_loaded_data_views_resets_field_slider_plot_and_details() -> None:
     assert dummy.loading_calls == [False]
     assert dummy.canvas_messages == ["Waiting for data..."]
     assert dummy.titles == ["xconv2 (test)"]
+
+
+def test_clear_sidebar_layout_drains_items() -> None:
+    fake_widget = _FakeWidget()
+    fake_layout = _FakeLayout([_FakeLayoutItem(widget=fake_widget)])
+    host = types.SimpleNamespace(sidebar=fake_layout)
+    controller = SelectionController.__new__(SelectionController)
+    controller.host = host
+
+    SelectionController._clear_sidebar_layout(controller)
+
+    assert fake_layout.count() == 0
+    assert fake_widget.hidden is True
+    assert fake_widget.parent is None
+    assert fake_widget.deleted is True
 
 
 def test_cache_summary_text_reports_config_and_usage() -> None:
@@ -604,12 +678,142 @@ def test_request_plot_options_shows_lineplot_dialog_when_lineplot_selected() -> 
     assert dummy.status_messages == []
 
 
+def test_request_plot_options_shows_vector_dialog_when_vector_selected() -> None:
+    dummy = _DummyPlotOptionsMain(
+        _context=(
+            {"lat": (-10, 10), "lon": (0, 20)},
+            {},
+            "vector",
+        ),
+        selected_field_index=3,
+    )
+
+    CFVMain._request_plot_options(dummy)
+
+    assert dummy.vector_dialog_calls == [3]
+    assert dummy.lineplot_dialog_calls == 0
+    assert dummy.sent_tasks == []
+
+
+def test_request_plot_task_delegates_to_plot_ops_with_vector_builder(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_request_plot_task(host, **kwargs):
+        captured["host"] = host
+        captured.update(kwargs)
+
+    monkeypatch.setattr("xconv2.main_window._plot_ops.request_plot_task", _fake_request_plot_task)
+
+    host = CFVMain.__new__(CFVMain)
+    CFVMain._request_plot_task(
+        host,
+        save_code_path="/tmp/task.py",
+        save_plot_path="/tmp/plot.png",
+        save_data_path="/tmp/sel.nc",
+        emit_image_override=False,
+    )
+
+    assert captured["host"] is host
+    assert captured["save_code_path"] == "/tmp/task.py"
+    assert captured["save_plot_path"] == "/tmp/plot.png"
+    assert captured["save_data_path"] == "/tmp/sel.nc"
+    assert captured["emit_image_override"] is False
+    assert callable(captured["build_vector_overplot_command_fn"])
+    assert captured["build_vector_overplot_command_fn"].__name__ == "build_vector_overplot_command"
+
+
+def test_plot_ops_request_plot_task_uses_vector_overplot_builder_when_context_present() -> None:
+    class _DummyListWidget:
+        def item(self, _index: int):
+            return None
+
+    class _DummyWorker:
+        def processId(self) -> int:
+            return 999
+
+    class _DummyHost:
+        def __init__(self) -> None:
+            self.field_list_widget = _DummyListWidget()
+            self.worker = _DummyWorker()
+            self.plot_options_by_kind = {"vector": {"v_field_index": 7, "stride": 2}}
+            self.selected_plot_action = "overplot"
+            self._last_contour_plot_context = {
+                "field_index": 1,
+                "selections": {"lat": (-10, 10)},
+                "collapse_by_coord": {},
+                "plot_options": {"title": "base"},
+            }
+            self._plot_request_in_flight = False
+            self._plot_request_expects_image = False
+            self._suppress_stale_error_status = False
+            self.status_messages: list[tuple[str, bool]] = []
+            self.loading_messages: list[tuple[bool, str]] = []
+            self.sent_tasks: list[tuple[str, str | None, bool]] = []
+
+        def _build_plot_context(self):
+            return ({"lat": (-5, 5)}, {}, "vector")
+
+        def _selected_field_index_for_operation(self, _operation: str) -> int | None:
+            return 4
+
+        def _field_identity_from_item(self, _item) -> str:
+            return "field-4"
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.status_messages.append((message, is_error))
+
+        def _show_vector_options_dialog(self, _field_index: int) -> None:
+            raise AssertionError("Vector options dialog should not be needed when v_field_index is set")
+
+        def _set_plot_loading(self, is_loading: bool, message: str = "") -> None:
+            self.loading_messages.append((is_loading, message))
+
+        def _send_worker_task(self, code: str, save_code_path: str | None = None, emit_image: bool = True) -> None:
+            self.sent_tasks.append((code, save_code_path, emit_image))
+
+    host = _DummyHost()
+
+    def _fake_save_data_from_selection(_selections, _collapse, _path) -> str:
+        return "SAVE_DATA_COMMAND"
+
+    def _fake_plot_from_selection(*_args, **_kwargs) -> str:
+        return "PLOT_FROM_SELECTION_COMMAND"
+
+    def _fake_build_vector_overplot_command(**kwargs) -> str:
+        assert kwargs["contour_field_index"] == 1
+        assert kwargs["vector_field_index"] == 4
+        assert kwargs["vector_options"]["v_field_index"] == 7
+        return "VECTOR_OVERPLOT_COMMAND"
+
+    from xconv2.main_window_components import plot_ops
+
+    plot_ops.request_plot_task(
+        host,
+        save_code_path=None,
+        save_plot_path=None,
+        save_data_path=None,
+        emit_image_override=None,
+        save_data_from_selection_fn=_fake_save_data_from_selection,
+        plot_from_selection_fn=_fake_plot_from_selection,
+        build_vector_overplot_command_fn=_fake_build_vector_overplot_command,
+    )
+
+    assert host.sent_tasks
+    code, save_code_path, emit_image = host.sent_tasks[-1]
+    assert "VECTOR_OVERPLOT_COMMAND" in code
+    assert "PLOT_FROM_SELECTION_COMMAND" not in code
+    assert "_cfview_field_index = 4" in code
+    assert save_code_path is None
+    assert emit_image is True
+
+
 def test_on_field_clicked_resets_ui_then_requests_coordinates() -> None:
     """Field click should flow through core handling, reset UI, then request coordinates."""
     window = CFVMain.__new__(CFVMain)
     field_controller = _DummyFieldMetadataController()
     window.field_metadata_controller = field_controller
     window.field_list_widget = _DummyFieldListWidget(index_to_return=7)
+    window._allow_initial_autoplot_on_next_field_click = True
 
     call_order: list[tuple[str, object]] = []
 
@@ -632,6 +836,87 @@ def test_on_field_clicked_resets_ui_then_requests_coordinates() -> None:
         ("reset", None),
         ("request", (7, False)),
     ]
+    assert window._pending_initial_autoplot_field_index == 7
+    assert window._allow_initial_autoplot_on_next_field_click is False
+
+
+def test_on_field_clicked_after_first_click_does_not_set_initial_autoplot_pending() -> None:
+    window = CFVMain.__new__(CFVMain)
+    field_controller = _DummyFieldMetadataController()
+    window.field_metadata_controller = field_controller
+    window.field_list_widget = _DummyFieldListWidget(index_to_return=3)
+    window._allow_initial_autoplot_on_next_field_click = False
+
+    call_order: list[tuple[str, object]] = []
+    window._reset_ui_for_new_field_selection = types.MethodType(
+        lambda self: call_order.append(("reset", None)),
+        window,
+    )
+    window._request_coordinates_for_field = types.MethodType(
+        lambda self, index, show_status=True: call_order.append(("request", (index, show_status))),
+        window,
+    )
+
+    CFVMain.on_field_clicked(window, object())
+
+    assert field_controller.clicked_items
+    assert call_order == [
+        ("reset", None),
+        ("request", (3, False)),
+    ]
+    assert window._pending_initial_autoplot_field_index is None
+
+
+def test_auto_plot_initial_field_selection_collapses_extra_dims_and_requests_contour() -> None:
+    class _DummyFieldList:
+        def selectedItems(self):
+            return [object()]
+
+        def row(self, _item: object) -> int:
+            return 4
+
+    class _DummyPlotViewController:
+        def __init__(self) -> None:
+            self.calls: list[tuple[list[str], str]] = []
+
+        def set_plot_type_options(self, kinds: list[str], selected_kind: str | None) -> None:
+            if selected_kind is None:
+                raise AssertionError("selected kind should not be None")
+            self.calls.append((list(kinds), selected_kind))
+
+    time_slider = _FakeRangeSlider((0, 2))
+    lat_slider = _FakeRangeSlider((0, 3))
+    lon_slider = _FakeRangeSlider((0, 4))
+
+    host = types.SimpleNamespace(
+        _pending_initial_autoplot_field_index=4,
+        field_list_widget=_DummyFieldList(),
+        controls={
+            "time": {"values": [0, 1, 2], "range_slider": time_slider},
+            "latitude": {"values": [-30, -10, 10, 30], "range_slider": lat_slider},
+            "longitude": {"values": [0, 90, 180, 270, 360], "range_slider": lon_slider},
+        },
+        available_plot_kinds=["lineplot", "contour", "vector"],
+        selected_plot_kind=None,
+        plot_view_controller=_DummyPlotViewController(),
+        plot_button=types.SimpleNamespace(isEnabled=lambda: True),
+    )
+    updated_labels: list[str] = []
+    host._update_range_labels = lambda name: updated_labels.append(name)
+    host._refresh_plot_summary = lambda: None
+    requested: list[str] = []
+    host._request_plot_update = lambda: requested.append("plot")
+
+    CFVMain._auto_plot_initial_field_selection(host)
+
+    assert host._pending_initial_autoplot_field_index is None
+    assert time_slider.value() == (0, 0)
+    assert lat_slider.value() == (0, 3)
+    assert lon_slider.value() == (0, 4)
+    assert updated_labels == ["time"]
+    assert host.selected_plot_kind == "contour"
+    assert host.plot_view_controller.calls == [(["lineplot", "contour", "vector"], "contour")]
+    assert requested == ["plot"]
 
 
 def test_handle_worker_output_ignores_stale_error_after_field_reset() -> None:
