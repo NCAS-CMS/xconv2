@@ -47,12 +47,14 @@ def _source_files_for_operation(operation: dict[str, object]) -> list[str]:
 
 
 def _source_qname(uri: str) -> str:
-    """Return a stable source entity identifier for a URI/path."""
+    """
+    Return a stable source entity identifier for a URI/path.
+    """
+    import hashlib
     parsed = urlparse(uri)
-    if parsed.scheme in {"http", "https", "s3"}:
-        return f"xconv:source_{abs(hash(uri))}"
-    return f"xconv:source_{abs(hash(Path(uri).as_posix()))}"
-
+    canonical = uri if parsed.scheme in {"http", "https", "s3"} else Path(uri).as_posix()
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return f"xconv:source_{digest}"
 
 def workflow_to_prov_json_dict(
     workflow: dict[str, object],
