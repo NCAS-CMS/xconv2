@@ -108,11 +108,11 @@ class RemoteFilesystemSpec:
 
 def _maybe_wrap_ppfive(filesystem: Any, path: str, protocol: str) -> Any:
     """Return a ppfive.File or a plain open handle for the path."""
+    fh = filesystem.open(path, "rb")
     if (
-            protocol in {"http", "s3"}
-            and PurePosixPath(path).suffix.lower() in _PP_FORMAT_EXTENSIONS
+        protocol in {"http", "s3"}
+        and PurePosixPath(path).suffix.lower() in _PP_FORMAT_EXTENSIONS
     ):
-        fh = filesystem.open(path, "rb")
         try:
             import ppfive  # type: ignore[import]
 
