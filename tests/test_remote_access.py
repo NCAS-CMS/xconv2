@@ -8,6 +8,7 @@ from xconv2.remote_access import (
     RemoteAccessSession,
     build_remote_filesystem_spec,
     create_filesystem,
+    list_directory_entries,
     normalize_remote_datasets_for_cf_read,
     normalize_remote_entries,
     resolve_link_entries,
@@ -35,6 +36,65 @@ def test_remote_access_list_entries_normalizes_and_resolves_links() -> None:
     assert [entry.name for entry in entries] == ["folder", "link_to_dir", "file.nc"]
     assert entries[1].is_dir is True
     assert entries[1].is_link is True
+
+
+def test_http_listing_assumes_directory_for_extensionless_path() -> None:
+    class _FakeFs:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def ls(self, path: str, detail: bool = True):
+            assert detail is True
+            self.calls.append(path)
+            if path == "https://example.org/archive/":
+                return []
+            raise AssertionError("Unexpected ls() call")
+
+    fs = _FakeFs()
+    result = list_directory_entries(fs, "https://example.org/archive", detail=True)
+
+    assert result == []
+    assert fs.calls == ["https://example.org/archive/"]
+
+
+def test_http_listing_retries_without_slash_when_directory_assumption_fails() -> None:
+    class _FakeFs:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def ls(self, path: str, detail: bool = True):
+            assert detail is True
+            self.calls.append(path)
+            if path == "https://example.org/archive/":
+                raise FileNotFoundError(path)
+            if path == "https://example.org/archive":
+                return [{"name": "archive/file.nc", "type": "file", "size": 1}]
+            raise AssertionError("Unexpected ls() call")
+
+    fs = _FakeFs()
+    result = list_directory_entries(fs, "https://example.org/archive", detail=True)
+
+    assert isinstance(result, list)
+    assert fs.calls == ["https://example.org/archive/", "https://example.org/archive"]
+
+
+def test_http_listing_keeps_original_first_for_file_like_path() -> None:
+    class _FakeFs:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def ls(self, path: str, detail: bool = True):
+            assert detail is True
+            self.calls.append(path)
+            if path == "https://example.org/data/file.nc":
+                return []
+            raise AssertionError("Unexpected ls() call")
+
+    fs = _FakeFs()
+    result = list_directory_entries(fs, "https://example.org/data/file.nc", detail=True)
+
+    assert result == []
+    assert fs.calls == ["https://example.org/data/file.nc"]
 
 
 def test_remote_access_read_fields_opens_http_dataset_handles() -> None:

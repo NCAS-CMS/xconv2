@@ -310,7 +310,14 @@ class FieldMetadataController:
             item.setText(self._format_field_display_label(idx, identity))
 
     def mark_selected_items_saved(self, source_file: str) -> int:
-        """Mark currently selected generated rows as saved under a source file."""
+        """
+        Mark currently selected generated rows as saved under a source file.
+        """
+        #Note that we are making use of Qt's use of UserRole and above 
+        #for application specific data (so we use the slots to define
+        #them for specific purposes).  In this case, we use UserRole+2 to 
+        #store the source file) and UserRole+5 to store whether the field 
+        #is generated (True) or not (False).
         selected_items = list(self.host.field_list_widget.selectedItems())
         if not selected_items:
             return 0
@@ -318,6 +325,9 @@ class FieldMetadataController:
         color = self._source_color(source_file)
         updated = 0
         for item in selected_items:
+            is_generated = item.data(Qt.UserRole + 5)
+            if is_generated is not True:
+                 continue
             item.setData(Qt.UserRole + 2, source_file)
             item.setData(Qt.UserRole + 5, False)
             item.setBackground(color)

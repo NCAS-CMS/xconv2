@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 import json
 
 import cf
-import numpy as np
 
 from .metadata_operations import field_info
 
@@ -119,12 +118,14 @@ class XconvRegridder:
             else:
                 raise ValueError(f"Unsupported regrid target: {target!r} (should have been caught in validation)")
 
-            history += (
+            entry = (
                 f"{regridded.identity()} regridded from {self._domain_description(src_field)}\n"
                 f"to {self._domain_description(regridded)} using cf-python {cf.__version__}\n"
-                f"with method {self.method} on {today}.\n"
+                f"with method {self.method} on {today}."
             )
-            regridded.set_property("history", history)
+            existing = regridded.get_property("history", "")
+            history_text = f"{existing}\n{entry}" if existing else entry
+            regridded.set_property("history", history_text)
             new_fields.append(regridded)
             fields.append(regridded)
 

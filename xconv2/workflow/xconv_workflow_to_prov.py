@@ -47,12 +47,14 @@ def _source_files_for_operation(operation: dict[str, object]) -> list[str]:
 
 
 def _source_qname(uri: str) -> str:
-    """Return a stable source entity identifier for a URI/path."""
+    """
+    Return a stable source entity identifier for a URI/path.
+    """
+    import hashlib
     parsed = urlparse(uri)
-    if parsed.scheme in {"http", "https", "s3"}:
-        return f"xconv:source_{abs(hash(uri))}"
-    return f"xconv:source_{abs(hash(Path(uri).as_posix()))}"
-
+    canonical = uri if parsed.scheme in {"http", "https", "s3"} else Path(uri).as_posix()
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return f"xconv:source_{digest}"
 
 def workflow_to_prov_json_dict(
     workflow: dict[str, object],
@@ -253,14 +255,12 @@ def prov_json_dict_to_workflow(prov_json: dict[str, object]) -> dict[str, object
                     raise ValueError("Embedded xconv:workflow_json is invalid JSON") from exc
                 if not isinstance(workflow, dict):
                     raise ValueError("Embedded xconv:workflow_json must decode to a mapping")
-                return {
-                    "schema_version": int(workflow.get("schema_version", 1) or 1),
-                    "session_id": str(workflow.get("session_id", "") or ""),
-                    "saved_at": str(workflow.get("saved_at", "") or ""),
-                    "operations": list(workflow.get("operations", []))
-                    if isinstance(workflow.get("operations", []), list)
-                    else [],
-                }
+                workflow["schema_version"] = int(workflow.get("schema_version", 1) or 1)
+                workflow["session_id"] =  str(workflow.get("session_id", "") or "")
+                workflow["saved_at"] = str(workflow.get("saved_at", "") or "")
+                ops = workflow.get("operations", [])
+                workflow["operations"] = ops if isinstance(ops, list) else []
+                return workflow
 
     raise ValueError("PROV-JSON does not contain embedded xconv:workflow_json")
 

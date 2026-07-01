@@ -98,68 +98,148 @@ def coordinate_info(field: cf.Field) -> list[tuple[str, list[str], str]]:
     Returns:
         list[tuple[str, list[str], str]]: Coordinate identity with serialized values and units.
     """
+    coords: dict[tuple[str], list[tuple]] = {}
 
-    def _iter_one_d_constructs():
-        """Loop over one-dimensional coordinates and yield coordinate arrays."""
+    data_axes_gt_1 = set(field.domain_axes(filter_by_size=(cf.gt(1),)))
 
+    def _iter_one_d_constructs(standard_name=True):
+        """Loop over 1-d coordinates and yield coordinate arrays.
+
+        If standard_name=True then only consider coordinates with a
+        standard name, and if it's False the only consider coordinates
+        without a standard name.
+
+        """
         for axis in field.domain_axes():
-            c = field.dimension_coordinate(filter_by_axis=(axis,), default=None)
+            c = field.dimension_coordinate(
+                filter_by_axis=(axis,), default=None
+            )
             if c is None:
-                c = field.auxiliary_coordinate(filter_by_axis=(axis,), axis_mode="exact", default=None)
-            arr = getattr(c, "array", None)
-            if arr is None or len(arr) <= 1:
-                continue
-            yield c, arr
+                c = field.auxiliary_coordinate(
+                    filter_by_axis=(axis,), axis_mode="exact", default=None
+                )
+                if c is None:
+                    continue
 
-    def _append_coordinate_values(construct: object, values: list) -> None:
-        name = str(construct.identity(default="unknown"))
-        if name in seen_names:
-            return
+            if standard_name and not c.has_property('standard_name'):
+                continue
+
+            elif not standard_name and c.has_property('standard_name'):
+                continue
+
+            if not c.has_data():
+                continue
+
+            if c.size <= 1:
+                continue
+            
+            yield axis, c, c.array
+
+    def _append_coordinate_values(
+            construct: object,
+            values: list,
+            axes: tuple[str]
+    ) -> None:
+        """Append an entry to the 'coords' dictionary.
+        
+        construct: Dimension or auxiliary coordinate construct
+        values: the values for the slider
+        axes: `tuple` of the domain axis identifiers for the construct
+        """
+        name = str(construct.identity(default="unknown"))        
         units = str(getattr(construct, "Units", ""))
+        
         # Keep full-precision serialized values for subspace bounds.
         # UI formatting should round for display only.
         vals = [str(x) for x in values]
-        coords.append((name, vals, units))
-        seen_names.add(name)
+        
+        coords.setdefault(axes, []).append((name, vals, units))
 
-    coords: list[tuple[str, list[str], str]] = []
-    seen_names: set[str] = set()
+    def convert_coords_to_a_list(coords):
+        """Convert the 'coords' dict to a list that can be used downstream."""
+        coords_list = []
+        for x in coords.values():
+            coords_list.extend(x)
+            
+        return coords_list
 
-    for construct, arr in _iter_one_d_constructs():
-        _append_coordinate_values(construct, arr)
-
-    if coords:
-        return coords
+    for axis, construct, arr in _iter_one_d_constructs(standard_name=True):
+        _append_coordinate_values(construct, arr, (axis,))    
+        
+    if set(coords) == data_axes_gt_1:
+        # We have a 1-d coordinate with a standard_name for each size
+        # > 1 axis        
+        return  convert_coords_to_a_list(coords)
 
     # Fallback for fields that expose only 2D coordinates (for example NEMO
     # latitude/longitude auxiliary coordinates). Derive global bounds from each
     # auxiliary coordinate and synthesize slider values from the resulting bbox
     # limits.
-    two_d_coords = field.coordinates(filter_by_naxes=(2,))
-    for construct in two_d_coords.values():
-        arr = getattr(construct, "array", None)
+    two_d_coords = {}        
+    for key, c in field.auxiliary_coordinates(
+            filter_by_naxes=(2,), todict=True
+    ).items():
+        if c.size <= 1:
+            continue
+        
+        axes = field.get_data_axes(key)
+        if (axes[0],) in coords and (axes[1],) in coords:
+            # We already have 1-d coordinates for both axes
+            continue
+
+        if not c.has_property('standard_name'):
+            continue
+        
+        arr = getattr(c, "array", None)
         if arr is None:
             continue
 
         marr = np.ma.array(arr)
-        if marr.ndim != 2 or marr.size <= 1:
-            continue
-
         lo = float(np.nanmin(marr.filled(np.nan)))
         hi = float(np.nanmax(marr.filled(np.nan)))
         if np.isnan(lo) or np.isnan(hi):
             continue
 
-        # Use the larger horizontal size so synthesized sliders retain useful
+        # Use the larger size so synthesized sliders retain useful
         # resolution without requiring direction-specific heuristics.
-        count = int(max(marr.shape))
-        if count <= 1:
+        count = max(marr.shape)
+        vals = np.linspace(lo, hi, num=count)
+
+        two_d_coords.setdefault(tuple(sorted(axes)), []).append((c, vals))
+        
+    for two_d_axes, construct_vals in two_d_coords.items():
+        if len(construct_vals) != 2:
             continue
 
-        vals = np.linspace(lo, hi, num=count)
-        _append_coordinate_values(construct, vals)
+        for  construct, vals in construct_vals:
+            _append_coordinate_values( construct, vals, two_d_axes)
+            # Remove existing 1-d coords entries for the 2-d axes
+            for axis in two_d_axes:
+                coords.pop((axis,), None)
+                
+                
+        break
 
-    return coords
+    # Get the list of unique axes for which we now have coordinates
+    existing_axes = set()
+    for key in coords:
+        existing_axes.update(key)
+          
+    if existing_axes == data_axes_gt_1:
+        # We have a 1-d or 2-d coordinates, all with standard_names,
+        # for each size > 1 axis
+        return convert_coords_to_a_list(coords)
+
+    # Still here? Go back and look for 1-d coordinates without
+    # standard names, but only for the ose axes that we haven't
+    # already got 1-d or 2-d coordinates for.
+    for axis, construct, arr in _iter_one_d_constructs(standard_name=False):
+        if axis  not in existing_axes:
+            _append_coordinate_values(construct, arr, (axis,))    
+            
+    # Return a list
+    return convert_coords_to_a_list(coords)
+
 
 def remove_fields_by_index(fields: list, indices: list[int]) -> int:
     """Remove selected field indices in-place and return count removed."""

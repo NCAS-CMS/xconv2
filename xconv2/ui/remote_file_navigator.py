@@ -1024,7 +1024,7 @@ class RemoteFileNavigatorDialog(QDialog):
         """Call filesystem ls and return normalized entries before UI filtering."""
         if self._list_callback is not None:
             return self._list_callback(path)
-        listing = self._filesystem.ls(path, detail=True)
+        listing = remote_core.list_directory_entries(self._filesystem, path, detail=True)
         if not isinstance(listing, list):
             raise RuntimeError(f"Unexpected listing result for {path!r}")
         entries = normalize_remote_entries(listing)
@@ -1189,7 +1189,7 @@ class RemoteFileNavigatorDialog(QDialog):
                 cache=config.get("cache") if isinstance(config, dict) else None,
             )
             _log_line(f"Checking remote root: {spec.root_path or '/'}")
-            listing = filesystem.ls(spec.root_path, detail=True)
+            listing = remote_core.list_directory_entries(filesystem, spec.root_path, detail=True)
             if not isinstance(listing, list):
                 raise RuntimeError(f"Unexpected listing result for {spec.root_path!r}")
             _log_line("Login ready. Opening file picker...")
