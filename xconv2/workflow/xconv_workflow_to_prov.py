@@ -255,14 +255,12 @@ def prov_json_dict_to_workflow(prov_json: dict[str, object]) -> dict[str, object
                     raise ValueError("Embedded xconv:workflow_json is invalid JSON") from exc
                 if not isinstance(workflow, dict):
                     raise ValueError("Embedded xconv:workflow_json must decode to a mapping")
-                return {
-                    "schema_version": int(workflow.get("schema_version", 1) or 1),
-                    "session_id": str(workflow.get("session_id", "") or ""),
-                    "saved_at": str(workflow.get("saved_at", "") or ""),
-                    "operations": list(workflow.get("operations", []))
-                    if isinstance(workflow.get("operations", []), list)
-                    else [],
-                }
+                workflow["schema_version"] = int(workflow.get("schema_version", 1) or 1)
+                workflow["session_id"] =  str(workflow.get("session_id", "") or "")
+                workflow["saved_at"] = str(workflow.get("saved_at", "") or "")
+                ops = workflow.get("operations", [])
+                workflow["operations"] = ops if isinstance(ops, list) else []
+                return workflow
 
     raise ValueError("PROV-JSON does not contain embedded xconv:workflow_json")
 
