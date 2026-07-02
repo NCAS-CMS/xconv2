@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,7 @@ class AnimationSession:
 
     def mark_started(self, total_frames: int | None, fps_hint: float | None, title_template: str | None) -> None:
         """Mark session as started with metadata."""
+        self.started_at = time.time()
         self.total_frames = total_frames
         self.fps_hint = fps_hint or 4.0
         self.title_template = title_template
@@ -69,6 +70,7 @@ class AnimationSession:
         """Mark session as completed."""
         if self.playback_state != AnimationPlaybackState.FAILED:
             self.playback_state = AnimationPlaybackState.BUFFERED
+        self.completed_at = time.time()
         logger.info(
             "Animation session complete request_id=%s session_id=%s frames=%d",
             self.request_id,

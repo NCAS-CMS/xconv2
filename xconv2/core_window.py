@@ -2448,7 +2448,10 @@ class CFVCore(QMainWindow):
                     self._remember_last_save_dir("last_save_plot_dir", str(target))
                     self._show_status_message(f"Saved animated GIF to {target}")
                     return
-                except (OSError, RuntimeError, ValueError):
+                except RuntimeError as exc:
+                    self._show_status_message(str(exc), is_error=True)
+                    return
+                except (OSError, ValueError):
                     self._show_status_message("Failed to save animated GIF.", is_error=True)
                     return
 

@@ -1263,7 +1263,7 @@ def _configure_animation_streaming_for_exec() -> tuple[Callable[[str | None], No
         kwargs.setdefault("animation_title_template", "{title} [{frame}]")
         try:
             return original_con(*args, **kwargs)
-        except Warning as exc:
+        except (Warning, ValueError) as exc:
             message = str(exc).lower()
             if "too many dimensions" not in message:
                 raise
