@@ -1374,6 +1374,7 @@ def test_animation_playback_respects_loop_and_fps_interval() -> None:
     host._set_plot_loading = lambda *_args, **_kwargs: None
     host._current_animation_session = lambda: CFVMain._current_animation_session(host)
     host._current_animation_options = lambda: CFVMain._current_animation_options(host)
+    host._resolved_animation_fps = lambda session: CFVMain._resolved_animation_fps(host, session)
 
     session = host._animation_session_controller.create_session("req-1", "sess-1")
     session.mark_started(total_frames=2, fps_hint=8.0, title_template="demo")
@@ -1392,6 +1393,66 @@ def test_animation_playback_respects_loop_and_fps_interval() -> None:
 
     assert displayed_frames == [b"frame-0", b"frame-1", b"frame-0"]
     assert host._animation_playback_timer.isActive() is True
+
+
+def test_animation_playback_prefers_options_fps_hint_over_session_hint() -> None:
+    class _FakeTimer:
+        def __init__(self) -> None:
+            self._active = False
+            self.interval_ms = 0
+
+        def setInterval(self, interval_ms: int) -> None:
+            self.interval_ms = interval_ms
+
+        def start(self) -> None:
+            self._active = True
+
+        def stop(self) -> None:
+            self._active = False
+
+        def isActive(self) -> bool:
+            return self._active
+
+    class _FakeButton:
+        def __init__(self) -> None:
+            self.text = ""
+            self.enabled = False
+
+        def setText(self, text: str) -> None:
+            self.text = text
+
+        def setEnabled(self, enabled: bool) -> None:
+            self.enabled = enabled
+
+    host = types.SimpleNamespace(
+        _animation_session_controller=__import__("xconv2.animation_session", fromlist=["AnimationSessionController"]).AnimationSessionController(),
+        _active_animation_request_id="req-1",
+        _animation_playback_timer=_FakeTimer(),
+        _animation_is_playing=False,
+        selected_plot_action="animation",
+        anim_play_pause_button=_FakeButton(),
+        anim_stop_button=_FakeButton(),
+        anim_export_button=_FakeButton(),
+        plot_options_by_kind={"animation": {"loop_playback": True, "fps_hint": 4}},
+    )
+    statuses: list[str] = []
+    host.set_plot_image = lambda _frame: None
+    host._show_status_message = lambda message, is_error=False: statuses.append(message)
+    host._set_plot_loading = lambda *_args, **_kwargs: None
+    host._current_animation_session = lambda: CFVMain._current_animation_session(host)
+    host._current_animation_options = lambda: CFVMain._current_animation_options(host)
+    host._resolved_animation_fps = lambda session: CFVMain._resolved_animation_fps(host, session)
+
+    session = host._animation_session_controller.create_session("req-1", "sess-1")
+    session.mark_started(total_frames=2, fps_hint=8.0, title_template="demo")
+    session.add_frame(b"frame-0")
+    session.mark_completed()
+
+    CFVMain._on_animation_play_pause(host)
+
+    assert host._animation_playback_timer.isActive() is True
+    assert host._animation_playback_timer.interval_ms == 250
+    assert "4.0 fps" in statuses[-1]
 
 
 def test_animation_export_writes_frame_sequence(tmp_path: Path, monkeypatch) -> None:

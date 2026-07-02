@@ -2426,7 +2426,10 @@ class CFVCore(QMainWindow):
             stem = target.stem or f"{default_stem}_anim"
 
             if selected_is_gif:
-                fps_raw = getattr(session, "fps_hint", None)
+                options_by_kind = getattr(self, "plot_options_by_kind", {})
+                animation_options = options_by_kind.get("animation") if isinstance(options_by_kind, dict) else None
+                options_fps_raw = animation_options.get("fps_hint") if isinstance(animation_options, dict) else None
+                fps_raw = options_fps_raw if options_fps_raw is not None else getattr(session, "fps_hint", None)
                 try:
                     fps = float(fps_raw) if fps_raw is not None else 10.0
                 except (TypeError, ValueError):

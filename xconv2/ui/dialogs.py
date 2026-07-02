@@ -410,7 +410,7 @@ class AnimationOptionsDialog(QDialog):
 
         self.fps_spin = QSpinBox(self)
         self.fps_spin.setRange(1, 30)
-        self.fps_spin.setValue(int(options.get("fps_hint", 8) or 8))
+        self.fps_spin.setValue(int(options.get("fps_hint", 4) or 4))
         self.fps_spin.setToolTip("Preferred playback rate in frames per second.")
         form.addRow("FPS hint", self.fps_spin)
 

@@ -61,7 +61,7 @@ class AnimationSession:
     def mark_started(self, total_frames: int | None, fps_hint: float | None, title_template: str | None) -> None:
         """Mark session as started with metadata."""
         self.total_frames = total_frames
-        self.fps_hint = fps_hint or 10.0
+        self.fps_hint = fps_hint or 4.0
         self.title_template = title_template
         self.playback_state = AnimationPlaybackState.STREAMING
 

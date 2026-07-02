@@ -409,6 +409,27 @@ class CFVMain(CFVCore):
         raw = self.plot_options_by_kind.get("animation")
         return dict(raw) if isinstance(raw, dict) else {}
 
+    def _resolved_animation_fps(self, session: AnimationSession | None) -> float:
+        """Resolve playback FPS, preferring user-selected animation options."""
+        options = self._current_animation_options()
+        fps_raw = options.get("fps_hint")
+        try:
+            fps = float(fps_raw) if fps_raw is not None else 0.0
+        except (TypeError, ValueError):
+            fps = 0.0
+        if fps > 0:
+            return max(1.0, min(60.0, fps))
+
+        session_fps_raw = getattr(session, "fps_hint", None) if session is not None else None
+        try:
+            session_fps = float(session_fps_raw) if session_fps_raw is not None else 0.0
+        except (TypeError, ValueError):
+            session_fps = 0.0
+        if session_fps > 0:
+            return max(1.0, min(60.0, session_fps))
+
+        return 10.0
+
     def _reset_animation_preview_state(self) -> None:
         """Reset transient animation session/playback state in the GUI."""
         timer = getattr(self, "_animation_playback_timer", None)
@@ -609,16 +630,14 @@ class CFVMain(CFVCore):
         else:
             session.playback_state = AnimationPlaybackState.PLAYING
 
-        interval_ms = 120
-        if session.fps_hint and session.fps_hint > 0:
-            interval_ms = max(20, int(round(1000.0 / session.fps_hint)))
+        applied_fps = self._resolved_animation_fps(session)
+        interval_ms = max(20, int(round(1000.0 / applied_fps)))
         self._animation_playback_timer.setInterval(interval_ms)
         self._animation_playback_timer.start()
         self._animation_is_playing = True
 
         options = self._current_animation_options()
         loop_enabled = bool(options.get("loop_playback", True))
-        applied_fps = 1000.0 / interval_ms if interval_ms > 0 else 0.0
 
         if play_button is not None:
             play_button.setText("Pause")
