@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import glob
+from io import BytesIO
 from pathlib import Path
 import logging
 from typing import Sequence
@@ -99,6 +100,45 @@ DEFAULT_MAX_RECENT_FILES = 10
 SETTINGS_VERSION = 1
 STATUSBAR_NORMAL_STYLE = ""
 STATUSBAR_ERROR_STYLE = "QStatusBar { color: #c62828; font-weight: 600; }"
+
+
+def _save_gif_from_png_bytes(
+    frame_bytes: Sequence[bytes],
+    destination: str,
+    *,
+    duration_ms: int,
+    loop: int = 0,
+) -> None:
+    """Encode PNG byte frames into an animated GIF file."""
+    try:
+        from PIL import Image
+    except Exception as exc:  # pragma: no cover - exercised via caller path
+        raise RuntimeError("Animated GIF export requires Pillow.") from exc
+
+    frames = []
+    for raw in frame_bytes:
+        if not isinstance(raw, (bytes, bytearray)):
+            continue
+        try:
+            with BytesIO(bytes(raw)) as buffer:
+                with Image.open(buffer) as image:
+                    frames.append(image.convert("RGBA"))
+        except Exception:
+            continue
+
+    if not frames:
+        raise ValueError("No decodable frames available for GIF export.")
+
+    first, *rest = frames
+    first.save(
+        destination,
+        format="GIF",
+        save_all=True,
+        append_images=rest,
+        duration=max(1, int(duration_ms)),
+        loop=max(0, int(loop)),
+        disposal=2,
+    )
 
 
 class CopyableStatusBar(QStatusBar):
@@ -2361,7 +2401,77 @@ class CFVCore(QMainWindow):
         self._show_status_message("Animation playback stopped.")
 
     def _on_animation_export(self) -> None:
-        """Save the currently visible animation frame from the plot panel."""
+        """Export buffered animation frames as a PNG sequence, or fallback to current frame."""
+        session_getter = getattr(self, "_current_animation_session", None)
+        session = session_getter() if callable(session_getter) else None
+        session_frames = getattr(session, "frames", None)
+        if isinstance(session_frames, list) and len(session_frames) > 0:
+            default_stem = self._default_plot_filename()
+            default_path = self._default_save_path("last_save_plot_dir", f"{default_stem}_anim.gif")
+            file_path, selected_filter = QFileDialog.getSaveFileName(
+                self,
+                "Export Animation",
+                default_path,
+                "Animated GIF (*.gif);;PNG sequence (*.png);;All files (*)",
+            )
+            if not file_path:
+                return
+
+            target = Path(file_path)
+            selected_is_gif = (target.suffix.lower() == ".gif") or ("GIF" in selected_filter.upper())
+            if not target.suffix:
+                target = target.with_suffix(".gif" if selected_is_gif else ".png")
+
+            output_dir = target.parent
+            stem = target.stem or f"{default_stem}_anim"
+
+            if selected_is_gif:
+                fps_raw = getattr(session, "fps_hint", None)
+                try:
+                    fps = float(fps_raw) if fps_raw is not None else 10.0
+                except (TypeError, ValueError):
+                    fps = 10.0
+                fps = max(1.0, min(60.0, fps))
+                duration_ms = int(round(1000.0 / fps))
+
+                try:
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    _save_gif_from_png_bytes(
+                        session_frames,
+                        str(target),
+                        duration_ms=duration_ms,
+                        loop=0,
+                    )
+                    self._remember_last_save_dir("last_save_plot_dir", str(target))
+                    self._show_status_message(f"Saved animated GIF to {target}")
+                    return
+                except (OSError, RuntimeError, ValueError):
+                    self._show_status_message("Failed to save animated GIF.", is_error=True)
+                    return
+
+            try:
+                output_dir.mkdir(parents=True, exist_ok=True)
+                written = 0
+                for idx, frame_bytes in enumerate(session_frames, start=1):
+                    if not isinstance(frame_bytes, (bytes, bytearray)):
+                        continue
+                    frame_path = output_dir / f"{stem}_{idx:04d}.png"
+                    frame_path.write_bytes(bytes(frame_bytes))
+                    written += 1
+
+                if written == 0:
+                    self._show_status_message("No animation frames were available to export.", is_error=True)
+                    return
+
+                self._remember_last_save_dir("last_save_plot_dir", str(output_dir))
+                self._show_status_message(
+                    f"Saved {written} animation frame(s) to {output_dir} with prefix {stem}_"
+                )
+                return
+            except OSError:
+                self._show_status_message("Failed to save animation frame sequence.", is_error=True)
+                return
+
         plot_frame = getattr(self, "plot_frame", None)
         pixmap = plot_frame.pixmap() if plot_frame is not None else None
         if pixmap is None or pixmap.isNull():

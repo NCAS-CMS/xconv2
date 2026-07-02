@@ -1392,3 +1392,97 @@ def test_animation_playback_respects_loop_and_fps_interval() -> None:
 
     assert displayed_frames == [b"frame-0", b"frame-1", b"frame-0"]
     assert host._animation_playback_timer.isActive() is True
+
+
+def test_animation_export_writes_frame_sequence(tmp_path: Path, monkeypatch) -> None:
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.frames = [b"png-a", b"png-b", b"png-c"]
+
+    class _Host:
+        def __init__(self) -> None:
+            self.status_messages: list[tuple[str, bool]] = []
+            self.last_save_values: list[tuple[str, str]] = []
+
+        def _current_animation_session(self):
+            return _FakeSession()
+
+        def _default_plot_filename(self) -> str:
+            return "field0"
+
+        def _default_save_path(self, _key: str, filename: str) -> str:
+            return str(tmp_path / filename)
+
+        def _remember_last_save_dir(self, key: str, value: str) -> None:
+            self.last_save_values.append((key, value))
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.status_messages.append((message, is_error))
+
+    output_file = tmp_path / "demo_anim.png"
+    monkeypatch.setattr(
+        "xconv2.core_window.QFileDialog.getSaveFileName",
+        lambda *args, **kwargs: (str(output_file), "PNG files (*.png)"),
+    )
+
+    host = _Host()
+    CFVCore._on_animation_export(host)
+
+    assert (tmp_path / "demo_anim_0001.png").read_bytes() == b"png-a"
+    assert (tmp_path / "demo_anim_0002.png").read_bytes() == b"png-b"
+    assert (tmp_path / "demo_anim_0003.png").read_bytes() == b"png-c"
+    assert host.last_save_values[-1][0] == "last_save_plot_dir"
+    assert host.status_messages[-1][1] is False
+    assert "Saved 3 animation frame(s)" in host.status_messages[-1][0]
+
+
+def test_animation_export_writes_animated_gif(tmp_path: Path, monkeypatch) -> None:
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.frames = [b"png-a", b"png-b"]
+            self.fps_hint = 5.0
+
+    class _Host:
+        def __init__(self) -> None:
+            self.status_messages: list[tuple[str, bool]] = []
+            self.last_save_values: list[tuple[str, str]] = []
+
+        def _current_animation_session(self):
+            return _FakeSession()
+
+        def _default_plot_filename(self) -> str:
+            return "field0"
+
+        def _default_save_path(self, _key: str, filename: str) -> str:
+            return str(tmp_path / filename)
+
+        def _remember_last_save_dir(self, key: str, value: str) -> None:
+            self.last_save_values.append((key, value))
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.status_messages.append((message, is_error))
+
+    output_file = tmp_path / "demo_anim.gif"
+    calls: list[tuple[list[bytes], str, int, int]] = []
+
+    monkeypatch.setattr(
+        "xconv2.core_window.QFileDialog.getSaveFileName",
+        lambda *args, **kwargs: (str(output_file), "Animated GIF (*.gif)"),
+    )
+
+    def _fake_save_gif(frame_bytes, destination, *, duration_ms, loop):
+        calls.append((list(frame_bytes), destination, duration_ms, loop))
+
+    monkeypatch.setattr("xconv2.core_window._save_gif_from_png_bytes", _fake_save_gif)
+
+    host = _Host()
+    CFVCore._on_animation_export(host)
+
+    assert len(calls) == 1
+    assert calls[0][0] == [b"png-a", b"png-b"]
+    assert calls[0][1] == str(output_file)
+    assert calls[0][2] == 200
+    assert calls[0][3] == 0
+    assert host.last_save_values[-1] == ("last_save_plot_dir", str(output_file))
+    assert host.status_messages[-1][1] is False
+    assert "Saved animated GIF" in host.status_messages[-1][0]
