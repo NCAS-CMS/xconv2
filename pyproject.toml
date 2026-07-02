@@ -27,6 +27,7 @@ dependencies = [
     "superqt",
     "zarr",
     "pystac-client",
+    "Pillow"
 ]
 
 [project.optional-dependencies]
