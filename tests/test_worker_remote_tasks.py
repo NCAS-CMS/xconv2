@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from io import BytesIO
 import json
 import logging
@@ -9,6 +10,18 @@ import cf
 import pytest
 
 import xconv2.worker as worker
+
+
+def _make_log_record(name: str, message: str) -> logging.LogRecord:
+    return logging.LogRecord(
+        name=name,
+        level=logging.DEBUG,
+        pathname=__file__,
+        lineno=1,
+        msg=message,
+        args=(),
+        exc_info=None,
+    )
 
 
 class _FakeFilesystem:
@@ -92,6 +105,145 @@ def test_prepare_remote_session_reuses_cached_entry(monkeypatch) -> None:
     assert first is second
     assert second.session_id == "session-2"
     assert created == [("sftp", {})]
+
+
+def test_remote_open_cache_diagnostics_collects_mmap_and_http_stats() -> None:
+    diagnostics = worker._RemoteOpenCacheDiagnostics()
+
+    diagnostics.consume(
+        _make_log_record(
+            "fsspec",
+            "<File-like object _CacheAwareCatRangesFSProxy, https://example/data.pp> read: 10 - 14  , mmap: 824 hits, 207 misses, 434110464 total requested bytes",
+        )
+    )
+    diagnostics.consume(
+        _make_log_record(
+            "fsspec.caching",
+            "MMap get blocks 1854-1854 (3888119808-3890216960)",
+        )
+    )
+    diagnostics.consume(
+        _make_log_record(
+            "fsspec.http",
+            "https://example/data.pp",
+        )
+    )
+    diagnostics.consume(
+        _make_log_record(
+            "fsspec",
+            "<File-like object _CacheAwareCatRangesFSProxy, https://example/data.pp> read: 20 - 24  , mmap: 832 hits, 208 misses, 436207616 total requested bytes",
+        )
+    )
+
+    stats = diagnostics.summary()
+
+    assert stats["available"] is True
+    assert stats["first_hits"] == 824
+    assert stats["first_misses"] == 207
+    assert stats["last_hits"] == 832
+    assert stats["last_misses"] == 208
+    assert stats["delta_hits"] == 8
+    assert stats["delta_misses"] == 1
+    assert stats["delta_requested_bytes"] == 2097152
+    assert stats["block_fetches"] == 1
+    assert stats["block_fetch_bytes"] == 2097152
+    assert stats["http_requests"] == 1
+
+
+def test_log_remote_open_cache_summary_handles_unavailable_mmap_stats(caplog) -> None:
+    diagnostics = worker._RemoteOpenCacheDiagnostics()
+    diagnostics.consume(
+        _make_log_record(
+            "fsspec.caching",
+            "MMap get blocks 1-1 (100-200)",
+        )
+    )
+
+    with caplog.at_level(logging.INFO, logger="xconv2.worker"):
+        worker._log_remote_open_cache_summary(
+            descriptor_hash="abc123",
+            session_reused=True,
+            diagnostics=diagnostics,
+            cache_mode="Blocks",
+            cache_location="/tmp/cache",
+        )
+
+    assert "REMOTE_CACHE_SUMMARY descriptor_hash=abc123 session_reused=True cache_mode=Blocks" in caplog.text
+
+
+def test_read_remote_fields_skips_capture_when_diagnostics_disabled(monkeypatch, caplog) -> None:
+    class _Session:
+        def read_fields(self, *, descriptor, datasets, reader):
+            return ["sentinel"]
+
+    entry = worker.RemoteSessionEntry(
+        session_id="session-1",
+        descriptor_hash="hash-disabled",
+        descriptor={"protocol": "sftp"},
+        filesystem=object(),
+        session=_Session(),
+    )
+
+    monkeypatch.setenv("XCONV2_REMOTE_CACHE_DIAGNOSTICS", "0")
+
+    def _unexpected_capture():
+        raise AssertionError("capture context should not be used when diagnostics are disabled")
+
+    monkeypatch.setattr(worker, "_capture_remote_open_cache_diagnostics", _unexpected_capture)
+
+    with caplog.at_level(logging.INFO, logger="xconv2.worker"):
+        result = worker._read_remote_fields(
+            entry=entry,
+            descriptor={"protocol": "sftp"},
+            datasets="/data/file.nc",
+            session_reused=True,
+        )
+
+    assert result == ["sentinel"]
+    assert "REMOTE_CACHE_SUMMARY descriptor_hash=hash-disabled session_reused=True" in caplog.text
+    assert "diagnostics=disabled" in caplog.text
+
+
+def test_read_remote_fields_uses_capture_when_diagnostics_enabled(monkeypatch) -> None:
+    class _Session:
+        def read_fields(self, *, descriptor, datasets, reader):
+            return ["sentinel-enabled"]
+
+    entry = worker.RemoteSessionEntry(
+        session_id="session-1",
+        descriptor_hash="hash-enabled",
+        descriptor={"protocol": "sftp"},
+        filesystem=object(),
+        session=_Session(),
+    )
+
+    monkeypatch.setenv("XCONV2_REMOTE_CACHE_DIAGNOSTICS", "1")
+    calls: list[tuple[str, str]] = []
+
+    @contextmanager
+    def _fake_capture():
+        calls.append(("capture", "enter"))
+        yield worker._RemoteOpenCacheDiagnostics()
+        calls.append(("capture", "exit"))
+
+    monkeypatch.setattr(worker, "_capture_remote_open_cache_diagnostics", _fake_capture)
+    monkeypatch.setattr(
+        worker,
+        "_log_remote_open_cache_summary",
+        lambda **kwargs: calls.append(("summary", str(kwargs.get("descriptor_hash", "")))),
+    )
+
+    result = worker._read_remote_fields(
+        entry=entry,
+        descriptor={"protocol": "sftp"},
+        datasets="/data/file.nc",
+        session_reused=False,
+    )
+
+    assert result == ["sentinel-enabled"]
+    assert ("capture", "enter") in calls
+    assert ("capture", "exit") in calls
+    assert ("summary", "hash-enabled") in calls
 
 
 def test_read_remote_fields_uses_filesystem_keyword(tmp_path: Path) -> None:

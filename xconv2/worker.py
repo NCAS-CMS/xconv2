@@ -12,6 +12,7 @@ import textwrap
 import time
 import resource
 import uuid
+from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
@@ -41,6 +42,11 @@ OMIT4SAVE_TOKEN = "#omit4save"
 REMOTE_SESSION_TTL_SECONDS = 180.0
 REMOTE_SESSION_MAX = 4
 _WORKER_RUNTIME_LOADED = False
+_MMAP_COUNTER_RE = re.compile(
+    r"mmap:\s*(\d+)\s+hits,\s*(\d+)\s+misses,\s*(\d+)\s+total requested bytes",
+    re.IGNORECASE,
+)
+_MMAP_BLOCK_RANGE_RE = re.compile(r"MMap get blocks\s+\d+-\d+\s+\((\d+)-(\d+)\)")
 
 
 class TaskHeaders(NamedTuple):
@@ -74,6 +80,177 @@ class RemoteSessionEntry:
         self.session = session or RemoteAccessSession(filesystem)
         self.created_at = now
         self.last_used = now
+
+
+class _RemoteOpenCacheDiagnostics:
+    """Collect fsspec cache stats for one REMOTE_OPEN operation."""
+
+    def __init__(self) -> None:
+        self._first_hits: int | None = None
+        self._first_misses: int | None = None
+        self._first_requested_bytes: int | None = None
+        self._last_hits: int | None = None
+        self._last_misses: int | None = None
+        self._last_requested_bytes: int | None = None
+        self.http_requests = 0
+        self.block_fetches = 0
+        self.block_fetch_bytes = 0
+
+    def consume(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+
+        counter_match = _MMAP_COUNTER_RE.search(message)
+        if counter_match:
+            hits = int(counter_match.group(1))
+            misses = int(counter_match.group(2))
+            requested_bytes = int(counter_match.group(3))
+
+            if self._first_hits is None:
+                self._first_hits = hits
+                self._first_misses = misses
+                self._first_requested_bytes = requested_bytes
+
+            self._last_hits = hits
+            self._last_misses = misses
+            self._last_requested_bytes = requested_bytes
+
+        block_match = _MMAP_BLOCK_RANGE_RE.search(message)
+        if block_match:
+            start = int(block_match.group(1))
+            end = int(block_match.group(2))
+            if end >= start:
+                self.block_fetches += 1
+                self.block_fetch_bytes += end - start
+
+        if record.name == "fsspec.http" and message.startswith(("http://", "https://")):
+            self.http_requests += 1
+
+    def summary(self) -> dict[str, int | float | bool | None]:
+        available = self._first_hits is not None and self._last_hits is not None
+        delta_hits: int | None = None
+        delta_misses: int | None = None
+        delta_requested_bytes: int | None = None
+        hit_ratio: float | None = None
+
+        if available:
+            first_hits = int(self._first_hits)
+            first_misses = int(self._first_misses)
+            first_requested = int(self._first_requested_bytes)
+            last_hits = int(self._last_hits)
+            last_misses = int(self._last_misses)
+            last_requested = int(self._last_requested_bytes)
+
+            delta_hits = max(0, last_hits - first_hits)
+            delta_misses = max(0, last_misses - first_misses)
+            delta_requested_bytes = max(0, last_requested - first_requested)
+            total = delta_hits + delta_misses
+            if total > 0:
+                hit_ratio = delta_hits / total
+
+        return {
+            "available": available,
+            "first_hits": self._first_hits,
+            "first_misses": self._first_misses,
+            "first_requested_bytes": self._first_requested_bytes,
+            "last_hits": self._last_hits,
+            "last_misses": self._last_misses,
+            "last_requested_bytes": self._last_requested_bytes,
+            "delta_hits": delta_hits,
+            "delta_misses": delta_misses,
+            "delta_requested_bytes": delta_requested_bytes,
+            "hit_ratio": hit_ratio,
+            "block_fetches": self.block_fetches,
+            "block_fetch_bytes": self.block_fetch_bytes,
+            "http_requests": self.http_requests,
+        }
+
+
+@contextmanager
+def _capture_remote_open_cache_diagnostics() -> Any:
+    """Capture fsspec DEBUG logs and summarize cache activity for one open."""
+
+    diagnostics = _RemoteOpenCacheDiagnostics()
+
+    class _CaptureHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            diagnostics.consume(record)
+
+    logger_names = ["fsspec", "fsspec.caching", "fsspec.cached", "fsspec.http"]
+    states: list[tuple[logging.Logger, logging.Handler, int, bool, bool]] = []
+
+    for name in logger_names:
+        target = logging.getLogger(name)
+        handler = _CaptureHandler(level=logging.DEBUG)
+        previous_level = target.level
+        previous_propagate = target.propagate
+        previous_disabled = target.disabled
+
+        target.addHandler(handler)
+        target.setLevel(logging.DEBUG)
+        target.propagate = True
+        target.disabled = False
+        states.append((target, handler, previous_level, previous_propagate, previous_disabled))
+
+    try:
+        yield diagnostics
+    finally:
+        for target, handler, previous_level, previous_propagate, previous_disabled in states:
+            target.removeHandler(handler)
+            target.setLevel(previous_level)
+            target.propagate = previous_propagate
+            target.disabled = previous_disabled
+
+
+def _log_remote_open_cache_summary(
+    *,
+    descriptor_hash: str,
+    session_reused: bool,
+    diagnostics: _RemoteOpenCacheDiagnostics,
+    cache_mode: str,
+    cache_location: str,
+) -> None:
+    """Emit a compact one-line summary of cache activity for REMOTE_OPEN."""
+
+    stats = diagnostics.summary()
+    if not stats["available"]:
+        logger.info(
+            "REMOTE_CACHE_SUMMARY descriptor_hash=%s session_reused=%s cache_mode=%s cache_location=%r stats=unavailable block_fetches=%d block_fetch_bytes=%d http_requests=%d",
+            descriptor_hash,
+            session_reused,
+            cache_mode,
+            cache_location,
+            int(stats["block_fetches"]),
+            int(stats["block_fetch_bytes"]),
+            int(stats["http_requests"]),
+        )
+        return
+
+    hit_ratio = stats["hit_ratio"]
+    hit_ratio_text = "n/a" if hit_ratio is None else f"{hit_ratio:.3f}"
+    logger.info(
+        "REMOTE_CACHE_SUMMARY descriptor_hash=%s session_reused=%s cache_mode=%s cache_location=%r mmap_start=%d/%d mmap_end=%d/%d delta_hits=%d delta_misses=%d hit_ratio=%s delta_requested_bytes=%d block_fetches=%d block_fetch_bytes=%d http_requests=%d",
+        descriptor_hash,
+        session_reused,
+        cache_mode,
+        cache_location,
+        int(stats["first_hits"]),
+        int(stats["first_misses"]),
+        int(stats["last_hits"]),
+        int(stats["last_misses"]),
+        int(stats["delta_hits"]),
+        int(stats["delta_misses"]),
+        hit_ratio_text,
+        int(stats["delta_requested_bytes"]),
+        int(stats["block_fetches"]),
+        int(stats["block_fetch_bytes"]),
+        int(stats["http_requests"]),
+    )
+
+
+def _remote_cache_diagnostics_enabled() -> bool:
+    """Return whether REMOTE_OPEN cache diagnostics capture is enabled."""
+    raw = str(os.environ.get("XCONV2_REMOTE_CACHE_DIAGNOSTICS", "1")).strip().lower()
+    return raw not in {"0", "false", "no", "off"}
 
 
 remote_session_pool: dict[str, RemoteSessionEntry] = {}
@@ -414,6 +591,7 @@ def _read_remote_fields(
     entry: RemoteSessionEntry,
     descriptor: dict[str, Any],
     datasets: str | list[str],
+    session_reused: bool = False,
 ):
     """Read remote fields using the warmed filesystem and dataset path(s)."""
     session = entry.session
@@ -421,12 +599,44 @@ def _read_remote_fields(
         descriptor=descriptor,
         datasets=datasets,
     )
+    cache_cfg = descriptor.get("cache") if isinstance(descriptor, dict) else None
+    if isinstance(cache_cfg, dict):
+        cache_mode = str(cache_cfg.get("disk_mode", "Disabled"))
+        cache_location = str(cache_cfg.get("disk_location", ""))
+    else:
+        cache_mode = "Disabled"
+        cache_location = ""
 
-    return session.read_fields(
-        descriptor=descriptor,
-        datasets=normalized_datasets,
-        reader=cf.read,
+    if not _remote_cache_diagnostics_enabled():
+        fields = session.read_fields(
+            descriptor=descriptor,
+            datasets=normalized_datasets,
+            reader=cf.read,
+        )
+        logger.info(
+            "REMOTE_CACHE_SUMMARY descriptor_hash=%s session_reused=%s cache_mode=%s cache_location=%r diagnostics=disabled",
+            entry.descriptor_hash,
+            session_reused,
+            cache_mode,
+            cache_location,
+        )
+        return fields
+
+    with _capture_remote_open_cache_diagnostics() as diagnostics:
+        fields = session.read_fields(
+            descriptor=descriptor,
+            datasets=normalized_datasets,
+            reader=cf.read,
+        )
+
+    _log_remote_open_cache_summary(
+        descriptor_hash=entry.descriptor_hash,
+        session_reused=session_reused,
+        diagnostics=diagnostics,
+        cache_mode=cache_mode,
+        cache_location=cache_location,
     )
+    return fields
 
 
 def _normalize_remote_datasets_for_cf_read(
@@ -870,6 +1080,7 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
             descriptor_hash=descriptor_hash,
             message=f"Opening remote file: {uri}",
         )
+        session_reused = descriptor_hash in remote_session_pool
         entry = _prepare_remote_session(
             session_id=session_id,
             descriptor_hash=descriptor_hash,
@@ -880,6 +1091,7 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
             entry=entry,
             descriptor=descriptor,
             datasets=datasets,
+            session_reused=session_reused,
         )
 
         worker_globals["_cfview_file_path"] = uri

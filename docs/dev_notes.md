@@ -1,5 +1,9 @@
 #### Upstream Branches
 
+#### Remote Cache Diagnostics
+
+- See [dev_remote_cache_diagnostics.md](dev_remote_cache_diagnostics.md) for cache-miss causes, diagnostics toggle usage, and quick triage steps.
+
 From time to time we need to update from the branches into your working develolpment python. This is how I do that:
 
 `pip install --upgrade git+https://github.com/USERNAME/REPOSITORY.git@BRANCH_NAME`
