@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -62,6 +63,42 @@ class _FakeCF:
     @staticmethod
     def wi(lo: object, hi: object) -> tuple[object, object]:
         return (lo, hi)
+
+
+@dataclass
+class _FakeAxisConstruct:
+    name: str
+    size: int
+    T: bool = False
+    Z: bool = False
+    Y: bool = False
+    X: bool = False
+
+    def identity(self, default: str | None = None) -> str:
+        return self.name or str(default or "")
+
+
+class _FakeAnimationField:
+    def __init__(self) -> None:
+        self._constructs = {
+            "dim0": _FakeAxisConstruct("time", 8, T=True),
+            "dim1": _FakeAxisConstruct("model_level_number", 55, Z=True),
+            "dim2": _FakeAxisConstruct("latitude", 3840, Y=True),
+            "dim3": _FakeAxisConstruct("longitude", 5120, X=True),
+        }
+
+    @property
+    def array(self) -> np.ndarray:
+        return np.array([[0.0, 1.0], [2.0, 3.0]], dtype=float)
+
+    def cell_methods(self, **kwargs) -> None:
+        return {}
+
+    def dimension_coordinates(self) -> list[str]:
+        return list(self._constructs)
+
+    def construct(self, key: str) -> _FakeAxisConstruct:
+        return self._constructs[key]
 
 
 @dataclass
@@ -330,6 +367,25 @@ def test_plot_from_selection_contour_accepts_animation_action() -> None:
 
     assert "contour_plot_action = 'animation'" in code
     assert "plot_action=contour_plot_action" in code
+
+
+def test_run_contour_plot_animation_uses_resolved_axis_identity(monkeypatch) -> None:
+    fake_cfp = _FakeCFPlot()
+    fake_plt = _FakePlt()
+
+    monkeypatch.setattr(plotting, "cfp", fake_cfp)
+    monkeypatch.setattr(plotting, "plt", fake_plt)
+    monkeypatch.setattr(plotting, "cf", SimpleNamespace(Field=_FakeAnimationField))
+
+    run_contour_plot(
+        pfld=_FakeAnimationField(),
+        options={"mode": "default", "frame_axis": "time"},
+        plot_action="animation",
+    )
+
+    assert fake_cfp.con_calls
+    assert fake_cfp.con_calls[-1]["animation"] is True
+    assert fake_cfp.con_calls[-1]["animation_axis"] == "time"
 
 
 def test_plot_from_selection_includes_data_save_when_requested() -> None:

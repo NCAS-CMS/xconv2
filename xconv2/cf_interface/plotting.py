@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
+import cf
 import cfplot as cfp
 import numpy as np
 from matplotlib import pyplot as plt
@@ -17,6 +19,80 @@ from xconv2.cf_interface.plot_layout_helpers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _construct_identity_text(construct: object, fallback: str) -> str:
+    """Return a stable construct identity string for downstream cf-plot calls."""
+    identity_fn = getattr(construct, "identity", None)
+    if callable(identity_fn):
+        try:
+            identity = identity_fn(default=fallback)
+        except TypeError:
+            identity = identity_fn()
+        if identity:
+            return str(identity)
+    return fallback
+
+
+def _find_animation_axis_identity(pfld: object, axis_spec: object) -> str:
+    """Resolve UI animation axis choice to a concrete CF construct identity."""
+    if not isinstance(pfld, cf.Field):
+        return "auto"
+
+    try:
+        coord_keys = list(pfld.dimension_coordinates())
+    except Exception:
+        return "auto"
+
+    constructs: list[tuple[str, Any]] = []
+    for key in coord_keys:
+        try:
+            construct = pfld.construct(key)
+        except Exception:
+            continue
+        size = int(getattr(construct, "size", 0) or 0)
+        if size <= 1:
+            continue
+        constructs.append((str(key), construct))
+
+    if not constructs:
+        return "auto"
+
+    def _match(flag: str | None = None, *, name_hints: tuple[str, ...] = ()) -> str | None:
+        for key, construct in constructs:
+            if flag and bool(getattr(construct, flag, False)):
+                return _construct_identity_text(construct, key)
+            identity_text = _construct_identity_text(construct, key).lower()
+            if any(hint in identity_text for hint in name_hints):
+                return _construct_identity_text(construct, key)
+        return None
+
+    axis_text = str(axis_spec or "auto").strip().lower()
+    explicit_map = {
+        "time": lambda: _match("T", name_hints=("time",)),
+        "level": lambda: _match("Z", name_hints=("model_level", "level", "height", "depth", "sigma")),
+        "depth": lambda: _match("Z", name_hints=("depth", "height", "level", "sigma")),
+        "latitude": lambda: _match("Y", name_hints=("latitude", "lat")),
+        "longitude": lambda: _match("X", name_hints=("longitude", "lon")),
+    }
+    if axis_text in explicit_map:
+        resolved = explicit_map[axis_text]()
+        return resolved or "auto"
+
+    if axis_text not in {"", "auto"}:
+        return axis_text
+
+    for resolver in (
+        lambda: _match("T", name_hints=("time",)),
+        lambda: _match("Z", name_hints=("model_level", "level", "height", "depth", "sigma")),
+        lambda: _match("Y", name_hints=("latitude", "lat")),
+        lambda: _match("X", name_hints=("longitude", "lon")),
+    ):
+        resolved = resolver()
+        if resolved:
+            return resolved
+
+    return "auto"
 
 
 def contour_data_range(pfld: object) -> tuple[float, float]:
@@ -123,6 +199,7 @@ def run_contour_plot(
     annotation_fontsize = _positive_float_option("annotation_fontsize", 8.0)
 
     fill = bool(options.get("fill", True))
+    is_animation = plot_action == "animation"
     lines_enabled = bool(options.get("lines", False))
     line_labels = bool(options.get("line_labels", True))
     negative_linestyle = options.get("negative_linestyle", "solid")
@@ -179,6 +256,12 @@ def run_contour_plot(
         "zero_thick": zero_thick,
         "blockfill": blockfill,
     }
+    if is_animation:
+        contour_kwargs["animation"] = True
+        contour_kwargs["animation_axis"] = _find_animation_axis_identity(
+            pfld,
+            options.get("frame_axis", "auto"),
+        )
     if title:
         contour_kwargs["title"] = str(title)
     if blockfill_fast is not None:
@@ -193,6 +276,9 @@ def run_contour_plot(
             cfp.levs()
 
     def _run_contour_prepass() -> None:
+        if is_animation:
+            return
+
         prepass_kwargs = dict(contour_kwargs)
         prepass_kwargs["fill"] = False
         prepass_kwargs["lines"] = False

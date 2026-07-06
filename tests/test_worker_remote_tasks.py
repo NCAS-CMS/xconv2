@@ -21,6 +21,35 @@ class _FakeFilesystem:
         return BytesIO(self.payload)
 
 
+class _FakeAxisConstruct:
+    def __init__(self, name: str, size: int, **flags: bool) -> None:
+        self.name = name
+        self.size = size
+        self.T = bool(flags.get("T", False))
+        self.Z = bool(flags.get("Z", False))
+        self.Y = bool(flags.get("Y", False))
+        self.X = bool(flags.get("X", False))
+
+    def identity(self, default: str | None = None) -> str:
+        return self.name or str(default or "")
+
+
+class _FakeAnimationField:
+    def __init__(self) -> None:
+        self._constructs = {
+            "dim0": _FakeAxisConstruct("time", 8, T=True),
+            "dim1": _FakeAxisConstruct("model_level_number", 55, Z=True),
+            "dim2": _FakeAxisConstruct("latitude", 3840, Y=True),
+            "dim3": _FakeAxisConstruct("longitude", 5120, X=True),
+        }
+
+    def dimension_coordinates(self) -> list[str]:
+        return list(self._constructs)
+
+    def construct(self, key: str) -> _FakeAxisConstruct:
+        return self._constructs[key]
+
+
 def test_extract_task_headers_parses_animation_flag() -> None:
     headers = worker._extract_task_headers(
         "#ANIMATION:1\n#EMIT_IMAGE:0\nprint('hello')\n"
@@ -29,6 +58,14 @@ def test_extract_task_headers_parses_animation_flag() -> None:
     assert headers.animation_enabled is True
     assert headers.emit_image is False
     assert headers.code == "print('hello')\n"
+
+
+def test_resolve_animation_axis_identity_for_field_prefers_construct_identity(monkeypatch) -> None:
+    monkeypatch.setattr(worker.cf, "Field", _FakeAnimationField)
+
+    resolved = worker._resolve_animation_axis_identity_for_field(_FakeAnimationField(), "auto")
+
+    assert resolved == "time"
 
 
 def _build_example_netcdf_bytes(tmp_path: Path, *, tracking_id: str | None = None) -> bytes:

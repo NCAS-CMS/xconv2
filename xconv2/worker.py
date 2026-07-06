@@ -84,6 +84,19 @@ _HANDLED_TASK_EXCEPTIONS = (ValueError, IndexError)
 worker_globals: dict[str, Any] = {'cf': cf}
 
 
+def _resolve_animation_axis_identity_for_field(field: object, axis_spec: object) -> str:
+    """Normalize animation axis spec to a concrete field construct identity."""
+    try:
+        from .cf_interface.plotting import _find_animation_axis_identity
+    except Exception:
+        return str(axis_spec or "auto")
+
+    try:
+        return str(_find_animation_axis_identity(field, axis_spec) or "auto")
+    except Exception:
+        return str(axis_spec or "auto")
+
+
 def _ensure_worker_runtime_loaded() -> None:
     """Load the heavy scientific runtime on demand."""
     global _WORKER_RUNTIME_LOADED
@@ -1259,7 +1272,13 @@ def _configure_animation_streaming_for_exec() -> tuple[Callable[[str | None], No
             kwargs.setdefault("animation_reference", animation_reference)
         kwargs.setdefault("reuse_map_background", True)
         kwargs.setdefault("clear_previous_frame", True)
-        kwargs.setdefault("animation_axis", "auto")
+        if args:
+            kwargs["animation_axis"] = _resolve_animation_axis_identity_for_field(
+                args[0],
+                kwargs.get("animation_axis", "auto"),
+            )
+        else:
+            kwargs.setdefault("animation_axis", "auto")
         kwargs.setdefault("animation_title_template", "{title} [{frame}]")
         try:
             return original_con(*args, **kwargs)
