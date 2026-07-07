@@ -260,11 +260,15 @@ class _FakeWidget:
 @dataclass
 class _DummyVisibilityButton:
     icon: object | None = None
+    text: str = ""
     tooltip: str = ""
     status_tip: str = ""
 
     def setIcon(self, icon: object) -> None:
         self.icon = icon
+
+    def setText(self, text: str) -> None:
+        self.text = text
 
     def setToolTip(self, tooltip: str) -> None:
         self.tooltip = tooltip

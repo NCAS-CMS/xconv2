@@ -1664,10 +1664,10 @@ class CFVCore(QMainWindow):
         self.selection_info_toggle_button = QToolButton()
         self.selection_info_toggle_button.setAutoRaise(True)
         self.selection_info_toggle_button.clicked.connect(self._toggle_selection_info_panel)
+        controls_row.addWidget(self.selection_info_toggle_button)
         controls_row.addWidget(properties_button)
         controls_row.addWidget(reset_button)
         controls_row.addStretch(1)
-        controls_row.addWidget(self.selection_info_toggle_button)
 
         layout.addLayout(controls_row)
 

@@ -22,7 +22,7 @@ button.</p>
 up/down arrow keys to navigate between the dimensions and the left/right arrow keys 
 for fine adjustments to the range sliders</p>
 <p> The properties button allows you to look at the properties of the selected field,
-while the little arrow key to the right opens a non-modal popup showing the current
+while the I button opens a non-modal popup showing the current
 field description.</p>
 """,
 )
@@ -32,8 +32,8 @@ FIELDS_HELP: tuple[str, str] = (
     """<p><b>Fields Information</b></p>
     <p> This panel shows the fields that have been loaded into, or derived within, the application.</p>
     <p> The fields are listed in a flat list.  
-    Information about any given field can be obtained by clicking on it, and information will appear 
-    in the panel to the right of the field list. </p>
+    Information about any given field can be obtained by right clicking on it, and information will appear 
+    in a popup dialog (clicking on the I button in the selection panel will also show this information). </p>
     <p> In single-file mode, if you open a new file, all the existing fields will be cleared and replaced with
     fields from the new file.</p>
     <p>In multi-file mode, if you open a new file, the fields from that file will be added 
