@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 import types
 from pathlib import Path
 
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QMessageBox, QStyle
 
 from xconv2.cache_utils import prune_disk_cache
@@ -82,6 +84,23 @@ class _DummyFieldListWidget:
 
     def row(self, _item: object) -> int:
         return self.index_to_return
+
+
+@dataclass(eq=False)
+class _DummySelectedItem:
+    name: str
+
+
+@dataclass
+class _DummyContextFieldListWidget:
+    selected: list[object] = field(default_factory=list)
+    current: object | None = None
+
+    def selectedItems(self) -> list[object]:
+        return list(self.selected)
+
+    def currentItem(self) -> object | None:
+        return self.current
 
 
 @dataclass
@@ -325,10 +344,10 @@ class _DummyCacheManagerHost:
 
 @dataclass
 class _DummyVisibilityMain:
-    plot_info_output: _DummyVisibilityPanel = field(default_factory=_DummyVisibilityPanel)
     selection_info_toggle_button: _DummyVisibilityButton = field(default_factory=_DummyVisibilityButton)
-    _selection_info_visible: bool = True
+    _selection_info_visible: bool = False
     _selection_info_expanded_from_width: int | None = None
+    opened_dialogs: int = 0
     width_value: int = 1000
     height_value: int = 700
 
@@ -351,6 +370,10 @@ class _DummyVisibilityMain:
 
     def _set_selection_info_panel_visible(self, visible: bool) -> None:
         CFVCore._set_selection_info_panel_visible(self, visible)
+
+    def _open_selection_info_dialog(self) -> None:
+        self.opened_dialogs += 1
+        self._selection_info_visible = True
 
 
 @dataclass
@@ -949,32 +972,118 @@ def test_handle_worker_output_ignores_stale_error_after_coord_message() -> None:
     assert dummy._suppress_stale_error_status is True
 
 
-def test_toggle_selection_info_panel_updates_visibility_and_button_state() -> None:
+def test_toggle_selection_info_panel_opens_popup_and_updates_button_state() -> None:
     dummy = _DummyVisibilityMain()
 
     CFVCore._toggle_selection_info_panel(dummy)
 
-    assert dummy.plot_info_output.isVisible() is False
-    assert dummy._selection_info_visible is False
-    assert dummy.selection_info_toggle_button.icon == QStyle.SP_TitleBarUnshadeButton
-    assert dummy.selection_info_toggle_button.tooltip == "Show field details"
-    assert dummy.selection_info_toggle_button.status_tip == "Show field details"
-
-    CFVCore._toggle_selection_info_panel(dummy)
-
-    assert dummy.plot_info_output.isVisible() is True
+    assert dummy.opened_dialogs == 1
     assert dummy._selection_info_visible is True
-    assert dummy.selection_info_toggle_button.icon == QStyle.SP_TitleBarShadeButton
-    assert dummy.selection_info_toggle_button.tooltip == "Hide field details"
-    assert dummy.selection_info_toggle_button.status_tip == "Hide field details"
-
-
-def test_toggle_selection_info_panel_stores_width_before_hiding() -> None:
-    dummy = _DummyVisibilityMain(width_value=1180)
+    assert isinstance(dummy.selection_info_toggle_button.icon, QIcon)
+    assert dummy.selection_info_toggle_button.tooltip == "Open field details popup"
+    assert dummy.selection_info_toggle_button.status_tip == "Open field details popup"
 
     CFVCore._toggle_selection_info_panel(dummy)
 
-    assert dummy._selection_info_expanded_from_width == 1180
+    assert dummy.opened_dialogs == 2
+
+
+def test_update_toggle_button_uses_popup_affordance() -> None:
+    dummy = _DummyVisibilityMain()
+
+    CFVCore._update_selection_info_toggle_button(dummy)
+
+    assert isinstance(dummy.selection_info_toggle_button.icon, QIcon)
+    assert dummy.selection_info_toggle_button.tooltip == "Open field details popup"
+
+
+def test_selection_info_dialog_title_uses_origin_file_name() -> None:
+    class _DummyItem:
+        def data(self, role: int):
+            if role == Qt.UserRole + 5:
+                return False
+            if role == Qt.UserRole + 2:
+                return "/tmp/example_field.nc"
+            return None
+
+    class _DummyListWidget:
+        def currentItem(self):
+            return _DummyItem()
+
+    dummy = types.SimpleNamespace(field_list_widget=_DummyListWidget())
+
+    title = CFVCore._selection_info_dialog_title(dummy)
+
+    assert title == "Origin file: example_field.nc"
+
+
+def test_selection_info_dialog_title_uses_derived_label_for_unsaved_fields() -> None:
+    class _DummyItem:
+        def data(self, role: int):
+            if role == Qt.UserRole + 5:
+                return True
+            if role == Qt.UserRole + 2:
+                return "/tmp/derived.nc"
+            return None
+
+    class _DummyListWidget:
+        def currentItem(self):
+            return _DummyItem()
+
+    dummy = types.SimpleNamespace(field_list_widget=_DummyListWidget())
+
+    title = CFVCore._selection_info_dialog_title(dummy)
+
+    assert title == "Derived, not saved"
+
+
+def test_selection_info_dialog_key_combines_title_and_detail_text() -> None:
+    key = CFVCore._selection_info_dialog_key("Origin file: a.nc", "field detail")
+
+    assert key == "Origin file: a.nc\nfield detail"
+
+
+def test_show_selected_field_info_from_context_menu_uses_current_item_when_selected() -> None:
+    current = _DummySelectedItem("current")
+    other = _DummySelectedItem("other")
+    clicked: list[object] = []
+    opened: list[str] = []
+    updated: list[str] = []
+
+    host = types.SimpleNamespace(
+        field_list_widget=_DummyContextFieldListWidget(selected=[other, current], current=current),
+        field_metadata_controller=types.SimpleNamespace(on_field_clicked=lambda item: clicked.append(item)),
+        _open_selection_info_dialog=lambda: opened.append("open"),
+        _update_selection_info_toggle_button=lambda: updated.append("update"),
+    )
+
+    CFVCore._show_selected_field_info_from_context_menu(host)
+
+    assert clicked == [current]
+    assert opened == ["open"]
+    assert updated == ["update"]
+
+
+def test_show_selected_field_info_from_context_menu_falls_back_to_first_selected() -> None:
+    first = _DummySelectedItem("first")
+    second = _DummySelectedItem("second")
+    not_selected = _DummySelectedItem("not-selected")
+    clicked: list[object] = []
+    opened: list[str] = []
+    updated: list[str] = []
+
+    host = types.SimpleNamespace(
+        field_list_widget=_DummyContextFieldListWidget(selected=[first, second], current=not_selected),
+        field_metadata_controller=types.SimpleNamespace(on_field_clicked=lambda item: clicked.append(item)),
+        _open_selection_info_dialog=lambda: opened.append("open"),
+        _update_selection_info_toggle_button=lambda: updated.append("update"),
+    )
+
+    CFVCore._show_selected_field_info_from_context_menu(host)
+
+    assert clicked == [first]
+    assert opened == ["open"]
+    assert updated == ["update"]
 
 
 def test_compute_target_window_width_expands_when_plot_is_height_limited() -> None:
@@ -1031,17 +1140,6 @@ def test_compute_target_window_width_shrinks_when_plot_is_too_wide_for_height() 
     )
 
     assert target_width == 1000
-
-
-def test_update_toggle_button_uses_hidden_state_not_effective_visibility() -> None:
-    dummy = _DummyVisibilityMain()
-    dummy.plot_info_output = _DummyStartupVisibilityPanel(hidden=False)
-
-    CFVCore._update_selection_info_toggle_button(dummy)
-
-    assert dummy._selection_info_visible is True
-    assert dummy.selection_info_toggle_button.icon == QStyle.SP_TitleBarShadeButton
-    assert dummy.selection_info_toggle_button.tooltip == "Hide field details"
 
 
 def test_reset_ui_for_new_field_selection_reveals_details_panel() -> None:

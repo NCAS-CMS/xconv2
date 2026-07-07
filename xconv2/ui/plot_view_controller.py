@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QColor, QFontDatabase, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
-    QPlainTextEdit,
     QPushButton,
     QSizePolicy,
     QStackedLayout,
@@ -108,21 +107,6 @@ class PlotViewController:
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
-
-        self.host.plot_info_output = QPlainTextEdit()
-        self.host.plot_info_output.setReadOnly(True)
-        self.host.plot_info_output.setPlaceholderText("Click a field to see details...")
-        self.host.plot_info_output.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.host.plot_info_output.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.host.plot_info_output.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
-        self.host.plot_info_output.setPlainText(
-            getattr(self.host, "current_selection_info_text", "No selection info available.")
-        )
-
-        line_height = self.host.plot_info_output.fontMetrics().lineSpacing()
-        frame_width = self.host.plot_info_output.frameWidth() * 2
-        margin = 10
-        self.host.plot_info_output.setFixedHeight((line_height * 6) + frame_width + margin)
 
         self.host.plot_frame = QLabel("Waiting for data...")
         self.host.plot_frame.setAlignment(Qt.AlignCenter)
@@ -285,7 +269,6 @@ class PlotViewController:
         summary_row.addWidget(plot_controls_group, 0, Qt.AlignVCenter)
         summary_row.addWidget(export_controls_group, 0, Qt.AlignVCenter)
 
-        layout.addWidget(self.host.plot_info_output)
         layout.addWidget(plot_stack_container, 1)
         layout.addLayout(summary_row)
 

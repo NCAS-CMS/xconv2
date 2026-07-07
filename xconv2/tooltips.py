@@ -22,8 +22,8 @@ button.</p>
 up/down arrow keys to navigate between the dimensions and the left/right arrow keys 
 for fine adjustments to the range sliders</p>
 <p> The properties button allows you to look at the properties of the selected field,
-while the little arrow key to the right toggles the display of the field description
-above the plot area.</p>
+while the little arrow key to the right opens a non-modal popup showing the current
+field description.</p>
 """,
 )
 
