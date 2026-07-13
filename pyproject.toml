@@ -17,7 +17,6 @@ dependencies = [
     "numpy",
     "pandas",
     "paramiko",
-    "umfive>=0.2.0",
     "prov",
     "pyfive",
     "PySide6",
@@ -25,6 +24,7 @@ dependencies = [
     "s3fs",
     "setuptools>80",  # cf-plot imports distutils
     "superqt",
+    "umfive>=0.2.2",
     "zarr",
 ]
 
