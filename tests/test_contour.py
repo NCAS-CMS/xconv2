@@ -287,6 +287,52 @@ def test_plot_from_selection_contour_annotations_are_rendered_when_enabled() -> 
     assert "units: K" in str(args[2])
 
 
+def test_contour_style_only_rerender_does_not_reset_regional_map_extent() -> None:
+    selections = {"latitude": ("-20", "20"), "longitude": ("10", "50")}
+
+    initial_code = plot_from_selection(
+        selections=selections,
+        collapse_by_coord={},
+        plot_kind="contour",
+        plot_options={
+            "mode": "default",
+            "map_projection": "cyl",
+            "bbox": [10.0, -20.0, 50.0, 20.0],
+            "map_resolution": "50m",
+            "fill": True,
+            "lines": False,
+            "blockfill": False,
+        },
+    )
+
+    style_only_code = plot_from_selection(
+        selections=selections,
+        collapse_by_coord={},
+        plot_kind="contour",
+        plot_options={
+            "mode": "default",
+            "fill": True,
+            "lines": False,
+            "blockfill": True,
+            "blockfill_fast": True,
+        },
+    )
+
+    fld = _FakeField()
+    cfp = _FakeCFPlot()
+
+    _run_generated(initial_code, fld, cfp)
+    assert len(cfp.mapset_calls) == 1
+    assert cfp.mapset_calls[0].get("proj") == "cyl"
+    assert cfp.mapset_calls[0].get("lonmin") == 10.0
+    assert cfp.mapset_calls[0].get("latmin") == -20.0
+    assert cfp.mapset_calls[0].get("lonmax") == 50.0
+    assert cfp.mapset_calls[0].get("latmax") == 20.0
+
+    _run_generated(style_only_code, fld, cfp)
+    assert len(cfp.mapset_calls) == 1
+
+
 
 def test_contour_range_from_selection_emits_min_max_payload() -> None:
     code = contour_range_from_selection(

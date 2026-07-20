@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QPushButton, QWidget
 
 from xconv2.ui.contour_options_controller import ContourOptionsController
 
@@ -102,3 +102,60 @@ def test_enter_in_contour_title_does_not_open_annotation_chooser(monkeypatch: py
     controller.show_contour_options_dialog(range_min=0.0, range_max=1.0, suggested_title="s")
 
     assert host.annotation_chooser_calls == 0
+
+
+def _click_dialog_button(dialog: QDialog, label: str) -> None:
+    for button in dialog.findChildren(QPushButton):
+        if button.text() == label:
+            QTest.mouseClick(button, Qt.LeftButton)
+            return
+    raise AssertionError(f"Expected button {label!r} in dialog")
+
+
+def test_apply_style_only_options_does_not_force_default_global_map(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_qapp()
+    host = _FakeHost()
+    controller = ContourOptionsController(host)
+
+    def _fake_show(self: QDialog) -> None:
+        _click_dialog_button(self, "Apply")
+        app.processEvents()
+        self.reject()
+
+    monkeypatch.setattr(QDialog, "show", _fake_show)
+
+    controller.show_contour_options_dialog(range_min=0.0, range_max=1.0, suggested_title="s")
+
+    options = host.plot_options_by_kind.get("contour", {})
+    assert "map_projection" not in options
+    assert "bbox" not in options
+    assert "map_resolution" not in options
+
+
+def test_apply_preserves_existing_map_options_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_qapp()
+    host = _FakeHost()
+    host.plot_options_by_kind["contour"] = {
+        "map_projection": "cyl",
+        "bbox": [10.0, -20.0, 50.0, 20.0],
+        "map_resolution": "50m",
+    }
+    controller = ContourOptionsController(host)
+
+    def _fake_show(self: QDialog) -> None:
+        _click_dialog_button(self, "Apply")
+        app.processEvents()
+        self.reject()
+
+    monkeypatch.setattr(QDialog, "show", _fake_show)
+
+    controller.show_contour_options_dialog(range_min=0.0, range_max=1.0, suggested_title="s")
+
+    options = host.plot_options_by_kind.get("contour", {})
+    assert options.get("map_projection") == "cyl"
+    assert options.get("bbox") == [10.0, -20.0, 50.0, 20.0]
+    assert options.get("map_resolution") == "50m"
