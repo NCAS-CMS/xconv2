@@ -68,6 +68,41 @@ def test_resolve_animation_axis_identity_for_field_prefers_construct_identity(mo
     assert resolved == "time"
 
 
+def test_configure_animation_streaming_uses_plotted_field_as_animation_reference(monkeypatch) -> None:
+    class _FakeCFP:
+        def __init__(self) -> None:
+            self.last_con_kwargs: dict[str, object] | None = None
+
+        def gopen(self, *args, **kwargs):
+            _ = (args, kwargs)
+            return None
+
+        def con(self, *args, **kwargs):
+            _ = args
+            self.last_con_kwargs = dict(kwargs)
+            return None
+
+    fake_cfp = _FakeCFP()
+    plotted_field = object()
+    unrelated_dataset = object()
+
+    monkeypatch.setattr(worker, "_ensure_worker_runtime_loaded", lambda: None)
+    monkeypatch.setattr(worker, "cfp", fake_cfp, raising=False)
+    monkeypatch.setattr(worker, "send_to_gui", lambda *args, **kwargs: None)
+    monkeypatch.setattr(worker, "_resolve_animation_axis_identity_for_field", lambda _f, _a: "time")
+    monkeypatch.setitem(worker.worker_globals, "f", unrelated_dataset)
+    monkeypatch.setitem(worker.worker_globals, "fld", unrelated_dataset)
+
+    finalize, _request_id = worker._configure_animation_streaming_for_exec()
+    try:
+        worker.cfp.con(plotted_field, animation_axis="auto")
+    finally:
+        finalize(None)
+
+    assert fake_cfp.last_con_kwargs is not None
+    assert fake_cfp.last_con_kwargs.get("animation_reference") is plotted_field
+
+
 def _build_example_netcdf_bytes(tmp_path: Path, *, tracking_id: str | None = None) -> bytes:
     """Create a tiny NetCDF payload from a cf example field for IO-oriented tests."""
     field = cf.example_field(0)

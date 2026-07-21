@@ -102,6 +102,56 @@ class _FakeAnimationField:
 
 
 @dataclass
+class _FakeCallableAxisConstruct:
+    name: str
+    size: int
+    is_t: bool = False
+    is_z: bool = False
+    is_y: bool = False
+    is_x: bool = False
+
+    def identity(self, default: str | None = None) -> str:
+        return self.name or str(default or "")
+
+    def T(self, default: bool = False) -> bool:
+        _ = default
+        return self.is_t
+
+    def Z(self, default: bool = False) -> bool:
+        _ = default
+        return self.is_z
+
+    def Y(self, default: bool = False) -> bool:
+        _ = default
+        return self.is_y
+
+    def X(self, default: bool = False) -> bool:
+        _ = default
+        return self.is_x
+
+
+class _FakeAnimationFieldCallableAxes:
+    def __init__(self) -> None:
+        # Keep Z first to catch regressions where bound methods are treated as truthy.
+        self._constructs = {
+            "dim0": _FakeCallableAxisConstruct("model_level_number", 55, is_z=True),
+            "dim1": _FakeCallableAxisConstruct("time", 8, is_t=True),
+            "dim2": _FakeCallableAxisConstruct("latitude", 3840, is_y=True),
+            "dim3": _FakeCallableAxisConstruct("longitude", 5120, is_x=True),
+        }
+
+    @property
+    def array(self) -> np.ndarray:
+        return np.array([[0.0, 1.0], [2.0, 3.0]], dtype=float)
+
+    def dimension_coordinates(self) -> list[str]:
+        return list(self._constructs)
+
+    def construct(self, key: str) -> _FakeCallableAxisConstruct:
+        return self._constructs[key]
+
+
+@dataclass
 class _FakeCFPlot:
     levs_calls: list[dict[str, object]] = field(default_factory=list)
     con_calls: list[dict[str, object]] = field(default_factory=list)
@@ -425,6 +475,25 @@ def test_run_contour_plot_animation_uses_resolved_axis_identity(monkeypatch) -> 
 
     run_contour_plot(
         pfld=_FakeAnimationField(),
+        options={"mode": "default", "frame_axis": "time"},
+        plot_action="animation",
+    )
+
+    assert fake_cfp.con_calls
+    assert fake_cfp.con_calls[-1]["animation"] is True
+    assert fake_cfp.con_calls[-1]["animation_axis"] == "time"
+
+
+def test_run_contour_plot_animation_axis_resolution_supports_callable_axis_markers(monkeypatch) -> None:
+    fake_cfp = _FakeCFPlot()
+    fake_plt = _FakePlt()
+
+    monkeypatch.setattr(plotting, "cfp", fake_cfp)
+    monkeypatch.setattr(plotting, "plt", fake_plt)
+    monkeypatch.setattr(plotting, "cf", SimpleNamespace(Field=_FakeAnimationFieldCallableAxes))
+
+    run_contour_plot(
+        pfld=_FakeAnimationFieldCallableAxes(),
         options={"mode": "default", "frame_axis": "time"},
         plot_action="animation",
     )

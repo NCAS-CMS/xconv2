@@ -1267,9 +1267,13 @@ def _configure_animation_streaming_for_exec() -> tuple[Callable[[str | None], No
 
     def _wrapped_con(*args: Any, **kwargs: Any) -> Any:
         kwargs.setdefault("animation", True)
-        animation_reference = worker_globals.get("f")
-        if animation_reference is not None:
-            kwargs.setdefault("animation_reference", animation_reference)
+        if "animation_reference" not in kwargs:
+            if args:
+                kwargs["animation_reference"] = args[0]
+            else:
+                animation_reference = worker_globals.get("fld")
+                if animation_reference is not None:
+                    kwargs["animation_reference"] = animation_reference
         kwargs.setdefault("reuse_map_background", True)
         kwargs.setdefault("clear_previous_frame", True)
         if args:

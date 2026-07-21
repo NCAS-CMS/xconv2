@@ -58,9 +58,21 @@ def _find_animation_axis_identity(pfld: object, axis_spec: object) -> str:
     if not constructs:
         return "auto"
 
+    def _axis_flag_matches(construct: object, flag: str) -> bool:
+        """Return True when a construct reports membership on a CF axis."""
+        marker = getattr(construct, flag, False)
+        if callable(marker):
+            try:
+                marker = marker()
+            except TypeError:
+                marker = marker(default=False)
+            except Exception:
+                return False
+        return bool(marker)
+
     def _match(flag: str | None = None, *, name_hints: tuple[str, ...] = ()) -> str | None:
         for key, construct in constructs:
-            if flag and bool(getattr(construct, flag, False)):
+            if flag and _axis_flag_matches(construct, flag):
                 return _construct_identity_text(construct, key)
             identity_text = _construct_identity_text(construct, key).lower()
             if any(hint in identity_text for hint in name_hints):
