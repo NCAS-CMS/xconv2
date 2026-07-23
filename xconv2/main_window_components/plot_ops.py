@@ -178,6 +178,22 @@ def request_plot_task(
             plot_options.setdefault("page_title_fontsize", host._page_title_fontsize())
             plot_options.setdefault("annotation_fontsize", host._annotation_fontsize())
 
+            if plot_action == "animation":
+                raw_animation_options = host.plot_options_by_kind.get("animation", {})
+                animation_options = dict(raw_animation_options) if isinstance(raw_animation_options, dict) else {}
+                for key in (
+                    "fps_hint",
+                    "frame_axis",
+                    "max_frames",
+                    "show_frame_labels",
+                    "frame_border_px",
+                    "trim_frame_whitespace",
+                ):
+                    if key in animation_options:
+                        plot_options[key] = animation_options[key]
+                plot_options.setdefault("frame_border_px", 15)
+                plot_options.setdefault("trim_frame_whitespace", True)
+
         contour_context: dict[str, object] | None = None
         if plot_kind == "contour":
             contour_context = {

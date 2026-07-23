@@ -103,6 +103,93 @@ def test_configure_animation_streaming_uses_plotted_field_as_animation_reference
     assert fake_cfp.last_con_kwargs.get("animation_reference") is plotted_field
 
 
+def test_emit_animation_frame_uses_tight_bbox_with_fixed_padding(monkeypatch) -> None:
+    class _FakeFigure:
+        def __init__(self) -> None:
+            self.savefig_kwargs: dict[str, object] | None = None
+
+        def get_dpi(self) -> float:
+            return 100.0
+
+        def savefig(self, buffer, **kwargs):
+            self.savefig_kwargs = dict(kwargs)
+            buffer.write(b"png")
+
+    class _FakePlt:
+        def __init__(self, fig: _FakeFigure) -> None:
+            self._fig = fig
+
+        def get_fignums(self):
+            return [1]
+
+        def figure(self, _num: int):
+            return self._fig
+
+    captured: list[tuple[str, object]] = []
+    fake_fig = _FakeFigure()
+
+    monkeypatch.setattr(worker, "_ensure_worker_runtime_loaded", lambda: None)
+    monkeypatch.setattr(worker, "plt", _FakePlt(fake_fig), raising=False)
+    monkeypatch.setattr(worker, "send_to_gui", lambda prefix, data=None: captured.append((prefix, data)))
+
+    worker._emit_animation_frame(
+        request_id="req",
+        session_id="sess",
+        frame_index=0,
+        total_frames=1,
+        frame_border_px=15,
+    )
+
+    assert fake_fig.savefig_kwargs is not None
+    assert fake_fig.savefig_kwargs.get("bbox_inches") == "tight"
+    assert fake_fig.savefig_kwargs.get("pad_inches") == 0.15
+    assert captured and captured[0][0] == "ANIM_FRAME"
+
+
+def test_emit_animation_frame_without_trim_uses_default_bbox(monkeypatch) -> None:
+    class _FakeFigure:
+        def __init__(self) -> None:
+            self.savefig_kwargs: dict[str, object] | None = None
+
+        def get_dpi(self) -> float:
+            return 100.0
+
+        def savefig(self, buffer, **kwargs):
+            self.savefig_kwargs = dict(kwargs)
+            buffer.write(b"png")
+
+    class _FakePlt:
+        def __init__(self, fig: _FakeFigure) -> None:
+            self._fig = fig
+
+        def get_fignums(self):
+            return [1]
+
+        def figure(self, _num: int):
+            return self._fig
+
+    captured: list[tuple[str, object]] = []
+    fake_fig = _FakeFigure()
+
+    monkeypatch.setattr(worker, "_ensure_worker_runtime_loaded", lambda: None)
+    monkeypatch.setattr(worker, "plt", _FakePlt(fake_fig), raising=False)
+    monkeypatch.setattr(worker, "send_to_gui", lambda prefix, data=None: captured.append((prefix, data)))
+
+    worker._emit_animation_frame(
+        request_id="req",
+        session_id="sess",
+        frame_index=0,
+        total_frames=1,
+        frame_border_px=15,
+        trim_whitespace=False,
+    )
+
+    assert fake_fig.savefig_kwargs is not None
+    assert "bbox_inches" not in fake_fig.savefig_kwargs
+    assert "pad_inches" not in fake_fig.savefig_kwargs
+    assert captured and captured[0][0] == "ANIM_FRAME"
+
+
 def _build_example_netcdf_bytes(tmp_path: Path, *, tracking_id: str | None = None) -> bytes:
     """Create a tiny NetCDF payload from a cf example field for IO-oriented tests."""
     field = cf.example_field(0)

@@ -1429,6 +1429,105 @@ def test_plot_ops_animation_go_routes_to_worker_animation_task() -> None:
     assert host.sent_tasks == [("_cfview_field_index = 2\nfld = f[2]\nPLOT_CODE", None, False, True)]
 
 
+def test_plot_ops_animation_merges_animation_options_into_contour_options() -> None:
+    class _DummyListWidget:
+        def item(self, _index: int):
+            return None
+
+    class _DummyWorker:
+        def processId(self) -> int:
+            return 999
+
+    class _DummyHost:
+        def __init__(self) -> None:
+            self.field_list_widget = _DummyListWidget()
+            self.worker = _DummyWorker()
+            self.plot_options_by_kind = {
+                "contour": {},
+                "animation": {
+                    "frame_axis": "time",
+                    "frame_border_px": 22,
+                    "trim_frame_whitespace": False,
+                    "max_frames": 40,
+                    "show_frame_labels": True,
+                },
+            }
+            self.selected_plot_action = "animation"
+            self._plot_request_in_flight = False
+            self._plot_request_expects_image = False
+            self._suppress_stale_error_status = False
+            self.sent_tasks: list[tuple[str, str | None, bool, bool]] = []
+            self.captured_plot_options: dict[str, object] | None = None
+
+        def _build_plot_context(self):
+            return ({"time": (0, 10), "lat": (-10, 10), "lon": (0, 20)}, {}, "contour")
+
+        def _selected_field_index_for_operation(self, _operation: str) -> int | None:
+            return 2
+
+        def _field_identity_from_item(self, _item) -> str:
+            return "field-2"
+
+        def _show_status_message(self, _message: str, is_error: bool = False) -> None:
+            _ = is_error
+
+        def _show_vector_options_dialog(self, _field_index: int) -> None:
+            raise AssertionError("Vector options should not be requested")
+
+        def _set_plot_loading(self, _is_loading: bool, message: str = "") -> None:
+            _ = message
+
+        def _contour_title_fontsize(self) -> float:
+            return 10.0
+
+        def _page_title_fontsize(self) -> float:
+            return 10.0
+
+        def _annotation_fontsize(self) -> float:
+            return 8.0
+
+        def _send_worker_task(
+            self,
+            code: str,
+            save_code_path: str | None = None,
+            emit_image: bool = True,
+            animation_enabled: bool = False,
+        ) -> None:
+            self.sent_tasks.append((code, save_code_path, emit_image, animation_enabled))
+
+    host = _DummyHost()
+
+    from xconv2.main_window_components import plot_ops
+
+    def _capture_plot_from_selection(
+        _selections,
+        _collapse_by_coord,
+        _plot_kind,
+        plot_options,
+        **_kwargs,
+    ):
+        host.captured_plot_options = dict(plot_options or {})
+        return "PLOT_CODE"
+
+    plot_ops.request_plot_task(
+        host,
+        save_code_path=None,
+        save_plot_path=None,
+        save_data_path=None,
+        emit_image_override=None,
+        save_data_from_selection_fn=lambda *_: "SAVE_DATA",
+        plot_from_selection_fn=_capture_plot_from_selection,
+        build_vector_overplot_command_fn=lambda **_kwargs: "VECTOR_OVERPLOT",
+    )
+
+    assert host.sent_tasks == [("_cfview_field_index = 2\nfld = f[2]\nPLOT_CODE", None, False, True)]
+    assert host.captured_plot_options is not None
+    assert host.captured_plot_options.get("frame_axis") == "time"
+    assert host.captured_plot_options.get("frame_border_px") == 22
+    assert host.captured_plot_options.get("trim_frame_whitespace") is False
+    assert host.captured_plot_options.get("max_frames") == 40
+
+
 def test_animation_playback_respects_loop_and_fps_interval() -> None:
     class _FakeTimer:
         def __init__(self) -> None:

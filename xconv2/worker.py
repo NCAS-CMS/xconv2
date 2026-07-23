@@ -1126,6 +1126,8 @@ def _emit_animation_frame(
     frame_index: int,
     total_frames: int | None,
     frame_value_label: str | None = None,
+    frame_border_px: int = 15,
+    trim_whitespace: bool = True,
 ) -> None:
     """Emit a single animation frame to GUI."""
     import time
@@ -1139,7 +1141,16 @@ def _emit_animation_frame(
     fig = plt.figure(fig_numbers[-1])
     buffer = BytesIO()
     dpi = fig.get_dpi() if hasattr(fig, "get_dpi") else 120
-    fig.savefig(buffer, format="png", dpi=dpi)
+    border_px = max(int(frame_border_px), 0)
+    savefig_kwargs: dict[str, object] = {
+        "format": "png",
+        "dpi": dpi,
+    }
+    if bool(trim_whitespace):
+        pad_inches = float(border_px) / float(dpi) if dpi else 0.0
+        savefig_kwargs["bbox_inches"] = "tight"
+        savefig_kwargs["pad_inches"] = pad_inches
+    fig.savefig(buffer, **savefig_kwargs)
     buffer.seek(0)
     png_bytes = buffer.getvalue()
     buffer.close()
@@ -1206,6 +1217,8 @@ def _configure_animation_streaming_for_exec() -> tuple[Callable[[str | None], No
         "total_frames": None,
         "fps_hint": None,
         "title_template": None,
+        "frame_border_px": 15,
+        "trim_whitespace": True,
     }
 
     def _emit_start_if_needed() -> None:
@@ -1253,6 +1266,8 @@ def _configure_animation_streaming_for_exec() -> tuple[Callable[[str | None], No
             frame_index=frame_index,
             total_frames=state["total_frames"] if isinstance(state["total_frames"], int) else None,
             frame_value_label=frame_value_label,
+            frame_border_px=int(state.get("frame_border_px", 15) or 15),
+            trim_whitespace=bool(state.get("trim_whitespace", True)),
         )
 
         next_count = frame_index + 1
@@ -1267,6 +1282,15 @@ def _configure_animation_streaming_for_exec() -> tuple[Callable[[str | None], No
 
     def _wrapped_con(*args: Any, **kwargs: Any) -> Any:
         kwargs.setdefault("animation", True)
+        raw_border = kwargs.pop("animation_border_px", None)
+        if raw_border is not None:
+            try:
+                state["frame_border_px"] = max(int(raw_border), 0)
+            except (TypeError, ValueError):
+                state["frame_border_px"] = 15
+        raw_trim = kwargs.pop("animation_trim_whitespace", None)
+        if raw_trim is not None:
+            state["trim_whitespace"] = bool(raw_trim)
         if "animation_reference" not in kwargs:
             if args:
                 kwargs["animation_reference"] = args[0]

@@ -396,7 +396,7 @@ class AnimationOptionsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Animation Options")
-        self.resize(460, 260)
+        self.resize(460, 300)
 
         options = dict(current_options or {})
 
@@ -434,6 +434,21 @@ class AnimationOptionsDialog(QDialog):
         self.max_frames_spin.setToolTip("Limit number of frames rendered. Set to All for no cap.")
         form.addRow("Frame limit", self.max_frames_spin)
 
+        self.frame_border_spin = QSpinBox(self)
+        self.frame_border_spin.setRange(0, 200)
+        self.frame_border_spin.setValue(int(options.get("frame_border_px", 15) or 15))
+        self.frame_border_spin.setToolTip(
+            "Trim outer whitespace and keep this fixed pixel border around each animation frame."
+        )
+        form.addRow("Frame border (px)", self.frame_border_spin)
+
+        self.trim_whitespace_checkbox = QCheckBox("Trim outer whitespace", self)
+        self.trim_whitespace_checkbox.setChecked(bool(options.get("trim_frame_whitespace", True)))
+        self.trim_whitespace_checkbox.setToolTip(
+            "When enabled, crop each frame to content bounds before applying frame border."
+        )
+        form.addRow("Frame cropping", self.trim_whitespace_checkbox)
+
         self.loop_checkbox = QCheckBox("Loop playback when finished", self)
         self.loop_checkbox.setChecked(bool(options.get("loop_playback", True)))
         form.addRow("Playback", self.loop_checkbox)
@@ -455,6 +470,8 @@ class AnimationOptionsDialog(QDialog):
             "fps_hint": int(self.fps_spin.value()),
             "frame_axis": str(self.frame_axis_combo.currentData() or "auto"),
             "max_frames": int(self.max_frames_spin.value()),
+            "frame_border_px": int(self.frame_border_spin.value()),
+            "trim_frame_whitespace": bool(self.trim_whitespace_checkbox.isChecked()),
             "loop_playback": bool(self.loop_checkbox.isChecked()),
             "show_frame_labels": bool(self.show_labels_checkbox.isChecked()),
         }

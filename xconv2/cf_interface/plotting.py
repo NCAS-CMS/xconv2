@@ -206,6 +206,14 @@ def run_contour_plot(
             return default
         return value
 
+    def _non_negative_int_option(key: str, default: int) -> int:
+        raw = options.get(key, default)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return default
+        return max(value, 0)
+
     contour_title_fontsize = _positive_float_option("contour_title_fontsize", 10.5)
     page_title_fontsize = _positive_float_option("page_title_fontsize", 10.0)
     annotation_fontsize = _positive_float_option("annotation_fontsize", 8.0)
@@ -274,6 +282,8 @@ def run_contour_plot(
             pfld,
             options.get("frame_axis", "auto"),
         )
+        contour_kwargs["animation_border_px"] = _non_negative_int_option("frame_border_px", 15)
+        contour_kwargs["animation_trim_whitespace"] = bool(options.get("trim_frame_whitespace", True))
     if title:
         contour_kwargs["title"] = str(title)
     if blockfill_fast is not None:
