@@ -9,19 +9,23 @@ def _cfplot_colourmaps_dir() -> Path | None:
     """Locate the cfplot colourmaps directory.
 
     Works in three environments:
-    - Frozen one-dir bundle: data files land in _MEIPASS/cfplot/colourmaps/
+    - Frozen one-dir bundle: data files land in _MEIPASS/cfplot/colour/colourmaps/
     - Development / normal install: resolve via cfplot package __file__
+
+    Note: xconv2 intentionally targets the refactored cf-plot layout
+    (cfplot/colour/colourmaps). Legacy cfplot/colourmaps support was removed.
     """
     if getattr(sys, "frozen", False):
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
-            candidate = Path(meipass) / "cfplot" / "colourmaps"
+            candidate = Path(meipass) / "cfplot" / "colour" / "colourmaps"
             if candidate.is_dir():
                 return candidate
     # Non-frozen: locate via the installed package
     try:
         import cfplot
-        candidate = Path(cfplot.__file__).parent / "colourmaps"
+        package_root = Path(cfplot.__file__).resolve().parent
+        candidate = package_root / "colour" / "colourmaps"
         if candidate.is_dir():
             return candidate
     except ImportError:

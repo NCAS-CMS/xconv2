@@ -18,15 +18,8 @@ Use the `work26t` conda environment, build with the project spec, and test start
 Run from repository root:
 
 ```bash
-conda run -n work26t pyinstaller --clean --noconfirm xconv2.spec
+pyinstaller --clean --noconfirm xconv2.spec
 ```
-
-Quickly check the end of build output:
-
-```bash
-conda run -n work26t pyinstaller --clean --noconfirm xconv2.spec 2>&1 | tail -20
-```
-
 Expected successful ending includes:
 
 - `Building BUNDLE ... completed successfully`

@@ -21,6 +21,175 @@ class _FakeFilesystem:
         return BytesIO(self.payload)
 
 
+class _FakeAxisConstruct:
+    def __init__(self, name: str, size: int, **flags: bool) -> None:
+        self.name = name
+        self.size = size
+        self.T = bool(flags.get("T", False))
+        self.Z = bool(flags.get("Z", False))
+        self.Y = bool(flags.get("Y", False))
+        self.X = bool(flags.get("X", False))
+
+    def identity(self, default: str | None = None) -> str:
+        return self.name or str(default or "")
+
+
+class _FakeAnimationField:
+    def __init__(self) -> None:
+        self._constructs = {
+            "dim0": _FakeAxisConstruct("time", 8, T=True),
+            "dim1": _FakeAxisConstruct("model_level_number", 55, Z=True),
+            "dim2": _FakeAxisConstruct("latitude", 3840, Y=True),
+            "dim3": _FakeAxisConstruct("longitude", 5120, X=True),
+        }
+
+    def dimension_coordinates(self) -> list[str]:
+        return list(self._constructs)
+
+    def construct(self, key: str) -> _FakeAxisConstruct:
+        return self._constructs[key]
+
+
+def test_extract_task_headers_parses_animation_flag() -> None:
+    headers = worker._extract_task_headers(
+        "#ANIMATION:1\n#EMIT_IMAGE:0\nprint('hello')\n"
+    )
+
+    assert headers.animation_enabled is True
+    assert headers.emit_image is False
+    assert headers.code == "print('hello')\n"
+
+
+def test_resolve_animation_axis_identity_for_field_prefers_construct_identity(monkeypatch) -> None:
+    monkeypatch.setattr(worker.cf, "Field", _FakeAnimationField)
+
+    resolved = worker._resolve_animation_axis_identity_for_field(_FakeAnimationField(), "auto")
+
+    assert resolved == "time"
+
+
+def test_configure_animation_streaming_uses_plotted_field_as_animation_reference(monkeypatch) -> None:
+    class _FakeCFP:
+        def __init__(self) -> None:
+            self.last_con_kwargs: dict[str, object] | None = None
+
+        def gopen(self, *args, **kwargs):
+            _ = (args, kwargs)
+            return None
+
+        def con(self, *args, **kwargs):
+            _ = args
+            self.last_con_kwargs = dict(kwargs)
+            return None
+
+    fake_cfp = _FakeCFP()
+    plotted_field = object()
+    unrelated_dataset = object()
+
+    monkeypatch.setattr(worker, "_ensure_worker_runtime_loaded", lambda: None)
+    monkeypatch.setattr(worker, "cfp", fake_cfp, raising=False)
+    monkeypatch.setattr(worker, "send_to_gui", lambda *args, **kwargs: None)
+    monkeypatch.setattr(worker, "_resolve_animation_axis_identity_for_field", lambda _f, _a: "time")
+    monkeypatch.setitem(worker.worker_globals, "f", unrelated_dataset)
+    monkeypatch.setitem(worker.worker_globals, "fld", unrelated_dataset)
+
+    finalize, _request_id = worker._configure_animation_streaming_for_exec()
+    try:
+        worker.cfp.con(plotted_field, animation_axis="auto")
+    finally:
+        finalize(None)
+
+    assert fake_cfp.last_con_kwargs is not None
+    assert fake_cfp.last_con_kwargs.get("animation_reference") is plotted_field
+
+
+def test_emit_animation_frame_uses_tight_bbox_with_fixed_padding(monkeypatch) -> None:
+    class _FakeFigure:
+        def __init__(self) -> None:
+            self.savefig_kwargs: dict[str, object] | None = None
+
+        def get_dpi(self) -> float:
+            return 100.0
+
+        def savefig(self, buffer, **kwargs):
+            self.savefig_kwargs = dict(kwargs)
+            buffer.write(b"png")
+
+    class _FakePlt:
+        def __init__(self, fig: _FakeFigure) -> None:
+            self._fig = fig
+
+        def get_fignums(self):
+            return [1]
+
+        def figure(self, _num: int):
+            return self._fig
+
+    captured: list[tuple[str, object]] = []
+    fake_fig = _FakeFigure()
+
+    monkeypatch.setattr(worker, "_ensure_worker_runtime_loaded", lambda: None)
+    monkeypatch.setattr(worker, "plt", _FakePlt(fake_fig), raising=False)
+    monkeypatch.setattr(worker, "send_to_gui", lambda prefix, data=None: captured.append((prefix, data)))
+
+    worker._emit_animation_frame(
+        request_id="req",
+        session_id="sess",
+        frame_index=0,
+        total_frames=1,
+        frame_border_px=15,
+    )
+
+    assert fake_fig.savefig_kwargs is not None
+    assert fake_fig.savefig_kwargs.get("bbox_inches") == "tight"
+    assert fake_fig.savefig_kwargs.get("pad_inches") == 0.15
+    assert captured and captured[0][0] == "ANIM_FRAME"
+
+
+def test_emit_animation_frame_without_trim_uses_default_bbox(monkeypatch) -> None:
+    class _FakeFigure:
+        def __init__(self) -> None:
+            self.savefig_kwargs: dict[str, object] | None = None
+
+        def get_dpi(self) -> float:
+            return 100.0
+
+        def savefig(self, buffer, **kwargs):
+            self.savefig_kwargs = dict(kwargs)
+            buffer.write(b"png")
+
+    class _FakePlt:
+        def __init__(self, fig: _FakeFigure) -> None:
+            self._fig = fig
+
+        def get_fignums(self):
+            return [1]
+
+        def figure(self, _num: int):
+            return self._fig
+
+    captured: list[tuple[str, object]] = []
+    fake_fig = _FakeFigure()
+
+    monkeypatch.setattr(worker, "_ensure_worker_runtime_loaded", lambda: None)
+    monkeypatch.setattr(worker, "plt", _FakePlt(fake_fig), raising=False)
+    monkeypatch.setattr(worker, "send_to_gui", lambda prefix, data=None: captured.append((prefix, data)))
+
+    worker._emit_animation_frame(
+        request_id="req",
+        session_id="sess",
+        frame_index=0,
+        total_frames=1,
+        frame_border_px=15,
+        trim_whitespace=False,
+    )
+
+    assert fake_fig.savefig_kwargs is not None
+    assert "bbox_inches" not in fake_fig.savefig_kwargs
+    assert "pad_inches" not in fake_fig.savefig_kwargs
+    assert captured and captured[0][0] == "ANIM_FRAME"
+
+
 def _build_example_netcdf_bytes(tmp_path: Path, *, tracking_id: str | None = None) -> bytes:
     """Create a tiny NetCDF payload from a cf example field for IO-oriented tests."""
     field = cf.example_field(0)

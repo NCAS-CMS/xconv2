@@ -492,6 +492,7 @@ class SelectionController:
 
     def refresh_plot_summary(self) -> None:
         """Update plot summary text and plot button availability."""
+        guidance_text = "Change dimensionality for other options"
         if not self.host.controls:
             self.host.plot_summary_label.setText("Open a field to inspect plot options.")
             self.host.plot_info_button.hide()
@@ -499,8 +500,11 @@ class SelectionController:
             self.host.available_plot_kinds = []
             self.host.selected_plot_kind = None
             self.host.selected_plot_action = "plot"
-            self.host.plot_view_controller.set_plot_type_options([], None)
-            self.host.plot_view_controller.set_plot_action_options(has_existing_plot=False)
+            self.host.plot_view_controller.set_plot_type_options([], None, varying_dims=None)
+            self.host.plot_view_controller.set_plot_action_options(
+                has_existing_plot=False,
+                varying_dims=None,
+            )
             self.host.plot_button.setEnabled(False)
             self.host.options_button.setEnabled(False)
             self._set_save_controls_enabled(False)
@@ -524,8 +528,12 @@ class SelectionController:
             available_plot_kinds = ["lineplot"]
         elif varying_dims == 2:
             available_plot_kinds = ["lineplot", "contour", "vector"]
+        elif varying_dims == 3:
+            # 3D selections are rendered as frame-by-frame contour animations.
+            available_plot_kinds = ["contour"]
         else:
             available_plot_kinds = []
+
 
         previous_kind = self.host.selected_plot_kind
         previous_varying_dims = self.host.last_varying_dims
@@ -545,20 +553,28 @@ class SelectionController:
         self.host.available_plot_kinds = available_plot_kinds
         self.host.selected_plot_kind = selected_kind
         self.host.last_varying_dims = varying_dims
-        self.host.plot_view_controller.set_plot_type_options(available_plot_kinds, selected_kind)
+        self.host.plot_view_controller.set_plot_type_options(
+            available_plot_kinds,
+            selected_kind,
+            varying_dims=varying_dims,
+        )
         self.host.plot_view_controller.set_plot_action_options(
-            has_existing_plot=getattr(self.host, "_plot_pixmap_original", None) is not None
+            has_existing_plot=getattr(self.host, "_plot_pixmap_original", None) is not None,
+            supports_animation=varying_dims == 3,
+            varying_dims=varying_dims,
         )
 
         if varying_dims == 0:
-            self.host.plot_summary_label.setText(f"{dims_text} \nTotal collapse, plot not possible")
+            self.host.plot_summary_label.setText(
+                f"{dims_text} \nTotal collapse, plot not possible\n{guidance_text}"
+            )
             self.host.plot_info_button.show()
             self.host.plot_button.setEnabled(False)
             self.host.options_button.setEnabled(False)
             self._set_save_controls_enabled(False)
         elif varying_dims == 1:
             self.host.plot_summary_label.setText(
-                f"{dims_text} \nPlot Type: {selected_kind.title() if selected_kind else 'N/A'}"
+                f"{dims_text} \nPlot Type: {selected_kind.title() if selected_kind else 'N/A'}\n{guidance_text}"
             )
             self.host.plot_info_button.show()
             self.host.plot_button.setEnabled(True)
@@ -566,15 +582,23 @@ class SelectionController:
             self._set_save_controls_enabled(True)
         elif varying_dims == 2:
             self.host.plot_summary_label.setText(
-                f"{dims_text} \nPlot Type: {selected_kind.title() if selected_kind else 'N/A'}"
+                f"{dims_text} \nPlot Type: {selected_kind.title() if selected_kind else 'N/A'}\n{guidance_text}"
             )
             self.host.plot_info_button.show()
             self.host.plot_button.setEnabled(True)
             self.host.options_button.setEnabled(selected_kind in {"contour", "lineplot", "vector"})
             self._set_save_controls_enabled(True)
+        elif varying_dims == 3:
+            self.host.plot_summary_label.setText(
+                f"{dims_text} \nPlot Type: Contour (Animation mode)\n{guidance_text}"
+            )
+            self.host.plot_info_button.show()
+            self.host.plot_button.setEnabled(True)
+            self.host.options_button.setEnabled(True)
+            self._set_save_controls_enabled(True)
         else:
             self.host.plot_summary_label.setText(
-                f"{dims_text} \nNeed to reduce to 1D or 2D before plotting"
+                f"{dims_text} \nNeed to reduce to 1D, 2D, or 3D before plotting\n{guidance_text}"
             )
             self.host.plot_info_button.show()
             self.host.plot_button.setEnabled(False)

@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 import types
 from pathlib import Path
 
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QMessageBox, QStyle
 
 from xconv2.cache_utils import prune_disk_cache
@@ -82,6 +84,23 @@ class _DummyFieldListWidget:
 
     def row(self, _item: object) -> int:
         return self.index_to_return
+
+
+@dataclass(eq=False)
+class _DummySelectedItem:
+    name: str
+
+
+@dataclass
+class _DummyContextFieldListWidget:
+    selected: list[object] = field(default_factory=list)
+    current: object | None = None
+
+    def selectedItems(self) -> list[object]:
+        return list(self.selected)
+
+    def currentItem(self) -> object | None:
+        return self.current
 
 
 @dataclass
@@ -241,11 +260,15 @@ class _FakeWidget:
 @dataclass
 class _DummyVisibilityButton:
     icon: object | None = None
+    text: str = ""
     tooltip: str = ""
     status_tip: str = ""
 
     def setIcon(self, icon: object) -> None:
         self.icon = icon
+
+    def setText(self, text: str) -> None:
+        self.text = text
 
     def setToolTip(self, tooltip: str) -> None:
         self.tooltip = tooltip
@@ -325,10 +348,10 @@ class _DummyCacheManagerHost:
 
 @dataclass
 class _DummyVisibilityMain:
-    plot_info_output: _DummyVisibilityPanel = field(default_factory=_DummyVisibilityPanel)
     selection_info_toggle_button: _DummyVisibilityButton = field(default_factory=_DummyVisibilityButton)
-    _selection_info_visible: bool = True
+    _selection_info_visible: bool = False
     _selection_info_expanded_from_width: int | None = None
+    opened_dialogs: int = 0
     width_value: int = 1000
     height_value: int = 700
 
@@ -351,6 +374,10 @@ class _DummyVisibilityMain:
 
     def _set_selection_info_panel_visible(self, visible: bool) -> None:
         CFVCore._set_selection_info_panel_visible(self, visible)
+
+    def _open_selection_info_dialog(self) -> None:
+        self.opened_dialogs += 1
+        self._selection_info_visible = True
 
 
 @dataclass
@@ -949,32 +976,118 @@ def test_handle_worker_output_ignores_stale_error_after_coord_message() -> None:
     assert dummy._suppress_stale_error_status is True
 
 
-def test_toggle_selection_info_panel_updates_visibility_and_button_state() -> None:
+def test_toggle_selection_info_panel_opens_popup_and_updates_button_state() -> None:
     dummy = _DummyVisibilityMain()
 
     CFVCore._toggle_selection_info_panel(dummy)
 
-    assert dummy.plot_info_output.isVisible() is False
-    assert dummy._selection_info_visible is False
-    assert dummy.selection_info_toggle_button.icon == QStyle.SP_TitleBarUnshadeButton
-    assert dummy.selection_info_toggle_button.tooltip == "Show field details"
-    assert dummy.selection_info_toggle_button.status_tip == "Show field details"
-
-    CFVCore._toggle_selection_info_panel(dummy)
-
-    assert dummy.plot_info_output.isVisible() is True
+    assert dummy.opened_dialogs == 1
     assert dummy._selection_info_visible is True
-    assert dummy.selection_info_toggle_button.icon == QStyle.SP_TitleBarShadeButton
-    assert dummy.selection_info_toggle_button.tooltip == "Hide field details"
-    assert dummy.selection_info_toggle_button.status_tip == "Hide field details"
-
-
-def test_toggle_selection_info_panel_stores_width_before_hiding() -> None:
-    dummy = _DummyVisibilityMain(width_value=1180)
+    assert isinstance(dummy.selection_info_toggle_button.icon, QIcon)
+    assert dummy.selection_info_toggle_button.tooltip == "Open field details popup"
+    assert dummy.selection_info_toggle_button.status_tip == "Open field details popup"
 
     CFVCore._toggle_selection_info_panel(dummy)
 
-    assert dummy._selection_info_expanded_from_width == 1180
+    assert dummy.opened_dialogs == 2
+
+
+def test_update_toggle_button_uses_popup_affordance() -> None:
+    dummy = _DummyVisibilityMain()
+
+    CFVCore._update_selection_info_toggle_button(dummy)
+
+    assert isinstance(dummy.selection_info_toggle_button.icon, QIcon)
+    assert dummy.selection_info_toggle_button.tooltip == "Open field details popup"
+
+
+def test_selection_info_dialog_title_uses_origin_file_name() -> None:
+    class _DummyItem:
+        def data(self, role: int):
+            if role == Qt.UserRole + 5:
+                return False
+            if role == Qt.UserRole + 2:
+                return "/tmp/example_field.nc"
+            return None
+
+    class _DummyListWidget:
+        def currentItem(self):
+            return _DummyItem()
+
+    dummy = types.SimpleNamespace(field_list_widget=_DummyListWidget())
+
+    title = CFVCore._selection_info_dialog_title(dummy)
+
+    assert title == "Origin file: example_field.nc"
+
+
+def test_selection_info_dialog_title_uses_derived_label_for_unsaved_fields() -> None:
+    class _DummyItem:
+        def data(self, role: int):
+            if role == Qt.UserRole + 5:
+                return True
+            if role == Qt.UserRole + 2:
+                return "/tmp/derived.nc"
+            return None
+
+    class _DummyListWidget:
+        def currentItem(self):
+            return _DummyItem()
+
+    dummy = types.SimpleNamespace(field_list_widget=_DummyListWidget())
+
+    title = CFVCore._selection_info_dialog_title(dummy)
+
+    assert title == "Derived, not saved"
+
+
+def test_selection_info_dialog_key_combines_title_and_detail_text() -> None:
+    key = CFVCore._selection_info_dialog_key("Origin file: a.nc", "field detail")
+
+    assert key == "Origin file: a.nc\nfield detail"
+
+
+def test_show_selected_field_info_from_context_menu_uses_current_item_when_selected() -> None:
+    current = _DummySelectedItem("current")
+    other = _DummySelectedItem("other")
+    clicked: list[object] = []
+    opened: list[str] = []
+    updated: list[str] = []
+
+    host = types.SimpleNamespace(
+        field_list_widget=_DummyContextFieldListWidget(selected=[other, current], current=current),
+        field_metadata_controller=types.SimpleNamespace(on_field_clicked=lambda item: clicked.append(item)),
+        _open_selection_info_dialog=lambda: opened.append("open"),
+        _update_selection_info_toggle_button=lambda: updated.append("update"),
+    )
+
+    CFVCore._show_selected_field_info_from_context_menu(host)
+
+    assert clicked == [current]
+    assert opened == ["open"]
+    assert updated == ["update"]
+
+
+def test_show_selected_field_info_from_context_menu_falls_back_to_first_selected() -> None:
+    first = _DummySelectedItem("first")
+    second = _DummySelectedItem("second")
+    not_selected = _DummySelectedItem("not-selected")
+    clicked: list[object] = []
+    opened: list[str] = []
+    updated: list[str] = []
+
+    host = types.SimpleNamespace(
+        field_list_widget=_DummyContextFieldListWidget(selected=[first, second], current=not_selected),
+        field_metadata_controller=types.SimpleNamespace(on_field_clicked=lambda item: clicked.append(item)),
+        _open_selection_info_dialog=lambda: opened.append("open"),
+        _update_selection_info_toggle_button=lambda: updated.append("update"),
+    )
+
+    CFVCore._show_selected_field_info_from_context_menu(host)
+
+    assert clicked == [first]
+    assert opened == ["open"]
+    assert updated == ["update"]
 
 
 def test_compute_target_window_width_expands_when_plot_is_height_limited() -> None:
@@ -1033,17 +1146,6 @@ def test_compute_target_window_width_shrinks_when_plot_is_too_wide_for_height() 
     assert target_width == 1000
 
 
-def test_update_toggle_button_uses_hidden_state_not_effective_visibility() -> None:
-    dummy = _DummyVisibilityMain()
-    dummy.plot_info_output = _DummyStartupVisibilityPanel(hidden=False)
-
-    CFVCore._update_selection_info_toggle_button(dummy)
-
-    assert dummy._selection_info_visible is True
-    assert dummy.selection_info_toggle_button.icon == QStyle.SP_TitleBarShadeButton
-    assert dummy.selection_info_toggle_button.tooltip == "Hide field details"
-
-
 def test_reset_ui_for_new_field_selection_reveals_details_panel() -> None:
     dummy = _DummyResetVisibilityMain()
 
@@ -1099,3 +1201,550 @@ def test_handle_worker_output_task_complete_includes_elapsed(monkeypatch) -> Non
 
     assert dummy.shown_statuses == [("Task Complete (2.50s)", False)]
     assert list(dummy._pending_worker_task_starts) == []
+
+
+def test_refresh_plot_summary_3d_requests_animation_action_mode() -> None:
+    class _Slider:
+        def value(self) -> tuple[int, int]:
+            return (0, 3)
+
+    class _Label:
+        def __init__(self) -> None:
+            self.text = ""
+
+        def setText(self, text: str) -> None:
+            self.text = text
+
+    class _WidgetToggle:
+        def __init__(self) -> None:
+            self.visible = False
+            self.enabled = False
+
+        def show(self) -> None:
+            self.visible = True
+
+        def hide(self) -> None:
+            self.visible = False
+
+        def setEnabled(self, enabled: bool) -> None:
+            self.enabled = enabled
+
+    class _Recorder:
+        def __init__(self, host) -> None:
+            self.host = host
+            self.plot_type_calls: list[tuple[list[str], str | None, int | None]] = []
+            self.plot_action_calls: list[tuple[bool, bool, int | None]] = []
+
+        def set_plot_type_options(self, options: list[str], selected: str | None, varying_dims: int | None = None) -> None:
+            self.plot_type_calls.append((list(options), selected, varying_dims))
+
+        def set_plot_action_options(
+            self,
+            has_existing_plot: bool,
+            supports_animation: bool = False,
+            varying_dims: int | None = None,
+        ) -> None:
+            self.plot_action_calls.append((has_existing_plot, supports_animation, varying_dims))
+            if varying_dims == 3:
+                self.host.selected_plot_action = "animation"
+
+    host = types.SimpleNamespace(
+        controls={
+            "time": {"range_slider": _Slider()},
+            "level": {"range_slider": _Slider()},
+            "member": {"range_slider": _Slider()},
+        },
+        selected_collapse_methods={},
+        plot_summary_label=_Label(),
+        plot_info_button=_WidgetToggle(),
+        plot_button=_WidgetToggle(),
+        options_button=_WidgetToggle(),
+        save_target_combo=_WidgetToggle(),
+        save_go_button=_WidgetToggle(),
+        save_code_button=None,
+        save_plot_button=None,
+        available_plot_kinds=[],
+        selected_plot_kind=None,
+        selected_plot_action="plot",
+        last_varying_dims=2,
+        _plot_pixmap_original=None,
+    )
+    recorder = _Recorder(host)
+    host.plot_view_controller = recorder
+
+    controller = SelectionController(host)
+    controller.refresh_plot_summary()
+
+    assert host.selected_plot_action == "animation"
+    assert recorder.plot_type_calls[-1] == (["contour"], "contour", 3)
+    assert recorder.plot_action_calls[-1] == (False, True, 3)
+    assert "Selection Dimensions: 3D" in host.plot_summary_label.text
+    assert "Change dimensionality for other options" in host.plot_summary_label.text
+
+
+def test_refresh_plot_summary_2d_disables_animation_support_flag() -> None:
+    class _Slider:
+        def __init__(self, bounds: tuple[int, int]) -> None:
+            self._bounds = bounds
+
+        def value(self) -> tuple[int, int]:
+            return self._bounds
+
+    class _Label:
+        def __init__(self) -> None:
+            self.text = ""
+
+        def setText(self, text: str) -> None:
+            self.text = text
+
+    class _WidgetToggle:
+        def __init__(self) -> None:
+            self.enabled = False
+
+        def show(self) -> None:
+            return
+
+        def hide(self) -> None:
+            return
+
+        def setEnabled(self, enabled: bool) -> None:
+            self.enabled = enabled
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.plot_action_calls: list[tuple[bool, bool, int | None]] = []
+
+        def set_plot_type_options(self, options: list[str], selected: str | None, varying_dims: int | None = None) -> None:
+            _ = (options, selected, varying_dims)
+
+        def set_plot_action_options(
+            self,
+            has_existing_plot: bool,
+            supports_animation: bool = False,
+            varying_dims: int | None = None,
+        ) -> None:
+            self.plot_action_calls.append((has_existing_plot, supports_animation, varying_dims))
+
+    host = types.SimpleNamespace(
+        controls={
+            "time": {"range_slider": _Slider((0, 3))},
+            "lat": {"range_slider": _Slider((0, 2))},
+            "lon": {"range_slider": _Slider((1, 1))},
+        },
+        selected_collapse_methods={},
+        plot_summary_label=_Label(),
+        plot_info_button=_WidgetToggle(),
+        plot_button=_WidgetToggle(),
+        options_button=_WidgetToggle(),
+        save_target_combo=_WidgetToggle(),
+        save_go_button=_WidgetToggle(),
+        save_code_button=None,
+        save_plot_button=None,
+        available_plot_kinds=[],
+        selected_plot_kind=None,
+        selected_plot_action="plot",
+        last_varying_dims=None,
+        _plot_pixmap_original=None,
+        plot_view_controller=_Recorder(),
+    )
+
+    controller = SelectionController(host)
+    controller.refresh_plot_summary()
+
+    assert host.plot_view_controller.plot_action_calls[-1] == (False, False, 2)
+
+
+def test_plot_ops_animation_go_routes_to_worker_animation_task() -> None:
+    class _DummyListWidget:
+        def item(self, _index: int):
+            return None
+
+    class _DummyWorker:
+        def processId(self) -> int:
+            return 999
+
+    class _DummyHost:
+        def __init__(self) -> None:
+            self.field_list_widget = _DummyListWidget()
+            self.worker = _DummyWorker()
+            self.plot_options_by_kind = {"contour": {}}
+            self.selected_plot_action = "animation"
+            self._plot_request_in_flight = False
+            self._plot_request_expects_image = False
+            self._suppress_stale_error_status = False
+            self.sent_tasks: list[tuple[str, str | None, bool, bool]] = []
+            self.status_messages: list[tuple[str, bool]] = []
+
+        def _build_plot_context(self):
+            return ({"time": (0, 10), "lat": (-10, 10), "lon": (0, 20)}, {}, "contour")
+
+        def _selected_field_index_for_operation(self, _operation: str) -> int | None:
+            return 2
+
+        def _field_identity_from_item(self, _item) -> str:
+            return "field-2"
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.status_messages.append((message, is_error))
+
+        def _show_vector_options_dialog(self, _field_index: int) -> None:
+            raise AssertionError("Vector options should not be requested")
+
+        def _set_plot_loading(self, _is_loading: bool, message: str = "") -> None:
+            _ = message
+
+        def _contour_title_fontsize(self) -> float:
+            return 10.0
+
+        def _page_title_fontsize(self) -> float:
+            return 10.0
+
+        def _annotation_fontsize(self) -> float:
+            return 8.0
+
+        def _send_worker_task(
+            self,
+            code: str,
+            save_code_path: str | None = None,
+            emit_image: bool = True,
+            animation_enabled: bool = False,
+        ) -> None:
+            self.sent_tasks.append((code, save_code_path, emit_image, animation_enabled))
+
+    host = _DummyHost()
+
+    from xconv2.main_window_components import plot_ops
+
+    plot_ops.request_plot_task(
+        host,
+        save_code_path=None,
+        save_plot_path=None,
+        save_data_path=None,
+        emit_image_override=None,
+        save_data_from_selection_fn=lambda *_: "SAVE_DATA",
+        plot_from_selection_fn=lambda *_args, **_kwargs: "PLOT_CODE",
+        build_vector_overplot_command_fn=lambda **_kwargs: "VECTOR_OVERPLOT",
+    )
+
+    assert host.sent_tasks == [("_cfview_field_index = 2\nfld = f[2]\nPLOT_CODE", None, False, True)]
+
+
+def test_plot_ops_animation_merges_animation_options_into_contour_options() -> None:
+    class _DummyListWidget:
+        def item(self, _index: int):
+            return None
+
+    class _DummyWorker:
+        def processId(self) -> int:
+            return 999
+
+    class _DummyHost:
+        def __init__(self) -> None:
+            self.field_list_widget = _DummyListWidget()
+            self.worker = _DummyWorker()
+            self.plot_options_by_kind = {
+                "contour": {},
+                "animation": {
+                    "frame_axis": "time",
+                    "frame_border_px": 22,
+                    "trim_frame_whitespace": False,
+                    "max_frames": 40,
+                    "show_frame_labels": True,
+                },
+            }
+            self.selected_plot_action = "animation"
+            self._plot_request_in_flight = False
+            self._plot_request_expects_image = False
+            self._suppress_stale_error_status = False
+            self.sent_tasks: list[tuple[str, str | None, bool, bool]] = []
+            self.captured_plot_options: dict[str, object] | None = None
+
+        def _build_plot_context(self):
+            return ({"time": (0, 10), "lat": (-10, 10), "lon": (0, 20)}, {}, "contour")
+
+        def _selected_field_index_for_operation(self, _operation: str) -> int | None:
+            return 2
+
+        def _field_identity_from_item(self, _item) -> str:
+            return "field-2"
+
+        def _show_status_message(self, _message: str, is_error: bool = False) -> None:
+            _ = is_error
+
+        def _show_vector_options_dialog(self, _field_index: int) -> None:
+            raise AssertionError("Vector options should not be requested")
+
+        def _set_plot_loading(self, _is_loading: bool, message: str = "") -> None:
+            _ = message
+
+        def _contour_title_fontsize(self) -> float:
+            return 10.0
+
+        def _page_title_fontsize(self) -> float:
+            return 10.0
+
+        def _annotation_fontsize(self) -> float:
+            return 8.0
+
+        def _send_worker_task(
+            self,
+            code: str,
+            save_code_path: str | None = None,
+            emit_image: bool = True,
+            animation_enabled: bool = False,
+        ) -> None:
+            self.sent_tasks.append((code, save_code_path, emit_image, animation_enabled))
+
+    host = _DummyHost()
+
+    from xconv2.main_window_components import plot_ops
+
+    def _capture_plot_from_selection(
+        _selections,
+        _collapse_by_coord,
+        _plot_kind,
+        plot_options,
+        **_kwargs,
+    ):
+        host.captured_plot_options = dict(plot_options or {})
+        return "PLOT_CODE"
+
+    plot_ops.request_plot_task(
+        host,
+        save_code_path=None,
+        save_plot_path=None,
+        save_data_path=None,
+        emit_image_override=None,
+        save_data_from_selection_fn=lambda *_: "SAVE_DATA",
+        plot_from_selection_fn=_capture_plot_from_selection,
+        build_vector_overplot_command_fn=lambda **_kwargs: "VECTOR_OVERPLOT",
+    )
+
+    assert host.sent_tasks == [("_cfview_field_index = 2\nfld = f[2]\nPLOT_CODE", None, False, True)]
+    assert host.captured_plot_options is not None
+    assert host.captured_plot_options.get("frame_axis") == "time"
+    assert host.captured_plot_options.get("frame_border_px") == 22
+    assert host.captured_plot_options.get("trim_frame_whitespace") is False
+    assert host.captured_plot_options.get("max_frames") == 40
+
+
+def test_animation_playback_respects_loop_and_fps_interval() -> None:
+    class _FakeTimer:
+        def __init__(self) -> None:
+            self._active = False
+            self.interval_ms = 0
+
+        def setInterval(self, interval_ms: int) -> None:
+            self.interval_ms = interval_ms
+
+        def start(self) -> None:
+            self._active = True
+
+        def stop(self) -> None:
+            self._active = False
+
+        def isActive(self) -> bool:
+            return self._active
+
+    class _FakeButton:
+        def __init__(self) -> None:
+            self.text = ""
+            self.enabled = False
+
+        def setText(self, text: str) -> None:
+            self.text = text
+
+        def setEnabled(self, enabled: bool) -> None:
+            self.enabled = enabled
+
+    host = types.SimpleNamespace(
+        _animation_session_controller=__import__("xconv2.animation_session", fromlist=["AnimationSessionController"]).AnimationSessionController(),
+        _active_animation_request_id="req-1",
+        _animation_playback_timer=_FakeTimer(),
+        _animation_is_playing=False,
+        selected_plot_action="animation",
+        anim_play_pause_button=_FakeButton(),
+        anim_stop_button=_FakeButton(),
+        anim_export_button=_FakeButton(),
+        plot_options_by_kind={"animation": {"loop_playback": True}},
+    )
+    displayed_frames: list[bytes] = []
+    statuses: list[str] = []
+    host.set_plot_image = lambda frame: displayed_frames.append(frame)
+    host._show_status_message = lambda message, is_error=False: statuses.append(message)
+    host._set_plot_loading = lambda *_args, **_kwargs: None
+    host._current_animation_session = lambda: CFVMain._current_animation_session(host)
+    host._current_animation_options = lambda: CFVMain._current_animation_options(host)
+    host._resolved_animation_fps = lambda session: CFVMain._resolved_animation_fps(host, session)
+
+    session = host._animation_session_controller.create_session("req-1", "sess-1")
+    session.mark_started(total_frames=2, fps_hint=8.0, title_template="demo")
+    session.add_frame(b"frame-0")
+    session.add_frame(b"frame-1")
+    session.mark_completed()
+
+    CFVMain._on_animation_play_pause(host)
+    assert host._animation_playback_timer.isActive() is True
+    assert host._animation_playback_timer.interval_ms == 125
+    assert "8.0 fps" in statuses[-1]
+
+    CFVMain._advance_animation_playback(host)
+    CFVMain._advance_animation_playback(host)
+    CFVMain._advance_animation_playback(host)
+
+    assert displayed_frames == [b"frame-0", b"frame-1", b"frame-0"]
+    assert host._animation_playback_timer.isActive() is True
+
+
+def test_animation_playback_prefers_options_fps_hint_over_session_hint() -> None:
+    class _FakeTimer:
+        def __init__(self) -> None:
+            self._active = False
+            self.interval_ms = 0
+
+        def setInterval(self, interval_ms: int) -> None:
+            self.interval_ms = interval_ms
+
+        def start(self) -> None:
+            self._active = True
+
+        def stop(self) -> None:
+            self._active = False
+
+        def isActive(self) -> bool:
+            return self._active
+
+    class _FakeButton:
+        def __init__(self) -> None:
+            self.text = ""
+            self.enabled = False
+
+        def setText(self, text: str) -> None:
+            self.text = text
+
+        def setEnabled(self, enabled: bool) -> None:
+            self.enabled = enabled
+
+    host = types.SimpleNamespace(
+        _animation_session_controller=__import__("xconv2.animation_session", fromlist=["AnimationSessionController"]).AnimationSessionController(),
+        _active_animation_request_id="req-1",
+        _animation_playback_timer=_FakeTimer(),
+        _animation_is_playing=False,
+        selected_plot_action="animation",
+        anim_play_pause_button=_FakeButton(),
+        anim_stop_button=_FakeButton(),
+        anim_export_button=_FakeButton(),
+        plot_options_by_kind={"animation": {"loop_playback": True, "fps_hint": 4}},
+    )
+    statuses: list[str] = []
+    host.set_plot_image = lambda _frame: None
+    host._show_status_message = lambda message, is_error=False: statuses.append(message)
+    host._set_plot_loading = lambda *_args, **_kwargs: None
+    host._current_animation_session = lambda: CFVMain._current_animation_session(host)
+    host._current_animation_options = lambda: CFVMain._current_animation_options(host)
+    host._resolved_animation_fps = lambda session: CFVMain._resolved_animation_fps(host, session)
+
+    session = host._animation_session_controller.create_session("req-1", "sess-1")
+    session.mark_started(total_frames=2, fps_hint=8.0, title_template="demo")
+    session.add_frame(b"frame-0")
+    session.mark_completed()
+
+    CFVMain._on_animation_play_pause(host)
+
+    assert host._animation_playback_timer.isActive() is True
+    assert host._animation_playback_timer.interval_ms == 250
+    assert "4.0 fps" in statuses[-1]
+
+
+def test_animation_export_writes_frame_sequence(tmp_path: Path, monkeypatch) -> None:
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.frames = [b"png-a", b"png-b", b"png-c"]
+
+    class _Host:
+        def __init__(self) -> None:
+            self.status_messages: list[tuple[str, bool]] = []
+            self.last_save_values: list[tuple[str, str]] = []
+
+        def _current_animation_session(self):
+            return _FakeSession()
+
+        def _default_plot_filename(self) -> str:
+            return "field0"
+
+        def _default_save_path(self, _key: str, filename: str) -> str:
+            return str(tmp_path / filename)
+
+        def _remember_last_save_dir(self, key: str, value: str) -> None:
+            self.last_save_values.append((key, value))
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.status_messages.append((message, is_error))
+
+    output_file = tmp_path / "demo_anim.png"
+    monkeypatch.setattr(
+        "xconv2.core_window.QFileDialog.getSaveFileName",
+        lambda *args, **kwargs: (str(output_file), "PNG files (*.png)"),
+    )
+
+    host = _Host()
+    CFVCore._on_animation_export(host)
+
+    assert (tmp_path / "demo_anim_0001.png").read_bytes() == b"png-a"
+    assert (tmp_path / "demo_anim_0002.png").read_bytes() == b"png-b"
+    assert (tmp_path / "demo_anim_0003.png").read_bytes() == b"png-c"
+    assert host.last_save_values[-1][0] == "last_save_plot_dir"
+    assert host.status_messages[-1][1] is False
+    assert "Saved 3 animation frame(s)" in host.status_messages[-1][0]
+
+
+def test_animation_export_writes_animated_gif(tmp_path: Path, monkeypatch) -> None:
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.frames = [b"png-a", b"png-b"]
+            self.fps_hint = 5.0
+
+    class _Host:
+        def __init__(self) -> None:
+            self.status_messages: list[tuple[str, bool]] = []
+            self.last_save_values: list[tuple[str, str]] = []
+
+        def _current_animation_session(self):
+            return _FakeSession()
+
+        def _default_plot_filename(self) -> str:
+            return "field0"
+
+        def _default_save_path(self, _key: str, filename: str) -> str:
+            return str(tmp_path / filename)
+
+        def _remember_last_save_dir(self, key: str, value: str) -> None:
+            self.last_save_values.append((key, value))
+
+        def _show_status_message(self, message: str, is_error: bool = False) -> None:
+            self.status_messages.append((message, is_error))
+
+    output_file = tmp_path / "demo_anim.gif"
+    calls: list[tuple[list[bytes], str, int, int]] = []
+
+    monkeypatch.setattr(
+        "xconv2.core_window.QFileDialog.getSaveFileName",
+        lambda *args, **kwargs: (str(output_file), "Animated GIF (*.gif)"),
+    )
+
+    def _fake_save_gif(frame_bytes, destination, *, duration_ms, loop):
+        calls.append((list(frame_bytes), destination, duration_ms, loop))
+
+    monkeypatch.setattr("xconv2.core_window._save_gif_from_png_bytes", _fake_save_gif)
+
+    host = _Host()
+    CFVCore._on_animation_export(host)
+
+    assert len(calls) == 1
+    assert calls[0][0] == [b"png-a", b"png-b"]
+    assert calls[0][1] == str(output_file)
+    assert calls[0][2] == 200
+    assert calls[0][3] == 0
+    assert host.last_save_values[-1] == ("last_save_plot_dir", str(output_file))
+    assert host.status_messages[-1][1] is False
+    assert "Saved animated GIF" in host.status_messages[-1][0]

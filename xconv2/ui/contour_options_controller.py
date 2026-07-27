@@ -379,9 +379,14 @@ class ContourOptionsController:
         proj_row.addStretch(1)
         proj_layout.addLayout(proj_row)
 
+        has_existing_bbox = isinstance(existing.get("bbox"), (list, tuple)) and len(existing.get("bbox", [])) >= 4
         existing_bbox = existing.get("bbox", [-180.0, -90.0, 180.0, 90.0])
         if not isinstance(existing_bbox, (list, tuple)) or len(existing_bbox) < 4:
             existing_bbox = [-180.0, -90.0, 180.0, 90.0]
+        existing_projection = str(existing.get("map_projection", "") or "")
+        has_existing_map_settings = any(
+            key in existing for key in ("map_projection", "bbox", "boundinglat", "map_resolution", "lat_0", "lon_0")
+        )
 
         bbox_row = QHBoxLayout()
         bbox_row.setSpacing(4)
@@ -492,6 +497,21 @@ class ContourOptionsController:
         proj_combo.currentTextChanged.connect(lambda _text: _sync_projection_controls())
         _sync_projection_controls()
 
+        map_controls_touched = {"value": False}
+
+        def _mark_map_controls_touched(*_args: object) -> None:
+            map_controls_touched["value"] = True
+
+        proj_combo.currentTextChanged.connect(_mark_map_controls_touched)
+        res_combo.currentTextChanged.connect(_mark_map_controls_touched)
+        bbox_w_spin.valueChanged.connect(_mark_map_controls_touched)
+        bbox_s_spin.valueChanged.connect(_mark_map_controls_touched)
+        bbox_e_spin.valueChanged.connect(_mark_map_controls_touched)
+        bbox_n_spin.valueChanged.connect(_mark_map_controls_touched)
+        boundinglat_spin.valueChanged.connect(_mark_map_controls_touched)
+        lat_0_spin.valueChanged.connect(_mark_map_controls_touched)
+        lon_0_spin.valueChanged.connect(_mark_map_controls_touched)
+
         layout.addWidget(common.titles_group)
         layout.addWidget(common.annotations_group)
         layout.addWidget(proj_group)
@@ -553,22 +573,24 @@ class ContourOptionsController:
             options["page_title_fontsize"] = float(page_title_fontsize_spin.value())
             options["annotation_fontsize"] = float(annotation_fontsize_spin.value())
             proj_text = proj_combo.currentText()
-            if proj_text:
-                options["map_projection"] = proj_text
-            if proj_text in {"npstere", "spstere"}:
-                options["boundinglat"] = float(boundinglat_spin.value())
-                options.pop("bbox", None)
-            else:
-                options["bbox"] = [
-                    float(bbox_w_spin.value()),
-                    float(bbox_s_spin.value()),
-                    float(bbox_e_spin.value()),
-                    float(bbox_n_spin.value()),
-                ]
-                options.pop("boundinglat", None)
-            options["map_resolution"] = str(res_combo.currentText())
-            options["lat_0"] = float(lat_0_spin.value())
-            options["lon_0"] = float(lon_0_spin.value())
+            should_emit_map_options = bool(has_existing_map_settings or map_controls_touched["value"])
+            if should_emit_map_options:
+                if proj_text:
+                    options["map_projection"] = proj_text
+                if proj_text in {"npstere", "spstere"}:
+                    options["boundinglat"] = float(boundinglat_spin.value())
+                    options.pop("bbox", None)
+                elif has_existing_bbox or map_controls_touched["value"] or proj_text != existing_projection:
+                    options["bbox"] = [
+                        float(bbox_w_spin.value()),
+                        float(bbox_s_spin.value()),
+                        float(bbox_e_spin.value()),
+                        float(bbox_n_spin.value()),
+                    ]
+                    options.pop("boundinglat", None)
+                options["map_resolution"] = str(res_combo.currentText())
+                options["lat_0"] = float(lat_0_spin.value())
+                options["lon_0"] = float(lon_0_spin.value())
             options.update(common.as_options())
             if selected_cscale.get("value"):
                 options["cscale"] = selected_cscale["value"]

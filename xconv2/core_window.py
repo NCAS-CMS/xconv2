@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import glob
+from io import BytesIO
 from pathlib import Path
 import logging
 from typing import Sequence
@@ -68,7 +69,14 @@ from .ui.vector_options_controller import VectorOptionsController
 from .ui.menu_controller import MenuController
 from .ui.plot_view_controller import PlotViewController
 from .ui.selection_controller import SelectionController
-from .ui.dialogs import OpenGlobDialog, OpenURIDialog, RemoteConfigurationDialog, RemoteOpenDialog, create_info_button
+from .ui.dialogs import (
+    AnimationOptionsDialog,
+    OpenGlobDialog,
+    OpenURIDialog,
+    RemoteConfigurationDialog,
+    RemoteOpenDialog,
+    create_info_button,
+)
 from .tooltips import CACHE_MANAGEMENT, FIELDS_HELP, SELECTION_HELP
 # RemoteFileNavigatorDialog is imported lazily (inside the methods that open it)
 # to avoid loading p5rem/paramiko at GUI startup.
@@ -92,6 +100,45 @@ DEFAULT_MAX_RECENT_FILES = 10
 SETTINGS_VERSION = 1
 STATUSBAR_NORMAL_STYLE = ""
 STATUSBAR_ERROR_STYLE = "QStatusBar { color: #c62828; font-weight: 600; }"
+
+
+def _save_gif_from_png_bytes(
+    frame_bytes: Sequence[bytes],
+    destination: str,
+    *,
+    duration_ms: int,
+    loop: int = 0,
+) -> None:
+    """Encode PNG byte frames into an animated GIF file."""
+    try:
+        from PIL import Image
+    except Exception as exc:  # pragma: no cover - exercised via caller path
+        raise RuntimeError("Animated GIF export requires Pillow.") from exc
+
+    frames = []
+    for raw in frame_bytes:
+        if not isinstance(raw, (bytes, bytearray)):
+            continue
+        try:
+            with BytesIO(bytes(raw)) as buffer:
+                with Image.open(buffer) as image:
+                    frames.append(image.convert("RGBA"))
+        except Exception:
+            continue
+
+    if not frames:
+        raise ValueError("No decodable frames available for GIF export.")
+
+    first, *rest = frames
+    first.save(
+        destination,
+        format="GIF",
+        save_all=True,
+        append_images=rest,
+        duration=max(1, int(duration_ms)),
+        loop=max(0, int(loop)),
+        disposal=2,
+    )
 
 
 class CopyableStatusBar(QStatusBar):
@@ -538,10 +585,13 @@ class CFVCore(QMainWindow):
         self.open_files_button: QPushButton | None = None
         self.open_files_menu: QMenu | None = None
         self.selection_info_toggle_button: QToolButton | None = None
-        self._selection_info_visible = True
+        self._selection_info_visible = False
         self._selection_info_expanded_from_width: int | None = None
+        self._selection_info_dialogs: list[QDialog] = []
+        self._selection_info_dialogs_by_key: dict[str, QDialog] = {}
         self._log_viewer_dialog: LogViewerDialog | None = None
         self._cache_manager_dialog: CacheManagerDialog | None = None
+        self._animation_is_playing: bool = False
 
         self.setup_ui()
         self._setup_tray_icon()
@@ -1614,10 +1664,10 @@ class CFVCore(QMainWindow):
         self.selection_info_toggle_button = QToolButton()
         self.selection_info_toggle_button.setAutoRaise(True)
         self.selection_info_toggle_button.clicked.connect(self._toggle_selection_info_panel)
+        controls_row.addWidget(self.selection_info_toggle_button)
         controls_row.addWidget(properties_button)
         controls_row.addWidget(reset_button)
         controls_row.addStretch(1)
-        controls_row.addWidget(self.selection_info_toggle_button)
 
         layout.addLayout(controls_row)
 
@@ -1731,35 +1781,132 @@ class CFVCore(QMainWindow):
         self.field_metadata_controller.show_selection_properties()
 
     def _toggle_selection_info_panel(self) -> None:
-        """Show or hide the field-detail panel above the plot."""
-        if self._selection_info_visible:
-            self._selection_info_expanded_from_width = self.width()
-        self._set_selection_info_panel_visible(not self._selection_info_visible)
+        """Open a non-modal popup that shows the current field details."""
+        self._open_selection_info_dialog()
         self._update_selection_info_toggle_button()
-        self.plot_view_controller.adjust_window_width_for_info_panel(self._selection_info_visible)
 
     def _set_selection_info_panel_visible(self, visible: bool) -> None:
-        """Set the details panel visibility without toggling width behavior."""
+        """Compatibility shim for panel visibility state in tests/legacy flows."""
         self._selection_info_visible = visible
-        if hasattr(self, "plot_info_output") and self.plot_info_output is not None:
-            self.plot_info_output.setVisible(visible)
+        if visible:
+            return
+
+        for dialog in list(self._selection_info_dialogs):
+            dialog.close()
+        self._selection_info_dialogs.clear()
+        self._selection_info_dialogs_by_key.clear()
+
+    @staticmethod
+    def _selection_info_dialog_key(title: str, detail_text: str) -> str:
+        """Return a stable key used to avoid duplicate dialogs for the same field/detail."""
+        return f"{title}\n{detail_text}"
+
+    def _open_selection_info_dialog(self) -> None:
+        """Create and show a modeless detail dialog that can stay open independently."""
+        detail_text = str(getattr(self, "current_selection_info_text", "") or "").strip()
+        if not detail_text:
+            detail_text = "No selection info available."
+
+        title = self._selection_info_dialog_title()
+        dialog_key = self._selection_info_dialog_key(title, detail_text)
+        existing = self._selection_info_dialogs_by_key.get(dialog_key)
+        if existing is not None:
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            self._selection_info_visible = True
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.resize(680, 260)
+        dialog.setWindowModality(Qt.NonModal)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+
+        layout = QVBoxLayout(dialog)
+        viewer = QPlainTextEdit(dialog)
+        viewer.setReadOnly(True)
+        viewer.setLineWrapMode(QPlainTextEdit.NoWrap)
+        viewer.setPlainText(detail_text)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close, parent=dialog)
+        buttons.rejected.connect(dialog.close)
+
+        layout.addWidget(viewer)
+        layout.addWidget(buttons)
+
+        self._selection_info_dialogs.append(dialog)
+        self._selection_info_dialogs_by_key[dialog_key] = dialog
+        self._selection_info_visible = True
+        dialog.destroyed.connect(
+            lambda _obj=None, dead_dialog=dialog: self._on_selection_info_dialog_closed(dead_dialog)
+        )
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    @staticmethod
+    def _origin_display_name(source: str) -> str:
+        """Return a compact display name for local paths and remote URIs."""
+        text = str(source).strip()
+        if not text:
+            return "Unknown"
+
+        parsed = urlparse(text)
+        if parsed.scheme:
+            uri_name = Path(parsed.path).name
+            return uri_name or text
+
+        local_name = Path(text).name
+        return local_name or text
+
+    def _selection_info_dialog_title(self) -> str:
+        """Build details-dialog title from the currently selected field origin."""
+        list_widget = getattr(self, "field_list_widget", None)
+        current_item = None
+        if list_widget is not None and hasattr(list_widget, "currentItem"):
+            current_item = list_widget.currentItem()
+        if current_item is None:
+            return "Field Details"
+
+        is_generated = current_item.data(Qt.UserRole + 5) is True
+        if is_generated:
+            return "Derived, not saved"
+
+        origin_raw = current_item.data(Qt.UserRole + 2)
+        if isinstance(origin_raw, str) and origin_raw.strip():
+            origin_name = CFVCore._origin_display_name(origin_raw)
+            return f"Origin file: {origin_name}"
+
+        return "Origin file: Unknown"
+
+    @staticmethod
+    def _selection_info_popup_icon() -> QIcon:
+        """Return NCAS-styled icon for the selection details popup button."""
+        icon_path = Path(__file__).resolve().parent / "assets" / "info-ncas.svg"
+        icon = QIcon(str(icon_path))
+        if not icon.isNull():
+            return icon
+        return QIcon.fromTheme("dialog-information")
+
+    def _on_selection_info_dialog_closed(self, dialog: QDialog) -> None:
+        """Forget closed detail dialogs so each arrow press can open a new one."""
+        self._selection_info_dialogs = [open_dialog for open_dialog in self._selection_info_dialogs if open_dialog is not dialog]
+        self._selection_info_dialogs_by_key = {
+            key: open_dialog
+            for key, open_dialog in self._selection_info_dialogs_by_key.items()
+            if open_dialog is not dialog
+        }
+        self._selection_info_visible = bool(self._selection_info_dialogs)
 
     def _update_selection_info_toggle_button(self) -> None:
-        """Sync the details-toggle button icon and tooltip with panel visibility."""
+        """Sync the details button icon and tooltip for popup behavior."""
         button = self.selection_info_toggle_button
         if button is None:
             return
 
-        if hasattr(self, "plot_info_output") and self.plot_info_output is not None:
-            # Use explicit hidden state: isVisible() is false before the top-level window is shown.
-            self._selection_info_visible = not self.plot_info_output.isHidden()
-
-        if self._selection_info_visible:
-            icon = self.style().standardIcon(QStyle.SP_TitleBarShadeButton)
-            tooltip = "Hide field details"
-        else:
-            icon = self.style().standardIcon(QStyle.SP_TitleBarUnshadeButton)
-            tooltip = "Show field details"
+        icon = CFVCore._selection_info_popup_icon()
+        tooltip = "Open field details popup"
 
         button.setIcon(icon)
         button.setToolTip(tooltip)
@@ -2020,10 +2167,29 @@ class CFVCore(QMainWindow):
             return
 
         menu = QMenu(self.field_list_widget)
+        show_info_action = menu.addAction("Show Field Info")
+        menu.addSeparator()
         remove_action = menu.addAction("Remove selected field(s)")
         chosen = menu.exec(self.field_list_widget.mapToGlobal(pos))
-        if chosen == remove_action:
+        if chosen == show_info_action:
+            self._show_selected_field_info_from_context_menu()
+        elif chosen == remove_action:
             self._remove_selected_fields()
+
+    def _show_selected_field_info_from_context_menu(self) -> None:
+        """Open details popup for the current/first selected field list entry."""
+        selected_items = list(self.field_list_widget.selectedItems())
+        if not selected_items:
+            return
+
+        current_item = self.field_list_widget.currentItem()
+        target_item = current_item if current_item in selected_items else selected_items[0]
+        if target_item is None:
+            return
+
+        self.field_metadata_controller.on_field_clicked(target_item)
+        self._open_selection_info_dialog()
+        self._update_selection_info_toggle_button()
 
     def _remove_selected_fields(self) -> None:
         """Remove selected fields from the current list (worker-backed windows override)."""
@@ -2262,6 +2428,16 @@ class CFVCore(QMainWindow):
         """Show vector options dialog and persist selected options."""
         self.vector_options_controller.show_vector_options_dialog(current_field_index)
 
+    def _show_animation_options_dialog(self) -> None:
+        """Show animation options dialog and persist selected options."""
+        current = self.plot_options_by_kind.get("animation")
+        current_options = dict(current) if isinstance(current, dict) else {}
+        selected, ok = AnimationOptionsDialog.get_options(self, current_options=current_options)
+        if not ok or not isinstance(selected, dict):
+            return
+        self.plot_options_by_kind["animation"] = selected
+        self._show_status_message("Animation options updated.")
+
     def _show_annotation_properties_chooser(
         self,
         properties: dict[object, object],
@@ -2312,6 +2488,140 @@ class CFVCore(QMainWindow):
             save_plot_path,
             save_data_path,
         )
+
+    def _on_animation_play_pause(self) -> None:
+        """Toggle animation playback state for the active panel session."""
+        self._animation_is_playing = not self._animation_is_playing
+        play_pause_button = getattr(self, "anim_play_pause_button", None)
+        stop_button = getattr(self, "anim_stop_button", None)
+
+        if play_pause_button is not None:
+            play_pause_button.setText("Pause" if self._animation_is_playing else "Play")
+        if stop_button is not None:
+            stop_button.setEnabled(self._animation_is_playing)
+
+        if self._animation_is_playing:
+            self._show_status_message("Animation playback started.")
+        else:
+            self._show_status_message("Animation playback paused.")
+
+    def _on_animation_stop(self) -> None:
+        """Stop animation playback and reset panel controls."""
+        self._animation_is_playing = False
+        play_pause_button = getattr(self, "anim_play_pause_button", None)
+        stop_button = getattr(self, "anim_stop_button", None)
+
+        if play_pause_button is not None:
+            play_pause_button.setText("Play")
+        if stop_button is not None:
+            stop_button.setEnabled(False)
+
+        self._show_status_message("Animation playback stopped.")
+
+    def _on_animation_export(self) -> None:
+        """Export buffered animation frames as a PNG sequence, or fallback to current frame."""
+        session_getter = getattr(self, "_current_animation_session", None)
+        session = session_getter() if callable(session_getter) else None
+        session_frames = getattr(session, "frames", None)
+        if isinstance(session_frames, list) and len(session_frames) > 0:
+            default_stem = self._default_plot_filename()
+            default_path = self._default_save_path("last_save_plot_dir", f"{default_stem}_anim.gif")
+            file_path, selected_filter = QFileDialog.getSaveFileName(
+                self,
+                "Export Animation",
+                default_path,
+                "Animated GIF (*.gif);;PNG sequence (*.png);;All files (*)",
+            )
+            if not file_path:
+                return
+
+            target = Path(file_path)
+            selected_is_gif = (target.suffix.lower() == ".gif") or ("GIF" in selected_filter.upper())
+            if not target.suffix:
+                target = target.with_suffix(".gif" if selected_is_gif else ".png")
+
+            output_dir = target.parent
+            stem = target.stem or f"{default_stem}_anim"
+
+            if selected_is_gif:
+                options_by_kind = getattr(self, "plot_options_by_kind", {})
+                animation_options = options_by_kind.get("animation") if isinstance(options_by_kind, dict) else None
+                options_fps_raw = animation_options.get("fps_hint") if isinstance(animation_options, dict) else None
+                fps_raw = options_fps_raw if options_fps_raw is not None else getattr(session, "fps_hint", None)
+                try:
+                    fps = float(fps_raw) if fps_raw is not None else 10.0
+                except (TypeError, ValueError):
+                    fps = 10.0
+                fps = max(1.0, min(60.0, fps))
+                duration_ms = int(round(1000.0 / fps))
+
+                try:
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    _save_gif_from_png_bytes(
+                        session_frames,
+                        str(target),
+                        duration_ms=duration_ms,
+                        loop=0,
+                    )
+                    self._remember_last_save_dir("last_save_plot_dir", str(target))
+                    self._show_status_message(f"Saved animated GIF to {target}")
+                    return
+                except RuntimeError as exc:
+                    self._show_status_message(str(exc), is_error=True)
+                    return
+                except (OSError, ValueError):
+                    self._show_status_message("Failed to save animated GIF.", is_error=True)
+                    return
+
+            try:
+                output_dir.mkdir(parents=True, exist_ok=True)
+                written = 0
+                for idx, frame_bytes in enumerate(session_frames, start=1):
+                    if not isinstance(frame_bytes, (bytes, bytearray)):
+                        continue
+                    frame_path = output_dir / f"{stem}_{idx:04d}.png"
+                    frame_path.write_bytes(bytes(frame_bytes))
+                    written += 1
+
+                if written == 0:
+                    self._show_status_message("No animation frames were available to export.", is_error=True)
+                    return
+
+                self._remember_last_save_dir("last_save_plot_dir", str(output_dir))
+                self._show_status_message(
+                    f"Saved {written} animation frame(s) to {output_dir} with prefix {stem}_"
+                )
+                return
+            except OSError:
+                self._show_status_message("Failed to save animation frame sequence.", is_error=True)
+                return
+
+        plot_frame = getattr(self, "plot_frame", None)
+        pixmap = plot_frame.pixmap() if plot_frame is not None else None
+        if pixmap is None or pixmap.isNull():
+            self._show_status_message("No animation frame available to export.", is_error=True)
+            return
+
+        default_stem = self._default_plot_filename()
+        default_path = self._default_save_path("last_save_plot_dir", f"{default_stem}_frame.png")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Animation Frame",
+            default_path,
+            "PNG files (*.png);;All files (*)",
+        )
+        if not file_path:
+            return
+
+        if not Path(file_path).suffix:
+            file_path += ".png"
+
+        if pixmap.save(file_path, "PNG"):
+            self._remember_last_save_dir("last_save_plot_dir", file_path)
+            self._show_status_message(f"Saved animation frame to {file_path}")
+            return
+
+        self._show_status_message("Failed to save animation frame.", is_error=True)
 
     def _quit_application(self) -> None:
         """Quit the whole application, even when modal dialogs are open."""

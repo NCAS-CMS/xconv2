@@ -11,9 +11,10 @@ import re
 import textwrap
 import time
 import resource
+import uuid
 from io import BytesIO
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Callable, NamedTuple
 
 import cf
  
@@ -34,6 +35,7 @@ SAVE_TASK_HEADER = "#SAVE_TASK_CODE_PATH_B64:"
 EMIT_IMAGE_HEADER = "#EMIT_IMAGE:"
 TASK_KIND_HEADER = "#TASK_KIND:"
 TASK_PAYLOAD_HEADER = "#TASK_PAYLOAD_B64:"
+ANIMATION_HEADER = "#ANIMATION:"
 INTERFACE_EXPORTS: tuple[str, ...] = ()
 OMIT4SAVE_TOKEN = "#omit4save"
 REMOTE_SESSION_TTL_SECONDS = 180.0
@@ -46,6 +48,7 @@ class TaskHeaders(NamedTuple):
 
     save_path: str | None
     emit_image: bool
+    animation_enabled: bool
     task_kind: str | None
     task_payload: dict[str, Any] | None
     code: str
@@ -79,6 +82,19 @@ _HANDLED_TASK_EXCEPTIONS = (ValueError, IndexError)
 
 # This dictionary persists data (like 'f') between GUI commands.
 worker_globals: dict[str, Any] = {'cf': cf}
+
+
+def _resolve_animation_axis_identity_for_field(field: object, axis_spec: object) -> str:
+    """Normalize animation axis spec to a concrete field construct identity."""
+    try:
+        from .cf_interface.plotting import _find_animation_axis_identity
+    except Exception:
+        return str(axis_spec or "auto")
+
+    try:
+        return str(_find_animation_axis_identity(field, axis_spec) or "auto")
+    except Exception:
+        return str(axis_spec or "auto")
 
 
 def _ensure_worker_runtime_loaded() -> None:
@@ -141,6 +157,7 @@ def _ensure_worker_runtime_loaded() -> None:
         logger.exception("Failed to set cfplot viewer=None in worker")
 
     INTERFACE_EXPORTS = tuple(getattr(cf_interface, "__all__", ()))
+
     worker_globals.update({"cfp": cfp, "plt": plt, "np": np})
     worker_globals.update({name: getattr(cf_interface, name) for name in INTERFACE_EXPORTS})
     _WORKER_RUNTIME_LOADED = True
@@ -204,12 +221,14 @@ def _extract_task_headers(code: str) -> TaskHeaders:
 
     * ``save_path``   – destination path for ``#SAVE_TASK_CODE_PATH_B64:``
     * ``emit_image``  – False when ``#EMIT_IMAGE:0`` is present
+    * ``animation_enabled`` – True when ``#ANIMATION:1`` is present
     * ``task_kind``   – value of ``#TASK_KIND:`` (control tasks only)
     * ``task_payload``– decoded JSON dict from ``#TASK_PAYLOAD_B64:``
     * ``code``        – remaining executable code after all headers
     """
     save_path: str | None = None
     emit_image = True
+    animation_enabled = False
     task_kind: str | None = None
     task_payload: dict[str, Any] | None = None
     payload = code
@@ -231,6 +250,8 @@ def _extract_task_headers(code: str) -> TaskHeaders:
                 save_path = None
         elif header.startswith(EMIT_IMAGE_HEADER):
             emit_image = header[len(EMIT_IMAGE_HEADER) :] != "0"
+        elif header.startswith(ANIMATION_HEADER):
+            animation_enabled = header[len(ANIMATION_HEADER) :] == "1"
         elif header.startswith(TASK_KIND_HEADER):
             task_kind = header[len(TASK_KIND_HEADER) :].strip() or None
         elif header.startswith(TASK_PAYLOAD_HEADER):
@@ -251,6 +272,7 @@ def _extract_task_headers(code: str) -> TaskHeaders:
     return TaskHeaders(
         save_path=save_path,
         emit_image=emit_image,
+        animation_enabled=animation_enabled,
         task_kind=task_kind,
         task_payload=task_payload,
         code=payload,
@@ -1077,6 +1099,263 @@ def _emit_latest_plot_image() -> None:
     buffer.close()
 
 
+def _emit_animation_start(
+    request_id: str,
+    session_id: str | None,
+    total_frames: int | None,
+    fps_hint: float | None,
+    title_template: str | None,
+) -> None:
+    """Notify GUI of animation session start."""
+    import time
+
+    payload = {
+        "request_id": request_id,
+        "session_id": session_id,
+        "total_frames": total_frames,
+        "fps_hint": fps_hint,
+        "title_template": title_template,
+        "started_at": time.time(),
+    }
+    send_to_gui("ANIM_START", payload)
+
+
+def _emit_animation_frame(
+    request_id: str,
+    session_id: str | None,
+    frame_index: int,
+    total_frames: int | None,
+    frame_value_label: str | None = None,
+    frame_border_px: int = 15,
+    trim_whitespace: bool = True,
+) -> None:
+    """Emit a single animation frame to GUI."""
+    import time
+
+    _ensure_worker_runtime_loaded()
+    fig_numbers = plt.get_fignums()
+    if not fig_numbers:
+        logger.warning("No matplotlib figure available for animation frame")
+        return
+
+    fig = plt.figure(fig_numbers[-1])
+    buffer = BytesIO()
+    dpi = fig.get_dpi() if hasattr(fig, "get_dpi") else 120
+    border_px = max(int(frame_border_px), 0)
+    savefig_kwargs: dict[str, object] = {
+        "format": "png",
+        "dpi": dpi,
+    }
+    if bool(trim_whitespace):
+        pad_inches = float(border_px) / float(dpi) if dpi else 0.0
+        savefig_kwargs["bbox_inches"] = "tight"
+        savefig_kwargs["pad_inches"] = pad_inches
+    fig.savefig(buffer, **savefig_kwargs)
+    buffer.seek(0)
+    png_bytes = buffer.getvalue()
+    buffer.close()
+
+    payload = {
+        "request_id": request_id,
+        "session_id": session_id,
+        "frame_index": frame_index,
+        "total_frames": total_frames,
+        "png_bytes": png_bytes,
+        "frame_value_label": frame_value_label,
+        "emitted_at": time.time(),
+    }
+    send_to_gui("ANIM_FRAME", payload)
+    logger.info(
+        "ANIM_DIAG worker_emit_frame request_id=%s frame_index=%s png_bytes=%d",
+        request_id,
+        frame_index,
+        len(png_bytes),
+    )
+
+
+def _emit_animation_end(request_id: str, session_id: str | None, frames_emitted: int) -> None:
+    """Notify GUI of animation session completion."""
+    import time
+
+    payload = {
+        "request_id": request_id,
+        "session_id": session_id,
+        "frames_emitted": frames_emitted,
+        "completed_at": time.time(),
+    }
+    send_to_gui("ANIM_END", payload)
+
+
+def _emit_animation_error(
+    request_id: str, session_id: str | None, frame_index: int | None, error_message: str
+) -> None:
+    """Notify GUI of animation session error."""
+    import time
+
+    payload = {
+        "request_id": request_id,
+        "session_id": session_id,
+        "frame_index": frame_index,
+        "error": error_message,
+        "failed_at": time.time(),
+    }
+    send_to_gui("ANIM_ERROR", payload)
+
+
+def _configure_animation_streaming_for_exec() -> tuple[Callable[[str | None], None], str]:
+    """Install temporary cf-plot wrappers that emit ANIM_* messages for this task."""
+    _ensure_worker_runtime_loaded()
+
+    request_id = str(uuid.uuid4())
+    session_id = request_id
+    original_gopen = cfp.gopen
+    original_con = cfp.con
+
+    state: dict[str, object] = {
+        "started": False,
+        "frames_emitted": 0,
+        "total_frames": None,
+        "fps_hint": None,
+        "title_template": None,
+        "frame_border_px": 15,
+        "trim_whitespace": True,
+    }
+
+    def _emit_start_if_needed() -> None:
+        if bool(state["started"]):
+            return
+        _emit_animation_start(
+            request_id=request_id,
+            session_id=session_id,
+            total_frames=state["total_frames"] if isinstance(state["total_frames"], int) else None,
+            fps_hint=float(state["fps_hint"]) if isinstance(state["fps_hint"], (int, float)) else None,
+            title_template=str(state["title_template"]) if isinstance(state["title_template"], str) else None,
+        )
+        state["started"] = True
+
+    def _on_meta(meta: dict[str, object]) -> None:
+        if isinstance(meta, dict):
+            total_frames = meta.get("total_frames")
+            if isinstance(total_frames, int):
+                state["total_frames"] = total_frames
+            fps_hint = meta.get("fps_hint")
+            if isinstance(fps_hint, (int, float)):
+                state["fps_hint"] = float(fps_hint)
+            title_template = meta.get("title_template")
+            if isinstance(title_template, str):
+                state["title_template"] = title_template
+        _emit_start_if_needed()
+
+    def _on_frame(frame_event: dict[str, object]) -> None:
+        _emit_start_if_needed()
+
+        frame_index = int(state["frames_emitted"])
+        frame_value_label: str | None = None
+        if isinstance(frame_event, dict):
+            raw_index = frame_event.get("frame_index")
+            if isinstance(raw_index, int):
+                frame_index = raw_index
+
+            raw_frame_value = frame_event.get("frame_value")
+            if raw_frame_value is not None:
+                frame_value_label = str(raw_frame_value)
+
+        _emit_animation_frame(
+            request_id=request_id,
+            session_id=session_id,
+            frame_index=frame_index,
+            total_frames=state["total_frames"] if isinstance(state["total_frames"], int) else None,
+            frame_value_label=frame_value_label,
+            frame_border_px=int(state.get("frame_border_px", 15) or 15),
+            trim_whitespace=bool(state.get("trim_whitespace", True)),
+        )
+
+        next_count = frame_index + 1
+        if next_count > int(state["frames_emitted"]):
+            state["frames_emitted"] = next_count
+
+    def _wrapped_gopen(*args: Any, **kwargs: Any) -> Any:
+        kwargs.setdefault("animation_session_id", session_id)
+        kwargs.setdefault("animation_meta_callback", _on_meta)
+        kwargs.setdefault("animation_frame_callback", _on_frame)
+        return original_gopen(*args, **kwargs)
+
+    def _wrapped_con(*args: Any, **kwargs: Any) -> Any:
+        kwargs.setdefault("animation", True)
+        raw_border = kwargs.pop("animation_border_px", None)
+        if raw_border is not None:
+            try:
+                state["frame_border_px"] = max(int(raw_border), 0)
+            except (TypeError, ValueError):
+                state["frame_border_px"] = 15
+        raw_trim = kwargs.pop("animation_trim_whitespace", None)
+        if raw_trim is not None:
+            state["trim_whitespace"] = bool(raw_trim)
+        if "animation_reference" not in kwargs:
+            if args:
+                kwargs["animation_reference"] = args[0]
+            else:
+                animation_reference = worker_globals.get("fld")
+                if animation_reference is not None:
+                    kwargs["animation_reference"] = animation_reference
+        kwargs.setdefault("reuse_map_background", True)
+        kwargs.setdefault("clear_previous_frame", True)
+        if args:
+            kwargs["animation_axis"] = _resolve_animation_axis_identity_for_field(
+                args[0],
+                kwargs.get("animation_axis", "auto"),
+            )
+        else:
+            kwargs.setdefault("animation_axis", "auto")
+        kwargs.setdefault("animation_title_template", "{title} [{frame}]")
+        try:
+            return original_con(*args, **kwargs)
+        except (Warning, ValueError) as exc:
+            message = str(exc).lower()
+            if "too many dimensions" not in message:
+                raise
+
+            if not args:
+                raise
+
+            first_arg = args[0]
+            squeeze_method = getattr(first_arg, "squeeze", None)
+            if not callable(squeeze_method):
+                raise
+
+            squeezed = squeeze_method()
+            if squeezed is first_arg:
+                raise
+
+            logger.info("ANIM_DIAG retrying contour render with squeezed field after dimensionality warning")
+            retry_args = (squeezed, *args[1:])
+            return original_con(*retry_args, **kwargs)
+
+    cfp.gopen = _wrapped_gopen
+    cfp.con = _wrapped_con
+
+    def _finalize(error_message: str | None = None) -> None:
+        cfp.gopen = original_gopen
+        cfp.con = original_con
+        if error_message is not None:
+            _emit_animation_error(
+                request_id=request_id,
+                session_id=session_id,
+                frame_index=None,
+                error_message=error_message,
+            )
+            return
+
+        _emit_start_if_needed()
+        _emit_animation_end(
+            request_id=request_id,
+            session_id=session_id,
+            frames_emitted=int(state["frames_emitted"]),
+        )
+
+    return _finalize, request_id
+
+
 def main():
     """Entry point for the cf-worker command."""
     log_file = configure_logging()
@@ -1115,9 +1394,10 @@ def main():
         if line.strip() == "#END_TASK":
             code = "".join(current_block)
             headers = _extract_task_headers(code)
-            save_path, emit_image, task_kind, task_payload, exec_code = (
+            save_path, emit_image, animation_enabled, task_kind, task_payload, exec_code = (
                 headers.save_path,
                 headers.emit_image,
+                headers.animation_enabled,
                 headers.task_kind,
                 headers.task_payload,
                 headers.code,
@@ -1214,10 +1494,14 @@ def main():
                     logger.exception("Failed to save plot code to %s", save_path)
                     send_to_gui(f"STATUS:Error - failed to save plot code: {save_path}")
 
+            finalize_animation: Callable[[str | None], None] | None = None
             try:
                 task_start = time.monotonic()
                 rss_before_mb = _worker_rss_mb()
                 _ensure_worker_runtime_loaded()
+                if animation_enabled:
+                    finalize_animation, animation_request_id = _configure_animation_streaming_for_exec()
+                    logger.info("ANIM_DIAG worker_animation_enabled request_id=%s", animation_request_id)
                 # Execute the code block in our persistent global namespace
                 logger.info(
                     "PLOT_DIAG worker_exec_start pid=%s backend=%s emit_image=%s",
@@ -1226,6 +1510,9 @@ def main():
                     emit_image,
                 )
                 exec(exec_code, worker_globals)
+                if finalize_animation is not None:
+                    finalize_animation(None)
+                    finalize_animation = None
                 if emit_image:
                     _emit_latest_plot_image()
                 send_to_gui("STATUS:Task Complete")
@@ -1237,6 +1524,9 @@ def main():
                 )
             except _HANDLED_TASK_EXCEPTIONS as exc:
                 error_line = f"{type(exc).__name__}: {exc}"
+                if finalize_animation is not None:
+                    finalize_animation(error_line)
+                    finalize_animation = None
                 send_to_gui(f"STATUS:Error - {error_line}")
                 logger.error("Task handled error: %s", error_line)
                 _log_task_memory(
@@ -1247,6 +1537,9 @@ def main():
             except Exception:
                 # Send the full error back to the GUI for debugging
                 err = traceback.format_exc()
+                if finalize_animation is not None:
+                    finalize_animation(err.splitlines()[-1])
+                    finalize_animation = None
                 send_to_gui(f"STATUS:Error - {err.splitlines()[-1]}")
                 logger.exception("Task failed")
                 _log_task_memory(

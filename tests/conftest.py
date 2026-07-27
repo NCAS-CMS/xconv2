@@ -308,3 +308,163 @@ server {
             container.stop()
         except Exception:
             pass
+
+
+@pytest.fixture(scope="session")
+def nginx_https_index_service(tmp_path_factory: pytest.TempPathFactory):
+    """Run a temporary nginx HTTPS server with index.html at the root.
+
+    This simulates servers that serve an index page instead of directory autoindex.
+    """
+    docker_ready, docker_msg = _docker_status()
+    if not docker_ready:
+        if docker_msg and "daemon is not reachable" in docker_msg:
+            pytest.fail(docker_msg)
+        pytest.skip(docker_msg or "Docker-backed nginx HTTPS integration tests require docker and docker-py")
+
+    try:
+        import docker  # type: ignore
+    except ImportError:
+        pytest.skip("docker-py is required for nginx HTTPS integration tests")
+
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+    except ImportError:
+        pytest.skip("cryptography is required for nginx HTTPS integration tests")
+
+    workspace = tmp_path_factory.mktemp("nginx_https_index")
+    content_dir = workspace / "www"
+    cert_dir = workspace / "certs"
+    content_dir.mkdir(parents=True, exist_ok=True)
+    cert_dir.mkdir(parents=True, exist_ok=True)
+
+    sample_file = Path(__file__).resolve().parents[1] / "data" / "test1.nc"
+    if not sample_file.is_file():
+        pytest.skip("HTTPS integration test requires data/test1.nc")
+    shutil.copyfile(sample_file, content_dir / "test1.nc")
+    (content_dir / "index.html").write_text(
+        """
+<!doctype html>
+<html>
+  <head><title>Dataset Landing Page</title></head>
+  <body>
+    <h1>Welcome</h1>
+    <p>This server serves files from this location.</p>
+  </body>
+</html>
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COUNTRY_NAME, "GB"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "xconv2 tests"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "localhost"),
+        ]
+    )
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.now(timezone.utc) - timedelta(days=1))
+        .not_valid_after(datetime.now(timezone.utc) + timedelta(days=30))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName("localhost")]),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+
+    cert_path = cert_dir / "localhost.crt"
+    key_path = cert_dir / "localhost.key"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    )
+
+    nginx_conf = workspace / "default.conf"
+    nginx_conf.write_text(
+        """
+server {
+    listen 443 ssl;
+    server_name localhost;
+
+    ssl_certificate /etc/nginx/certs/localhost.crt;
+    ssl_certificate_key /etc/nginx/certs/localhost.key;
+
+    root /usr/share/nginx/html;
+    location / {
+        autoindex off;
+        index index.html;
+    }
+}
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    client = docker.from_env()
+    container = client.containers.run(
+        "nginx:stable-alpine",
+        ports={"443/tcp": None},
+        volumes={
+            str(content_dir): {"bind": "/usr/share/nginx/html", "mode": "ro"},
+            str(cert_path): {"bind": "/etc/nginx/certs/localhost.crt", "mode": "ro"},
+            str(key_path): {"bind": "/etc/nginx/certs/localhost.key", "mode": "ro"},
+            str(nginx_conf): {"bind": "/etc/nginx/conf.d/default.conf", "mode": "ro"},
+        },
+        detach=True,
+        remove=True,
+        name=f"xconv2-nginx-https-index-test-{uuid.uuid4()}",
+    )
+
+    container.reload()
+    network_ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
+    https_mappings = network_ports.get("443/tcp") or []
+    if not https_mappings:
+        logs = container.logs().decode(errors="replace")
+        container.stop()
+        pytest.fail(f"nginx container did not expose HTTPS port mapping. Logs:\n{logs}")
+
+    host_port = int(https_mappings[0]["HostPort"])
+    base_url = f"https://localhost:{host_port}"
+
+    import ssl
+    import urllib.request
+
+    context = ssl._create_unverified_context()
+    try:
+        for _ in range(30):
+            try:
+                with urllib.request.urlopen(base_url, context=context, timeout=2) as resp:
+                    if resp.status == 200:
+                        break
+            except Exception:
+                time.sleep(0.2)
+        else:
+            logs = container.logs().decode(errors="replace")
+            pytest.fail(f"nginx HTTPS service with index page did not start in time. Logs:\n{logs}")
+
+        yield {
+            "base_url": base_url,
+            "index_url": f"{base_url}/index.html",
+            "test_file_url": f"{base_url}/test1.nc",
+            "storage_options": {"ssl": False},
+        }
+    finally:
+        try:
+            container.stop()
+        except Exception:
+            pass

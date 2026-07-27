@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QColor, QFontDatabase, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
-    QPlainTextEdit,
     QPushButton,
     QSizePolicy,
     QStackedLayout,
@@ -109,21 +108,6 @@ class PlotViewController:
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self.host.plot_info_output = QPlainTextEdit()
-        self.host.plot_info_output.setReadOnly(True)
-        self.host.plot_info_output.setPlaceholderText("Click a field to see details...")
-        self.host.plot_info_output.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.host.plot_info_output.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.host.plot_info_output.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
-        self.host.plot_info_output.setPlainText(
-            getattr(self.host, "current_selection_info_text", "No selection info available.")
-        )
-
-        line_height = self.host.plot_info_output.fontMetrics().lineSpacing()
-        frame_width = self.host.plot_info_output.frameWidth() * 2
-        margin = 10
-        self.host.plot_info_output.setFixedHeight((line_height * 6) + frame_width + margin)
-
         self.host.plot_frame = QLabel("Waiting for data...")
         self.host.plot_frame.setAlignment(Qt.AlignCenter)
         self.host.plot_frame.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
@@ -197,11 +181,30 @@ class PlotViewController:
         self.host.save_go_button.setEnabled(False)
         self.host.save_go_button.clicked.connect(self.on_save_go_clicked)
 
+        self.host.anim_play_pause_button = QPushButton("Play")
+        self.host.anim_play_pause_button.setEnabled(False)
+        self.host.anim_play_pause_button.clicked.connect(self.on_animation_play_pause_clicked)
+
+        self.host.anim_stop_button = QPushButton("Stop")
+        self.host.anim_stop_button.setEnabled(False)
+        self.host.anim_stop_button.clicked.connect(self.on_animation_stop_clicked)
+
+        self.host.anim_export_button = QPushButton("Export")
+        self.host.anim_export_button.setEnabled(False)
+        self.host.anim_export_button.clicked.connect(self.on_animation_export_clicked)
+
         combo_height = max(
             self.host.plot_type_combo.sizeHint().height(),
             self.host.save_target_combo.sizeHint().height(),
         )
-        for button in (self.host.plot_button, self.host.options_button, self.host.save_go_button):
+        for button in (
+            self.host.plot_button,
+            self.host.options_button,
+            self.host.save_go_button,
+            self.host.anim_play_pause_button,
+            self.host.anim_stop_button,
+            self.host.anim_export_button,
+        ):
             button.setMinimumHeight(combo_height)
 
         plot_controls_group = QFrame()
@@ -235,33 +238,74 @@ class PlotViewController:
         export_controls_layout = QHBoxLayout(export_controls_group)
         export_controls_layout.setContentsMargins(6, 2, 6, 2)
         export_controls_layout.setSpacing(6)
-        export_controls_layout.addWidget(self.host.save_go_button)
-        export_controls_layout.addWidget(self.host.save_target_combo)
+
+        export_stack_widget = QWidget(export_controls_group)
+        export_stack = QStackedLayout(export_stack_widget)
+        export_stack.setContentsMargins(0, 0, 0, 0)
+
+        static_export_page = QWidget(export_stack_widget)
+        static_export_layout = QHBoxLayout(static_export_page)
+        static_export_layout.setContentsMargins(0, 0, 0, 0)
+        static_export_layout.setSpacing(6)
+        static_export_layout.addWidget(self.host.save_go_button)
+        static_export_layout.addWidget(self.host.save_target_combo)
+
+        animation_export_page = QWidget(export_stack_widget)
+        animation_export_layout = QHBoxLayout(animation_export_page)
+        animation_export_layout.setContentsMargins(0, 0, 0, 0)
+        animation_export_layout.setSpacing(6)
+        animation_export_layout.addWidget(self.host.anim_play_pause_button)
+        animation_export_layout.addWidget(self.host.anim_stop_button)
+        animation_export_layout.addWidget(self.host.anim_export_button)
+
+        export_stack.addWidget(static_export_page)
+        export_stack.addWidget(animation_export_page)
+
+        self.host.export_controls_stack = export_stack
+        export_controls_layout.addWidget(export_stack_widget)
 
         summary_row.addWidget(self.host.plot_info_button, 0, Qt.AlignVCenter)
         summary_row.addWidget(self.host.plot_summary_label, 1, Qt.AlignVCenter)
         summary_row.addWidget(plot_controls_group, 0, Qt.AlignVCenter)
         summary_row.addWidget(export_controls_group, 0, Qt.AlignVCenter)
 
-        layout.addWidget(self.host.plot_info_output)
         layout.addWidget(plot_stack_container, 1)
         layout.addLayout(summary_row)
+
+        self._update_action_mode_ui()
         return container
 
-    def set_plot_type_options(self, options: list[str], selected: str | None) -> None:
+    def set_plot_type_options(
+        self,
+        options: list[str],
+        selected: str | None,
+        varying_dims: int | None = None,
+    ) -> None:
         """Populate the plot-type selector from available plot kinds."""
         combo = getattr(self.host, "plot_type_combo", None)
         if combo is None:
             return
 
+        all_kinds = ["lineplot", "contour", "vector"]
         combo.blockSignals(True)
         combo.clear()
-        for kind in options:
+
+        for kind in all_kinds:
             combo.addItem(kind.title(), kind)
 
-        if options:
+        model = combo.model()
+        enabled_kinds = set(options)
+        for kind in all_kinds:
+            item_index = combo.findData(kind)
+            if item_index < 0:
+                continue
+            item = model.item(item_index) if hasattr(model, "item") else None
+            if item is not None:
+                item.setEnabled(kind in enabled_kinds)
+
+        if enabled_kinds:
             combo.setEnabled(True)
-            selected_kind = selected if selected in options else options[0]
+            selected_kind = selected if selected in enabled_kinds else options[0]
             selected_index = combo.findData(selected_kind)
             combo.setCurrentIndex(selected_index if selected_index >= 0 else 0)
         else:
@@ -269,27 +313,63 @@ class PlotViewController:
 
         combo.blockSignals(False)
 
-    def set_plot_action_options(self, has_existing_plot: bool) -> None:
+    def set_plot_action_options(
+        self,
+        has_existing_plot: bool,
+        supports_animation: bool = False,
+        varying_dims: int | None = None,
+    ) -> None:
         """Populate the plot-action selector based on current plot availability."""
         combo = getattr(self.host, "plot_action_combo", None)
         if combo is None:
             return
 
         current_action = getattr(self.host, "selected_plot_action", "plot")
-        options = ["plot"]
-        if has_existing_plot:
-            options.append("overplot")
+
+        options = ["plot", "overplot", "animation"]
+        if varying_dims == 3:
+            enabled_actions = {
+                "plot": False,
+                "overplot": False,
+                "animation": True,
+            }
+        else:
+            enabled_actions = {
+                "plot": varying_dims in {1, 2},
+                "overplot": has_existing_plot and varying_dims in {1, 2},
+                "animation": bool(supports_animation and varying_dims == 3),
+            }
 
         combo.blockSignals(True)
         combo.clear()
         for action in options:
             combo.addItem(action.title(), action)
 
-        selected_action = current_action if current_action in options else "plot"
+        model = combo.model()
+        for action in options:
+            item_index = combo.findData(action)
+            if item_index < 0:
+                continue
+            item = model.item(item_index) if hasattr(model, "item") else None
+            if item is not None:
+                item.setEnabled(enabled_actions.get(action, False))
+
+        enabled_order = [action for action in options if enabled_actions.get(action, False)]
+
+        if varying_dims == 3:
+            selected_action = "animation"
+        elif current_action in enabled_order:
+            selected_action = current_action
+        elif enabled_order:
+            selected_action = enabled_order[0]
+        else:
+            selected_action = "plot"
+
         selected_index = combo.findData(selected_action)
         combo.setCurrentIndex(selected_index if selected_index >= 0 else 0)
         combo.blockSignals(False)
         self.host.selected_plot_action = selected_action
+        self._update_action_mode_ui()
 
     def on_plot_type_changed(self) -> None:
         """Persist selected plot type and refresh context-sensitive actions."""
@@ -309,6 +389,40 @@ class PlotViewController:
         selected_action = combo.currentData()
         if isinstance(selected_action, str):
             self.host.selected_plot_action = selected_action
+            self._update_action_mode_ui()
+
+    def _update_action_mode_ui(self) -> None:
+        """Toggle export controls and plot canvas messaging for animation action."""
+        selected_action = getattr(self.host, "selected_plot_action", "plot")
+        is_animation = selected_action == "animation"
+        previous_action = getattr(self.host, "_previous_plot_action", None)
+
+        export_stack = getattr(self.host, "export_controls_stack", None)
+        if export_stack is not None:
+            export_stack.setCurrentIndex(1 if is_animation else 0)
+
+        play_pause_button = getattr(self.host, "anim_play_pause_button", None)
+        stop_button = getattr(self.host, "anim_stop_button", None)
+        export_button = getattr(self.host, "anim_export_button", None)
+
+        if play_pause_button is not None:
+            play_pause_button.setEnabled(is_animation)
+            if not is_animation:
+                play_pause_button.setText("Play")
+        if stop_button is not None:
+            stop_button.setEnabled(False)
+        if export_button is not None:
+            export_button.setEnabled(is_animation)
+
+        # Only clear the canvas when entering animation mode; otherwise frame
+        # updates would be wiped each time controls are refreshed.
+        if is_animation and previous_action != "animation":
+            self.clear_plot_canvas("Animation mode selected. Configure options and press GO.")
+        elif not is_animation and getattr(self.host, "_plot_pixmap_original", None) is None:
+            self.host.plot_frame.setPixmap(QPixmap())
+            self.host.plot_frame.setText("Waiting for data...")
+
+        self.host._previous_plot_action = selected_action
 
     def set_plot_loading(self, is_loading: bool, message: str = "Rendering plot...") -> None:
         """Show or hide an inline loading overlay while worker plot tasks run."""
@@ -331,7 +445,6 @@ class PlotViewController:
         self.host._plot_pixmap_original = None
         self.host.plot_frame.setPixmap(QPixmap())
         self.host.plot_frame.setText(message)
-        self.set_plot_action_options(has_existing_plot=False)
 
     def on_plot_button_clicked(self) -> None:
         """Request a plot refresh when the current selection is plottable."""
@@ -370,7 +483,12 @@ class PlotViewController:
             return
 
         self.host._plot_pixmap_original = pixmap
-        self.set_plot_action_options(has_existing_plot=True)
+        varying_dims = getattr(self.host, "last_varying_dims", None)
+        self.set_plot_action_options(
+            has_existing_plot=True,
+            supports_animation=varying_dims == 3,
+            varying_dims=varying_dims,
+        )
         self.set_plot_loading(False)
         self.refresh_plot_pixmap()
         QTimer.singleShot(0, self.fit_window_to_plot_aspect)
@@ -570,6 +688,30 @@ class PlotViewController:
             self.on_save_all_button_clicked()
         else:
             self.on_save_plot_button_clicked()
+
+    def on_animation_play_pause_clicked(self) -> None:
+        """Handle animation play/pause control clicks."""
+        handler = getattr(self.host, "_on_animation_play_pause", None)
+        if callable(handler):
+            handler()
+            return
+        self.host._show_status_message("Animation playback controls will activate when frames are available.")
+
+    def on_animation_stop_clicked(self) -> None:
+        """Handle animation stop control clicks."""
+        handler = getattr(self.host, "_on_animation_stop", None)
+        if callable(handler):
+            handler()
+            return
+        self.host._show_status_message("No active animation playback to stop.")
+
+    def on_animation_export_clicked(self) -> None:
+        """Handle animation export control clicks."""
+        handler = getattr(self.host, "_on_animation_export", None)
+        if callable(handler):
+            handler()
+            return
+        self.host._show_status_message("Animation export will be enabled after animation playback integration.")
 
     def on_save_code_button_clicked(self) -> None:
         """Prompt for destination file and request worker-side plot code save."""

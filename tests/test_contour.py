@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -26,6 +27,9 @@ class _FakeField:
 
     def subspace(self, **kwargs: object) -> "_FakeField":
         self.subspace_calls.append(kwargs)
+        return self
+
+    def squeeze(self) -> "_FakeField":
         return self
 
     def collapse(self, instruction: str, weights: bool = False) -> "_FakeField":
@@ -59,6 +63,92 @@ class _FakeCF:
     @staticmethod
     def wi(lo: object, hi: object) -> tuple[object, object]:
         return (lo, hi)
+
+
+@dataclass
+class _FakeAxisConstruct:
+    name: str
+    size: int
+    T: bool = False
+    Z: bool = False
+    Y: bool = False
+    X: bool = False
+
+    def identity(self, default: str | None = None) -> str:
+        return self.name or str(default or "")
+
+
+class _FakeAnimationField:
+    def __init__(self) -> None:
+        self._constructs = {
+            "dim0": _FakeAxisConstruct("time", 8, T=True),
+            "dim1": _FakeAxisConstruct("model_level_number", 55, Z=True),
+            "dim2": _FakeAxisConstruct("latitude", 3840, Y=True),
+            "dim3": _FakeAxisConstruct("longitude", 5120, X=True),
+        }
+
+    @property
+    def array(self) -> np.ndarray:
+        return np.array([[0.0, 1.0], [2.0, 3.0]], dtype=float)
+
+    def cell_methods(self, **kwargs) -> None:
+        return {}
+
+    def dimension_coordinates(self) -> list[str]:
+        return list(self._constructs)
+
+    def construct(self, key: str) -> _FakeAxisConstruct:
+        return self._constructs[key]
+
+
+@dataclass
+class _FakeCallableAxisConstruct:
+    name: str
+    size: int
+    is_t: bool = False
+    is_z: bool = False
+    is_y: bool = False
+    is_x: bool = False
+
+    def identity(self, default: str | None = None) -> str:
+        return self.name or str(default or "")
+
+    def T(self, default: bool = False) -> bool:
+        _ = default
+        return self.is_t
+
+    def Z(self, default: bool = False) -> bool:
+        _ = default
+        return self.is_z
+
+    def Y(self, default: bool = False) -> bool:
+        _ = default
+        return self.is_y
+
+    def X(self, default: bool = False) -> bool:
+        _ = default
+        return self.is_x
+
+
+class _FakeAnimationFieldCallableAxes:
+    def __init__(self) -> None:
+        # Keep Z first to catch regressions where bound methods are treated as truthy.
+        self._constructs = {
+            "dim0": _FakeCallableAxisConstruct("model_level_number", 55, is_z=True),
+            "dim1": _FakeCallableAxisConstruct("time", 8, is_t=True),
+            "dim2": _FakeCallableAxisConstruct("latitude", 3840, is_y=True),
+            "dim3": _FakeCallableAxisConstruct("longitude", 5120, is_x=True),
+        }
+
+    @property
+    def array(self) -> np.ndarray:
+        return np.array([[0.0, 1.0], [2.0, 3.0]], dtype=float)
+
+    def dimension_coordinates(self) -> list[str]:
+        return list(self._constructs)
+
+    def construct(self, key: str) -> _FakeCallableAxisConstruct:
+        return self._constructs[key]
 
 
 @dataclass
@@ -247,6 +337,52 @@ def test_plot_from_selection_contour_annotations_are_rendered_when_enabled() -> 
     assert "units: K" in str(args[2])
 
 
+def test_contour_style_only_rerender_does_not_reset_regional_map_extent() -> None:
+    selections = {"latitude": ("-20", "20"), "longitude": ("10", "50")}
+
+    initial_code = plot_from_selection(
+        selections=selections,
+        collapse_by_coord={},
+        plot_kind="contour",
+        plot_options={
+            "mode": "default",
+            "map_projection": "cyl",
+            "bbox": [10.0, -20.0, 50.0, 20.0],
+            "map_resolution": "50m",
+            "fill": True,
+            "lines": False,
+            "blockfill": False,
+        },
+    )
+
+    style_only_code = plot_from_selection(
+        selections=selections,
+        collapse_by_coord={},
+        plot_kind="contour",
+        plot_options={
+            "mode": "default",
+            "fill": True,
+            "lines": False,
+            "blockfill": True,
+            "blockfill_fast": True,
+        },
+    )
+
+    fld = _FakeField()
+    cfp = _FakeCFPlot()
+
+    _run_generated(initial_code, fld, cfp)
+    assert len(cfp.mapset_calls) == 1
+    assert cfp.mapset_calls[0].get("proj") == "cyl"
+    assert cfp.mapset_calls[0].get("lonmin") == 10.0
+    assert cfp.mapset_calls[0].get("latmin") == -20.0
+    assert cfp.mapset_calls[0].get("lonmax") == 50.0
+    assert cfp.mapset_calls[0].get("latmax") == 20.0
+
+    _run_generated(style_only_code, fld, cfp)
+    assert len(cfp.mapset_calls) == 1
+
+
 
 def test_contour_range_from_selection_emits_min_max_payload() -> None:
     code = contour_range_from_selection(
@@ -314,6 +450,57 @@ def test_plot_from_selection_contour_includes_plot_action() -> None:
 
     assert "contour_plot_action = 'overplot'" in code
     assert "plot_action=contour_plot_action" in code
+
+
+def test_plot_from_selection_contour_accepts_animation_action() -> None:
+    code = plot_from_selection(
+        selections={"latitude": ("-90", "90"), "longitude": ("0", "359")},
+        collapse_by_coord={},
+        plot_kind="contour",
+        plot_options={"mode": "default"},
+        plot_action="animation",
+    )
+
+    assert "contour_plot_action = 'animation'" in code
+    assert "plot_action=contour_plot_action" in code
+
+
+def test_run_contour_plot_animation_uses_resolved_axis_identity(monkeypatch) -> None:
+    fake_cfp = _FakeCFPlot()
+    fake_plt = _FakePlt()
+
+    monkeypatch.setattr(plotting, "cfp", fake_cfp)
+    monkeypatch.setattr(plotting, "plt", fake_plt)
+    monkeypatch.setattr(plotting, "cf", SimpleNamespace(Field=_FakeAnimationField))
+
+    run_contour_plot(
+        pfld=_FakeAnimationField(),
+        options={"mode": "default", "frame_axis": "time"},
+        plot_action="animation",
+    )
+
+    assert fake_cfp.con_calls
+    assert fake_cfp.con_calls[-1]["animation"] is True
+    assert fake_cfp.con_calls[-1]["animation_axis"] == "time"
+
+
+def test_run_contour_plot_animation_axis_resolution_supports_callable_axis_markers(monkeypatch) -> None:
+    fake_cfp = _FakeCFPlot()
+    fake_plt = _FakePlt()
+
+    monkeypatch.setattr(plotting, "cfp", fake_cfp)
+    monkeypatch.setattr(plotting, "plt", fake_plt)
+    monkeypatch.setattr(plotting, "cf", SimpleNamespace(Field=_FakeAnimationFieldCallableAxes))
+
+    run_contour_plot(
+        pfld=_FakeAnimationFieldCallableAxes(),
+        options={"mode": "default", "frame_axis": "time"},
+        plot_action="animation",
+    )
+
+    assert fake_cfp.con_calls
+    assert fake_cfp.con_calls[-1]["animation"] is True
+    assert fake_cfp.con_calls[-1]["animation_axis"] == "time"
 
 
 def test_plot_from_selection_includes_data_save_when_requested() -> None:

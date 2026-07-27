@@ -385,6 +385,111 @@ class ZarrSaveWarningDialog(QDialog):
         layout.addLayout(buttons_row)
 
 
+class AnimationOptionsDialog(QDialog):
+    """Dialog for configuring animation rendering and playback hints."""
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        *,
+        current_options: dict[str, object] | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Animation Options")
+        self.resize(460, 300)
+
+        options = dict(current_options or {})
+
+        layout = QVBoxLayout(self)
+
+        header = QLabel("Configure animation output and playback hints.")
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        form = QFormLayout()
+
+        self.fps_spin = QSpinBox(self)
+        self.fps_spin.setRange(1, 30)
+        self.fps_spin.setValue(int(options.get("fps_hint", 4) or 4))
+        self.fps_spin.setToolTip("Preferred playback rate in frames per second.")
+        form.addRow("FPS hint", self.fps_spin)
+
+        self.frame_axis_combo = QComboBox(self)
+        self.frame_axis_combo.addItem("Auto", "auto")
+        self.frame_axis_combo.addItem("Time", "time")
+        self.frame_axis_combo.addItem("Level", "level")
+        self.frame_axis_combo.addItem("Depth", "depth")
+        self.frame_axis_combo.addItem("Latitude", "latitude")
+        self.frame_axis_combo.addItem("Longitude", "longitude")
+        axis_value = str(options.get("frame_axis", "auto") or "auto")
+        axis_index = self.frame_axis_combo.findData(axis_value)
+        self.frame_axis_combo.setCurrentIndex(axis_index if axis_index >= 0 else 0)
+        self.frame_axis_combo.setToolTip("Coordinate to step through when rendering animation frames.")
+        form.addRow("Frame axis", self.frame_axis_combo)
+
+        self.max_frames_spin = QSpinBox(self)
+        self.max_frames_spin.setRange(0, 2000)
+        self.max_frames_spin.setSpecialValueText("All")
+        self.max_frames_spin.setValue(int(options.get("max_frames", 0) or 0))
+        self.max_frames_spin.setToolTip("Limit number of frames rendered. Set to All for no cap.")
+        form.addRow("Frame limit", self.max_frames_spin)
+
+        self.frame_border_spin = QSpinBox(self)
+        self.frame_border_spin.setRange(0, 200)
+        self.frame_border_spin.setValue(int(options.get("frame_border_px", 15) or 15))
+        self.frame_border_spin.setToolTip(
+            "Trim outer whitespace and keep this fixed pixel border around each animation frame."
+        )
+        form.addRow("Frame border (px)", self.frame_border_spin)
+
+        self.trim_whitespace_checkbox = QCheckBox("Trim outer whitespace", self)
+        self.trim_whitespace_checkbox.setChecked(bool(options.get("trim_frame_whitespace", True)))
+        self.trim_whitespace_checkbox.setToolTip(
+            "When enabled, crop each frame to content bounds before applying frame border."
+        )
+        form.addRow("Frame cropping", self.trim_whitespace_checkbox)
+
+        self.loop_checkbox = QCheckBox("Loop playback when finished", self)
+        self.loop_checkbox.setChecked(bool(options.get("loop_playback", True)))
+        form.addRow("Playback", self.loop_checkbox)
+
+        self.show_labels_checkbox = QCheckBox("Show frame value labels", self)
+        self.show_labels_checkbox.setChecked(bool(options.get("show_frame_labels", True)))
+        form.addRow("Frame labels", self.show_labels_checkbox)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def selected_options(self) -> dict[str, object]:
+        """Return validated animation options from dialog controls."""
+        return {
+            "fps_hint": int(self.fps_spin.value()),
+            "frame_axis": str(self.frame_axis_combo.currentData() or "auto"),
+            "max_frames": int(self.max_frames_spin.value()),
+            "frame_border_px": int(self.frame_border_spin.value()),
+            "trim_frame_whitespace": bool(self.trim_whitespace_checkbox.isChecked()),
+            "loop_playback": bool(self.loop_checkbox.isChecked()),
+            "show_frame_labels": bool(self.show_labels_checkbox.isChecked()),
+        }
+
+    @classmethod
+    def get_options(
+        cls,
+        parent: QWidget | None,
+        *,
+        current_options: dict[str, object] | None = None,
+    ) -> tuple[dict[str, object] | None, bool]:
+        """Open dialog and return selected options with acceptance state."""
+        dialog = cls(parent, current_options=current_options)
+        if dialog.exec() != QDialog.Accepted:
+            return None, False
+        return dialog.selected_options(), True
+
+
 def create_info_button(
     parent: QWidget | None,
     title: str,
@@ -1078,6 +1183,15 @@ class RemoteConfigurationDialog(QDialog):
         existing_layout.addRow("URL:", self.s3_existing_url)
         existing_layout.addRow("API:", self.s3_existing_api)
         existing_layout.addRow("(Optional) Reductionist URL:", self.s3_existing_reductionist_url)
+        s3_existing_actions = QHBoxLayout()
+        self.s3_edit_existing_button = QPushButton("Edit selected")
+        self.s3_delete_existing_button = QPushButton("Delete selected")
+        self.s3_edit_existing_button.clicked.connect(self._edit_selected_s3_alias)
+        self.s3_delete_existing_button.clicked.connect(self._delete_selected_s3_alias)
+        s3_existing_actions.addWidget(self.s3_edit_existing_button)
+        s3_existing_actions.addWidget(self.s3_delete_existing_button)
+        s3_existing_actions.addStretch(1)
+        existing_layout.addRow("", s3_existing_actions)
         layout.addWidget(self.s3_existing_group)
 
         self.s3_config_group = QGroupBox("Use config file")
@@ -1185,6 +1299,15 @@ class RemoteConfigurationDialog(QDialog):
         existing_layout.addRow("Host alias:", self.http_existing_combo)
         existing_layout.addRow("URL:", self.http_existing_url)
         existing_layout.addRow("(Optional) Reductionist URL:", self.http_existing_reductionist_url)
+        http_existing_actions = QHBoxLayout()
+        self.http_edit_existing_button = QPushButton("Edit selected")
+        self.http_delete_existing_button = QPushButton("Delete selected")
+        self.http_edit_existing_button.clicked.connect(self._edit_selected_http_alias)
+        self.http_delete_existing_button.clicked.connect(self._delete_selected_http_alias)
+        http_existing_actions.addWidget(self.http_edit_existing_button)
+        http_existing_actions.addWidget(self.http_delete_existing_button)
+        http_existing_actions.addStretch(1)
+        existing_layout.addRow("", http_existing_actions)
         layout.addWidget(self.http_existing_group)
 
         self.http_new_group = QGroupBox("Add new")
@@ -1233,6 +1356,40 @@ class RemoteConfigurationDialog(QDialog):
         self._update_http_selected_details()
         self._update_http_mode()
 
+    def _edit_selected_http_alias(self) -> None:
+        """Copy selected HTTPS alias details into Add new form for in-place editing."""
+        alias = self.http_existing_combo.currentText().strip()
+        details = self._http_locations.get(alias, {}) if alias else {}
+        if not alias or not isinstance(details, dict):
+            return
+
+        if self.http_mode_combo.currentText() != "Add new":
+            self.http_mode_combo.setCurrentText("Add new")
+        self.http_alias_edit.setText(alias)
+        self.http_url_edit.setText(str(details.get("url", "") or ""))
+        self.http_reductionist_url_edit.setText(str(details.get("reductionist_url", "") or ""))
+
+    def _delete_selected_http_alias(self) -> None:
+        """Delete selected HTTPS alias from dialog state and refresh controls."""
+        alias = self.http_existing_combo.currentText().strip()
+        if not alias or alias not in self._http_locations:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Delete HTTPS short name",
+            f"Delete HTTPS short name '{alias}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self._http_locations.pop(alias, None)
+        aliases = list(self._http_locations.keys())
+        self._set_combo_items(self.http_existing_combo, aliases, "No HTTPS configurations found")
+        self._update_http_selected_details()
+
     def _build_ssh_tab(self) -> QWidget:
         """Build SSH configuration controls."""
         tab = QWidget()
@@ -1268,6 +1425,15 @@ class RemoteConfigurationDialog(QDialog):
         existing_layout.addRow("User:", self.ssh_existing_user)
         existing_layout.addRow("Identity File:", self.ssh_existing_identity)
         existing_layout.addRow("ProxyJump:", self.ssh_existing_proxyjump)
+        ssh_existing_actions = QHBoxLayout()
+        self.ssh_edit_existing_button = QPushButton("Edit selected")
+        self.ssh_delete_existing_button = QPushButton("Delete selected")
+        self.ssh_edit_existing_button.clicked.connect(self._edit_selected_ssh_alias)
+        self.ssh_delete_existing_button.clicked.connect(self._delete_selected_ssh_alias)
+        ssh_existing_actions.addWidget(self.ssh_edit_existing_button)
+        ssh_existing_actions.addWidget(self.ssh_delete_existing_button)
+        ssh_existing_actions.addStretch(1)
+        existing_layout.addRow("", ssh_existing_actions)
         layout.addWidget(self.ssh_existing_group)
 
         self.ssh_new_group = QGroupBox("Add new")
@@ -1525,6 +1691,44 @@ class RemoteConfigurationDialog(QDialog):
         self._update_s3_selected_details()
         self._update_s3_mode()
 
+    def _edit_selected_s3_alias(self) -> None:
+        """Copy selected S3 alias details into Add new form for in-place editing."""
+        alias = self.s3_existing_combo.currentText().strip()
+        details = self._s3_locations.get(alias, {}) if alias else {}
+        if not alias or not isinstance(details, dict):
+            return
+
+        if self.s3_mode_combo.currentText() != "Add new":
+            self.s3_mode_combo.setCurrentText("Add new")
+        self.s3_alias_edit.setText(alias)
+        self.s3_url_edit.setText(str(details.get("url", "") or ""))
+        self.s3_access_key_edit.setText(str(details.get("access_key", "") or ""))
+        self.s3_secret_key_edit.setText(str(details.get("secret_key", "") or ""))
+        self.s3_reductionist_url_edit.setText(str(details.get("reductionist_url", "") or ""))
+
+    def _delete_selected_s3_alias(self) -> None:
+        """Delete selected S3 alias from dialog state and refresh controls."""
+        alias = self.s3_existing_combo.currentText().strip()
+        if not alias or alias not in self._s3_locations:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Delete S3 short name",
+            f"Delete S3 short name '{alias}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self._s3_locations.pop(alias, None)
+        aliases = list(self._s3_locations.keys())
+        self._set_combo_items(self.s3_existing_combo, aliases, "No existing configurations")
+        self._set_combo_items(self.s3_config_combo, aliases, "No config file entries")
+        self._update_s3_selected_details()
+        self._update_s3_config_details()
+
     def _select_saved_ssh_alias(self, alias: str, details: dict[str, Any]) -> None:
         """Switch UI state to an existing SSH selection after saving a new alias."""
         self._ssh_hosts[alias] = details
@@ -1541,6 +1745,54 @@ class RemoteConfigurationDialog(QDialog):
         self.ssh_mode_combo.setCurrentText("Select from existing")
         self._update_ssh_selected_details()
         self._update_ssh_mode()
+
+    def _edit_selected_ssh_alias(self) -> None:
+        """Copy selected SSH alias details into Add new form for in-place editing."""
+        alias = self.ssh_existing_combo.currentText().strip()
+        details = self._ssh_hosts.get(alias, {}) if alias else {}
+        if not alias or not isinstance(details, dict):
+            return
+
+        if self.ssh_mode_combo.currentText() != "Add new":
+            self.ssh_mode_combo.setCurrentText("Add new")
+        self.ssh_alias_edit.setText(alias)
+        self.ssh_hostname_edit.setText(str(details.get("hostname", "") or ""))
+        self.ssh_user_edit.setText(str(details.get("user", "") or ""))
+        identity_path = details.get("identity_file") or details.get("identityfile")
+        self.ssh_identity_file_edit.setText(str(identity_path or ""))
+        self.ssh_proxy_jump_edit.setText(str(details.get("proxyjump", "") or ""))
+        options = details.get("remote_python_options")
+        if isinstance(options, dict):
+            option_map = {str(key): str(value) for key, value in options.items()}
+        elif isinstance(options, list):
+            option_map = {str(item): str(item) for item in options if str(item).strip()}
+        else:
+            option_map = {"python3": "python3"}
+        preferred = str(details.get("remote_python", "python3"))
+        self._set_ssh_remote_python_options(option_map, preferred_command=preferred)
+        self.ssh_login_shell_check.setChecked(self._coerce_bool(details.get("login_shell"), default=False))
+
+    def _delete_selected_ssh_alias(self) -> None:
+        """Delete selected SSH alias from dialog state and refresh controls."""
+        alias = self.ssh_existing_combo.currentText().strip()
+        if not alias or alias not in self._ssh_hosts:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Delete SSH short name",
+            f"Delete SSH short name '{alias}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self._ssh_hosts.pop(alias, None)
+        self._ssh_runtime_preferences.pop(alias, None)
+        aliases = list(self._ssh_hosts.keys())
+        self._set_combo_items(self.ssh_existing_combo, aliases, "No ssh hosts found")
+        self._update_ssh_selected_details()
 
     def _choose_ssh_identity_file(self) -> None:
         """Browse for an SSH identity file path."""
@@ -2024,7 +2276,7 @@ class RemoteOpenDialog(QDialog):
         layout.addWidget(self.protocol_tabs)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
-        self.configure_button = buttons.addButton("Config New Remote", QDialogButtonBox.ActionRole)
+        self.configure_button = buttons.addButton("Config Remote", QDialogButtonBox.ActionRole)
         self.open_button = buttons.addButton("Open", QDialogButtonBox.AcceptRole)
         buttons.rejected.connect(self.reject)
         self.configure_button.clicked.connect(self._configure_new_remote)

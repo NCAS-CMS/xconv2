@@ -41,7 +41,7 @@ class FieldMetadataController:
         self.host.field_list_widget.addItem(hint_item)
 
     def set_selection_info_text(self, text: str) -> None:
-        """Update selection detail text in the right-hand info panel."""
+        """Update selection detail text used by field-details popups."""
         self.host.current_selection_info_text = text
         info_widget = getattr(self.host, "plot_info_output", None)
         if info_widget is not None:

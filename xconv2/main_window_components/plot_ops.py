@@ -86,9 +86,13 @@ def build_plot_context(
     varying_dims = sum(1 for dim in dims if dim != 1)
     available_kinds = getattr(host, "available_plot_kinds", [])
     selected_kind = getattr(host, "selected_plot_kind", None)
+    selected_action = getattr(host, "selected_plot_action", "plot")
 
     if varying_dims == 0:
         plot_kind = "collapsed"
+    elif varying_dims == 3 and selected_action == "animation":
+        # Animation mode treats 3D selections as contour slices over one varying axis.
+        plot_kind = "contour"
     elif varying_dims > 2:
         plot_kind = "unsupported"
     elif isinstance(selected_kind, str) and selected_kind in available_kinds:
@@ -121,7 +125,18 @@ def request_plot_task(
         return
     selections, collapse_by_coord, plot_kind = context
 
+    plot_action = getattr(host, "selected_plot_action", "plot")
+    if plot_action not in {"plot", "overplot", "animation"}:
+        plot_action = "plot"
+
+    template_plot_action = plot_action
+
     if plot_kind in {"collapsed", "unsupported"}:
+        if plot_action == "animation":
+            host._show_status_message(
+                "Animation requires exactly 3 varying dimensions in the coordinate selection.",
+                is_error=True,
+            )
         logger.info(
             "PLOT_DIAG gui_plot_skip reason=dimensionality kind=%s coords=%d collapses=%d",
             plot_kind,
@@ -163,9 +178,21 @@ def request_plot_task(
             plot_options.setdefault("page_title_fontsize", host._page_title_fontsize())
             plot_options.setdefault("annotation_fontsize", host._annotation_fontsize())
 
-        plot_action = getattr(host, "selected_plot_action", "plot")
-        if plot_action not in {"plot", "overplot"}:
-            plot_action = "plot"
+            if plot_action == "animation":
+                raw_animation_options = host.plot_options_by_kind.get("animation", {})
+                animation_options = dict(raw_animation_options) if isinstance(raw_animation_options, dict) else {}
+                for key in (
+                    "fps_hint",
+                    "frame_axis",
+                    "max_frames",
+                    "show_frame_labels",
+                    "frame_border_px",
+                    "trim_frame_whitespace",
+                ):
+                    if key in animation_options:
+                        plot_options[key] = animation_options[key]
+                plot_options.setdefault("frame_border_px", 15)
+                plot_options.setdefault("trim_frame_whitespace", True)
 
         contour_context: dict[str, object] | None = None
         if plot_kind == "contour":
@@ -195,7 +222,7 @@ def request_plot_task(
                 collapse_by_coord,
                 plot_kind,
                 plot_options,
-                plot_action=plot_action,
+                plot_action=template_plot_action,
                 save_data_path=save_data_target,
             )
         except (ValueError, NotImplementedError) as exc:
@@ -238,8 +265,12 @@ def request_plot_task(
         + cmd
     )
 
+    animation_enabled = plot_action == "animation"
+
     if emit_image_override is not None:
         emit_image = emit_image_override
+    elif animation_enabled:
+        emit_image = False
     else:
         emit_image = save_plot_target is None and save_data_target is None
 
@@ -260,7 +291,9 @@ def request_plot_task(
         emit_image,
     )
 
-    if save_target and save_plot_target and save_data_target:
+    if animation_enabled:
+        loading_message = "Preparing animation..."
+    elif save_target and save_plot_target and save_data_target:
         loading_message = "Saving plot, data, and code..."
     elif save_plot_target and save_data_target:
         loading_message = "Rendering and saving plot/data..."
@@ -279,4 +312,16 @@ def request_plot_task(
     host._plot_request_expects_image = emit_image
     host._suppress_stale_error_status = False
     host._set_plot_loading(True, loading_message)
-    host._send_worker_task(cmd, save_code_path=save_target, emit_image=emit_image)
+    if animation_enabled:
+        host._send_worker_task(
+            cmd,
+            save_code_path=save_target,
+            emit_image=emit_image,
+            animation_enabled=True,
+        )
+    else:
+        host._send_worker_task(
+            cmd,
+            save_code_path=save_target,
+            emit_image=emit_image,
+        )
