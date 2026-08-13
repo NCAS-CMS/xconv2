@@ -15,6 +15,19 @@ def test_format_slider_label_value_time_without_calendar() -> None:
     assert result == "2000-01-01"
 
 
+def test_format_slider_label_value_time_with_360_day_calendar_and_clock() -> None:
+    controller = SelectionController(SimpleNamespace())
+
+    result = controller.format_slider_label_value(
+        1197509400.0,
+        "seconds since 1950-01-01 00:00:00 360_day",
+        delta=10800,
+    )
+
+    assert result.startswith("1988-07-01")
+    assert "\n" in result
+
+
 class _DummyButton:
     def __init__(self) -> None:
         self.enabled = False
