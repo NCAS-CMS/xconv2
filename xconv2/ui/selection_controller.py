@@ -24,6 +24,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_KNOWN_CF_CALENDARS = {
+    "360_day",
+    "365_day",
+    "366_day",
+    "all_leap",
+    "gregorian",
+    "julian",
+    "noleap",
+    "none",
+    "proleptic_gregorian",
+    "standard",
+}
+
 
 class KeyboardRangeSlider(QRangeSlider):
     """QRangeSlider variant with arrow-key control for the active handle."""
@@ -443,12 +456,16 @@ class SelectionController:
             return None
 
         parts = normalized_units.split()
-        if len(parts) >= 3:
-            time_units = " ".join(parts[:3])
+        if len(parts) < 3:
+            return None
+
+        calendar = None
+        if parts[-1].lower() in _KNOWN_CF_CALENDARS and len(parts) > 3:
+            calendar = parts[-1]
+            time_units = " ".join(parts[:-1])
         else:
             time_units = normalized_units
 
-        calendar = parts[3] if len(parts) == 4 else None
         return time_units, calendar
 
     @staticmethod
@@ -474,7 +491,7 @@ class SelectionController:
             return text
 
         time_units, calendar = parsed_time
-        #logging.info("Formatting time coordinate value '%s' with units '%s' (%s)", text, time_units, delta)
+        logger.info("Formatting time coordinate value '%s' with units '%s' (%s)", text, time_units, delta)
         if isinstance(value, str):
             try:
                 value = float(value)
