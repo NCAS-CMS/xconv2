@@ -81,7 +81,7 @@ This includes ESGF nodes and JASMIN GWS public webservers, all you need to do
 for these is to enter the base URL and a short name for the configuration.</p>
 <p><b>SSH</b>: You can also connect to and navigate remote filesytems via SSH
 and access <tt>HDF5/NetCDF4</tt> and <tt>pp/fields</tt> files provided you have a python with 
-<i>pyfive</i>, <i>ppfive</i>, and <i>cbor2</i> installed on the server. You will need to identify
+<i>pyfive</i>, <i>umfive</i>, and <i>cbor2</i> installed on the server. You will need to identify
 the remote python executable and provide authentication credentials (e.g. via <tt>.ssh/config</tt>).
 </p>
 """,

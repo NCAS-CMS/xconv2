@@ -106,21 +106,21 @@ class RemoteFilesystemSpec:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _maybe_wrap_ppfive(filesystem: Any, path: str, protocol: str) -> Any:
-    """Return a ppfive.File or a plain open handle for the path."""
+def _maybe_wrap_umfive(filesystem: Any, path: str, protocol: str) -> Any:
+    """Return a umfive.File or a plain open handle for the path."""
     fh = filesystem.open(path, "rb")
     if (
         protocol in {"http", "s3"}
         and PurePosixPath(path).suffix.lower() in _PP_FORMAT_EXTENSIONS
     ):
         try:
-            import ppfive  # type: ignore[import]
+            import umfive  # type: ignore[import]
 
-            return ppfive.File(fh)
+            return umfive.File(fh)
 
         except ImportError:
             logger.warning(
-                f"ppfive is not installed; reading {path} without ppfive "
+                f"umfive is not installed; reading {path} without umfive "
                 "wrapper"
             )
 
@@ -293,12 +293,12 @@ class RemoteAccessSession:
         try:
             if isinstance(normalized, list):
                 self._open_handles = [
-                    _maybe_wrap_ppfive(self.filesystem, path, protocol)
+                    _maybe_wrap_umfive(self.filesystem, path, protocol)
                     for path in normalized
                 ]
                 opened: Any = list(self._open_handles)
             else:
-                opened = _maybe_wrap_ppfive(self.filesystem, normalized, protocol)
+                opened = _maybe_wrap_umfive(self.filesystem, normalized, protocol)
                 self._open_handles = [opened]
             logging.info(f'Attempting to open remote dataset(s) with reader: {opened}')
             return reader(opened)

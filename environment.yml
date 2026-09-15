@@ -21,6 +21,7 @@ dependencies:
   - setuptools >80  # cfplot imports distutils
   - superqt
   - udunits2  # no pip wheel; required by cf-python/cf-units
+  - umfive >=0.2.2
   - zarr 
   # testing
   - pytest
