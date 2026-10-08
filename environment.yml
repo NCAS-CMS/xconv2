@@ -8,6 +8,7 @@ dependencies:
   - python >=3.12
   - pip !=21.3
   - cartopy  # no pip wheel
+  - cf-python
   - esmpy
   - fsspec
   - numpy
@@ -27,8 +28,6 @@ dependencies:
   - pytest
   # move these to conda-forge deps when released
   - pip:
-      - ppfive >=0.2.0
-      - cf-python
       - "cf-plot @git+https://github.com/bnlawrence/cf-plot.git@main"
       - "p5rem @git+https://github.com/NCAS-CMS/p5rem.git@main"
       - "-e ."  # xconv2 is not yet on conda-forge
