@@ -8,14 +8,14 @@ dependencies:
   - python >=3.12
   - pip !=21.3
   - cartopy  # no pip wheel
-  - cf-python
+  - cf-python >=3.21.0
   - esmpy
   - fsspec
   - numpy
   - pandas
   - paramiko
   - prov
-  - pyfive
+  - pyfive >=1.2.0
   - pyside6
   - rdflib
   - s3fs

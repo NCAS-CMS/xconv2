@@ -8,17 +8,15 @@ version = "0.3.0b2"
 description = "High-performance data viewer and simple data converter"
 requires-python = ">=3.12"
 dependencies = [
-    "cfdm @ git+https://github.com/davidhassell/cfdm.git@pyfive-netcdf",
-    "cf-python @ git+https://github.com/davidhassell/cf-python.git@kerchunk-read",
+    "cf-python>=3.21.0",
     "cf-plot @git+https://github.com/bnlawrence/cf-plot.git@main",
     "p5rem @git+https://github.com/NCAS-CMS/p5rem.git@main",
-    "esmpy",
     "fsspec",
     "numpy",
     "pandas",
     "paramiko",
     "prov",
-    "pyfive",
+    "pyfive>=1.2.0",
     "PySide6",
     "rdflib",
     "s3fs",
