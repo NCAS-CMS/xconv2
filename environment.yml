@@ -29,5 +29,4 @@ dependencies:
   # move these to conda-forge deps when released
   - pip:
       - "cf-plot @git+https://github.com/bnlawrence/cf-plot.git@main"
-      - "p5rem @git+https://github.com/NCAS-CMS/p5rem.git@main"
       - "-e ."  # xconv2 is not yet on conda-forge
