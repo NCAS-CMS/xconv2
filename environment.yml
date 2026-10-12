@@ -8,7 +8,7 @@ dependencies:
   - python >=3.12
   - pip !=21.3
   - cartopy  # no pip wheel
-  #  - cf-plot >=3.5.0  # waiting on: https://github.com/conda-forge/cf-plot-feedstock/pull/36
+  - cf-plot >=3.5.0
   - cf-python >=3.21.0
   - esmpy
   - fsspec
