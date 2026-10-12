@@ -8,25 +8,24 @@ version = "0.3.0b2"
 description = "High-performance data viewer and simple data converter"
 requires-python = ">=3.12"
 dependencies = [
-    "cfdm @ https://github.com/davidhassell/cfdm/archive/refs/heads/pyfive-netcdf.tar.gz",
-    "cf-python @ https://github.com/davidhassell/cf-python/archive/refs/heads/kerchunk-read.tar.gz",
-    "cf-plot @git+https://github.com/bnlawrence/cf-plot.git@main",
+    "cf-plot>=3.5.0",
+    "cf-python>=3.21.0",
     "fsspec",
     "numpy",
-    "pandas",
     "p5rem",
+    "pandas",
     "paramiko",
+    "pillow",
     "prov",
     "pyfive>=1.2.0",
     "PySide6",
+    "pystac-client",
     "rdflib",
     "s3fs",
     "setuptools>80",  # cf-plot imports distutils
     "superqt",
     "umfive>=0.2.2",
     "zarr",
-    "pystac-client",
-    "Pillow"
 ]
 
 [project.optional-dependencies]

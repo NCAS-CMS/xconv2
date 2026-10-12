@@ -8,25 +8,25 @@ dependencies:
   - python >=3.12
   - pip !=21.3
   - cartopy  # no pip wheel
+  #  - cf-plot >=3.5.0  # waiting on: https://github.com/conda-forge/cf-plot-feedstock/pull/36
   - cf-python >=3.21.0
   - esmpy
   - fsspec
   - numpy
+  #  - p5rem  # waiting on: needs to be on conda-forge
   - pandas
   - paramiko
+  - pillow
   - prov
   - pyfive >=1.2.0
   - pyside6
+  - pystac-client
   - rdflib
   - s3fs
-  - setuptools >80  # cfplot imports distutils
+  - setuptools >80  # cf-plot imports distutils
   - superqt
   - udunits2  # no pip wheel; required by cf-python/cf-units
   - umfive >=0.2.2
   - zarr 
   # testing
   - pytest
-  # move these to conda-forge deps when released
-  - pip:
-      - "cf-plot @git+https://github.com/bnlawrence/cf-plot.git@main"
-      - "-e ."  # xconv2 is not yet on conda-forge
