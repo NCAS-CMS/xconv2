@@ -24,9 +24,10 @@ dependencies:
   - udunits2  # no pip wheel; required by cf-python/cf-units
   - umfive >=0.2.2
   - zarr 
-  # testing
   - pytest
-  # move these to conda-forge deps when released
   - pip:
+      - Pillow
+      - pystac-client
+      - p5rem
       - "cf-plot @git+https://github.com/bnlawrence/cf-plot.git@main"
-      - "-e ."  # xconv2 is not yet on conda-forge
+      - "-e .[test]" 

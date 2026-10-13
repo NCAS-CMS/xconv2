@@ -696,6 +696,10 @@ class CFVCore(QMainWindow):
         """Attach Help pinned to the right while left-side menus grow normally."""
         self.menu_controller._setup_help_menu(menu_bar, menu_font_size_px, menu_font_weight)
 
+    def _show_science_stack(self) -> None:
+        """Scientific runtime details require a worker-backed window."""
+        self._show_status_message("Science Stack requires the science worker.", is_error=True)
+
     def _show_about_dialog(self) -> None:
         """Show application identity and runtime details."""
         dialog = QDialog(self)
