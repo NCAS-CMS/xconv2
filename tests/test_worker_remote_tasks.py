@@ -11,6 +11,16 @@ import pytest
 import xconv2.worker as worker
 
 
+def test_science_stack_control_task_returns_environment_without_plot_runtime(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(worker.cf, "environment", lambda display: ["cf: 3.21.0"])
+    monkeypatch.setattr(worker, "science_environment_report", lambda env: "\n".join(env) + "\ncommit: abc")
+    monkeypatch.setattr(worker, "send_to_gui", lambda *args: calls.append(args))
+    monkeypatch.setattr(worker, "_ensure_worker_runtime_loaded", lambda: pytest.fail("Plot runtime loaded"))
+    worker._handle_control_task("SCIENCE_STACK", {})
+    assert calls == [("SCIENCE_STACK_RESULT", "cf: 3.21.0\ncommit: abc")]
+
+
 class _FakeFilesystem:
     def __init__(self, payload: bytes = b"remote-bytes") -> None:
         self.payload = payload
