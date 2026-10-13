@@ -163,10 +163,6 @@ class MenuController:
         about_action.triggered.connect(self.host._show_about_dialog)
         help_menu.addAction(about_action)
 
-        science_stack_action = QAction("Science Stack...", self.host)
-        science_stack_action.triggered.connect(self.host._show_science_stack)
-        help_menu.addAction(science_stack_action)
-
         report_issue_action = QAction("Report Issue", self.host)
         report_issue_action.triggered.connect(self.host._open_issue_tracker)
         help_menu.addAction(report_issue_action)

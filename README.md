@@ -43,15 +43,6 @@ and then you should have `xconv2` available on your command line in that environ
 No user documentation is yet available, but it is designed to be intuitive
 and basic usage should be possible without documentation once it is installed.
 
-### Raising issues
-
-Please raise any issues using the github link from the
-help menu. In doing so, it would be helpful to report
-the science stack used from the science stack report
-also available from the help menu.
-
-
-
 ### Developer Documentation
 
 Limited developer documentation is available. For the moment it is

@@ -57,31 +57,6 @@ class _DummyRouterHost(_DummyStatusHost):
     pass
 
 
-def test_router_delivers_science_stack_report() -> None:
-    class _Host:
-        report = ""
-
-        def _receive_science_stack_report(self, report: str) -> None:
-            self.report = report
-
-    host = _Host()
-    encoded = base64.b64encode(pickle.dumps("cf: 3.21.0\ncommit: abc")).decode("ascii")
-    WorkerMessageRouter(host).handle_line(f"SCIENCE_STACK_RESULT:{encoded}")
-    assert host.report == "cf: 3.21.0\ncommit: abc"
-
-
-def test_router_reports_invalid_science_stack_payload(caplog) -> None:
-    class _Host:
-        report = ""
-
-        def _receive_science_stack_report(self, report: str) -> None:
-            self.report = report
-
-    host = _Host()
-    encoded = base64.b64encode(pickle.dumps({"unexpected": True})).decode("ascii")
-    WorkerMessageRouter(host).handle_line(f"SCIENCE_STACK_RESULT:{encoded}")
-    assert "Unable to decode" in host.report
-    assert "Unexpected SCIENCE_STACK_RESULT" in caplog.text
 def test_status_handler_formats_task_complete_with_elapsed_time() -> None:
     host = _DummyStatusHost()
     handler = WorkerStatusHandler(host)

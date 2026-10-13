@@ -52,7 +52,6 @@ from .main_window_components import remote_auth_ops as _remote_auth_ops
 from .main_window_components import remote_flow_ops as _remote_flow_ops
 from .main_window_components import replay_ops as _replay_ops
 from .worker_message_router import WorkerMessageRouter
-from .ui.science_stack_dialog import ScienceStackDialog
 # Remote-access helpers are imported lazily (inside the methods that use them)
 # so that p5rem/paramiko are not loaded at GUI startup.
 from .ui.dialogs import (
@@ -131,7 +130,6 @@ class CFVMain(CFVCore):
 
     def __init__(self) -> None:
         super().__init__()
-        self._science_stack_dialog: ScienceStackDialog | None = None
         self._memory_status_label = QLabel("Mem: --")
         fixed_font = QFontDatabase.systemFont(QFontDatabase.FixedFont)
         fixed_font.setPointSize(10)
@@ -733,8 +731,6 @@ class CFVMain(CFVCore):
             return
         logger.error("Worker process error: %s", process_error)
         message = f"Worker process error: {process_error}"
-        if self._science_stack_dialog is not None:
-            self._receive_science_stack_report(message)
         self._show_status_message(message, is_error=True)
         self._maybe_show_binary_validation_dialog(message)
         if self._plot_request_in_flight:
@@ -746,8 +742,6 @@ class CFVMain(CFVCore):
     def handle_worker_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
         """Capture worker shutdown information."""
         logger.warning("Worker finished with exit_code=%s exit_status=%s", exit_code, exit_status)
-        if self._science_stack_dialog is not None:
-            self._receive_science_stack_report("Science worker stopped. See View Logs for details.")
         if exit_code != 0:
             message = f"Worker stopped unexpectedly (exit_code={exit_code})."
             self._show_status_message(message, is_error=True)
@@ -2127,24 +2121,6 @@ class CFVMain(CFVCore):
         logger.debug("Sending worker task (%d chars)", len(code))
         self.worker.write(payload.encode())
 
-    def _show_science_stack(self) -> None:
-        if self._science_stack_dialog is None:
-            self._science_stack_dialog = ScienceStackDialog(self)
-        dialog = self._science_stack_dialog
-        if not dialog.isVisible():
-            if self.worker.state() == QProcess.NotRunning:
-                dialog.report.setPlainText("Science worker is not running. See View Logs for details.")
-            else:
-                dialog.report.setPlainText("Waiting for the science worker environment report...")
-                self._send_worker_control_task("SCIENCE_STACK", {})
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
-
-    def _receive_science_stack_report(self, report: str) -> None:
-        if self._science_stack_dialog is not None:
-            self._science_stack_dialog.report.setPlainText(report)
-
     def _send_worker_control_task(self, kind: str, payload: dict[str, object]) -> None:
         """Send a non-code control task to the worker using typed task headers."""
         payload_text = json.dumps(payload, sort_keys=True)
@@ -2228,3 +2204,4 @@ class CFVMain(CFVCore):
         self._release_remote_session_if_active()
         self._shutdown_worker()
         super().closeEvent(event)
+

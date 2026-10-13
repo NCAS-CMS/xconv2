@@ -109,14 +109,7 @@ class WorkerMessageRouter:
 
     def handle_line(self, line: str) -> None:
         """Process a single worker stdout line."""
-        if line.startswith("SCIENCE_STACK_RESULT:"):
-            payload = self._decode_payload(line)
-            if not isinstance(payload, str):
-                logger.warning("Unexpected SCIENCE_STACK_RESULT payload type: %s", type(payload).__name__)
-                self._host._receive_science_stack_report("Unable to decode the science stack report. See View Logs.")
-                return
-            self._host._receive_science_stack_report(payload)
-        elif line.startswith("REMOTE_STATUS:"):
+        if line.startswith("REMOTE_STATUS:"):
             self._handle_remote_status(line)
         elif line.startswith("REMOTE_LIST_RESULT:"):
             self._handle_remote_list_result(line)
