@@ -1,4 +1,6 @@
-from PySide6.QtCore import QProcess, Qt
+import pytest
+
+from PySide6.QtCore import QCoreApplication, QEvent, QProcess, Qt
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
 
 from xconv2.main_window import CFVMain
@@ -6,9 +8,28 @@ from xconv2.ui.menu_controller import MenuController
 from xconv2.ui.science_stack_dialog import ScienceStackDialog
 
 
-def test_science_stack_dialog_is_non_modal_and_read_only() -> None:
+@pytest.fixture
+def widgets():
     app = QApplication.instance() or QApplication([])
-    dialog = ScienceStackDialog(None)
+    owned = []
+
+    def track(widget):
+        owned.append(widget)
+        return widget
+
+    try:
+        yield app, track
+    finally:
+        for widget in reversed(owned):
+            widget.close()
+            widget.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        app.processEvents()
+
+
+def test_science_stack_dialog_is_non_modal_and_read_only(widgets) -> None:
+    app, track = widgets
+    dialog = track(ScienceStackDialog(None))
     dialog.report.setPlainText("cf: 3.21.0\ncfdm: git install; commit: abc")
     dialog.show()
     app.processEvents()
@@ -20,8 +41,8 @@ def test_science_stack_dialog_is_non_modal_and_read_only() -> None:
     dialog.close()
 
 
-def test_help_action_requests_science_stack() -> None:
-    app = QApplication.instance() or QApplication([])
+def test_help_action_requests_science_stack(widgets) -> None:
+    app, track = widgets
 
     class _Host(QMainWindow):
         requested = False
@@ -38,7 +59,7 @@ def test_help_action_requests_science_stack() -> None:
         def _open_roadmap(self) -> None:
             pass
 
-    host = _Host()
+    host = track(_Host())
     MenuController(host)._setup_help_menu(host.menuBar(), 10, 400)
     menu = host.menuBar().cornerWidget(Qt.TopRightCorner).menu()
     action = next(action for action in menu.actions() if action.text() == "Science Stack...")
@@ -48,8 +69,8 @@ def test_help_action_requests_science_stack() -> None:
     host.close()
 
 
-def test_window_requests_report_once_and_refreshes_on_reopen() -> None:
-    app = QApplication.instance() or QApplication([])
+def test_window_requests_report_once_and_refreshes_on_reopen(widgets) -> None:
+    app, track = widgets
 
     class _Worker:
         def state(self):
@@ -65,7 +86,7 @@ def test_window_requests_report_once_and_refreshes_on_reopen() -> None:
         def _send_worker_control_task(self, kind, payload) -> None:
             self.requests.append((kind, payload))
 
-    host = _Host()
+    host = track(_Host())
     CFVMain._show_science_stack(host)
     app.processEvents()
     dialog = host._science_stack_dialog
@@ -86,8 +107,8 @@ def test_window_requests_report_once_and_refreshes_on_reopen() -> None:
     host.close()
 
 
-def test_window_reports_stopped_worker_without_sending_request() -> None:
-    app = QApplication.instance() or QApplication([])
+def test_window_reports_stopped_worker_without_sending_request(widgets) -> None:
+    app, track = widgets
 
     class _Worker:
         def state(self):
@@ -102,7 +123,7 @@ def test_window_reports_stopped_worker_without_sending_request() -> None:
         def _send_worker_control_task(self, kind, payload) -> None:
             raise AssertionError("Request sent to stopped worker")
 
-    host = _Host()
+    host = track(_Host())
     CFVMain._show_science_stack(host)
     app.processEvents()
     assert "not running" in host._science_stack_dialog.report.toPlainText()

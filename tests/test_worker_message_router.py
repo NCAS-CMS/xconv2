@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import base64
+import logging
 import pickle
 
 from xconv2.worker_message_router import WorkerMessageRouter, WorkerStatusHandler
@@ -71,6 +72,7 @@ def test_router_delivers_science_stack_report() -> None:
 
 
 def test_router_reports_invalid_science_stack_payload(caplog) -> None:
+    caplog.set_level(logging.WARNING, logger="xconv2.worker_message_router")
     class _Host:
         report = ""
 
@@ -82,6 +84,8 @@ def test_router_reports_invalid_science_stack_payload(caplog) -> None:
     WorkerMessageRouter(host).handle_line(f"SCIENCE_STACK_RESULT:{encoded}")
     assert "Unable to decode" in host.report
     assert "Unexpected SCIENCE_STACK_RESULT" in caplog.text
+
+
 def test_status_handler_formats_task_complete_with_elapsed_time() -> None:
     host = _DummyStatusHost()
     handler = WorkerStatusHandler(host)

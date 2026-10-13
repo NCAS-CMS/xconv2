@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -25,7 +26,8 @@ class _Distribution:
 
 
 @pytest.fixture
-def metadata(monkeypatch):
+def metadata(monkeypatch, caplog):
+    caplog.set_level(logging.WARNING, logger="xconv2.science_environment")
     def install(distributions, mapping=None):
         monkeypatch.setattr(science_environment, "distributions", lambda: distributions)
         monkeypatch.setattr(science_environment, "packages_distributions", lambda: mapping or {})
