@@ -35,13 +35,27 @@ and then you should have `xconv2` available on your command line in that environ
 
 ### Conda Environments
 
-- `environment.yml`: base development/runtime environment (no Docker test dependencies).
-- `environment-integration.yml`: optional integration-test environment (includes Python `docker` and `minio` packages for Docker-backed MinIO tests).
+- `environment.yml`: base development/runtime environment.
+- `environment-integration.yml`: optional integration-test environment, including
+  pytest and cryptography for local HTTPS tests, and conda-forge SeaweedFS 4.48
+  (the native `weed` binary) for S3 integration tests. No Docker engine, CLI, or Python
+  Docker/MinIO packages are needed by the application or tests.
+
+See [Running tests](docs/dev_notes.md#running-tests) for setup and skip conditions.
 
 ## Documentation
 
 No user documentation is yet available, but it is designed to be intuitive
 and basic usage should be possible without documentation once it is installed.
+
+### Raising issues
+
+Please raise any issues using the github link from the
+help menu. In doing so, it would be helpful to report
+the science stack used from the science stack report
+also available from the help menu.
+
+
 
 ### Developer Documentation
 

@@ -21,6 +21,7 @@ import cf
 from . import cell_method_handler as xconv_cell_method_handler
 from . import __version__
 from .logging_utils import apply_scoped_runtime_logging, configure_logging
+from .science_environment import redact_home_directory, science_environment_report
 from .workflow.provenance_export import handle_save_provenance_task as _handle_save_provenance_task_impl
 from .remote_access import (
     RemoteAccessSession,
@@ -777,6 +778,10 @@ def _handle_control_task(task_kind: str, task_payload: dict[str, Any] | None) ->
     descriptor_hash = str(payload.get("descriptor_hash", ""))
     descriptor = payload.get("descriptor")
 
+    if task_kind == "SCIENCE_STACK":
+        send_to_gui("SCIENCE_STACK_RESULT", science_environment_report(cf.environment(display=False)))
+        return
+
     if task_kind == "REMOTE_PREPARE":
         if not isinstance(descriptor, dict) or not session_id or not descriptor_hash:
             raise ValueError("REMOTE_PREPARE requires session_id, descriptor_hash, and descriptor")
@@ -1425,6 +1430,8 @@ def main():
                     )
                 except _HANDLED_TASK_EXCEPTIONS as exc:
                     error_line = f"{type(exc).__name__}: {exc}"
+                    if task_kind == "SCIENCE_STACK":
+                        send_to_gui("SCIENCE_STACK_RESULT", redact_home_directory(f"Unable to read science stack: {error_line}"))
                     send_to_gui(
                         "REMOTE_OPEN_RESULT",
                         {
@@ -1453,6 +1460,8 @@ def main():
                 except Exception:
                     err = traceback.format_exc()
                     error_line = err.splitlines()[-1]
+                    if task_kind == "SCIENCE_STACK":
+                        send_to_gui("SCIENCE_STACK_RESULT", redact_home_directory(f"Unable to read science stack: {error_line}"))
                     send_to_gui(
                         "REMOTE_OPEN_RESULT",
                         {
