@@ -5,20 +5,33 @@ channels:
   - nodefaults
 
 dependencies:
-  - python >=3.12,<3.14
+  - python >=3.12
   - pip !=21.3
   - cartopy  # no pip wheel
-  - udunits2  # no pip wheel; required by cf-python/cf-units
-  - cf-plot
+  - cf-plot >=3.5.0
+  - cf-python >=3.21.0
+  - cryptography
+  - esmpy
+  - fsspec
+  - numpy
   - pandas
+  - paramiko
+  - pillow
+  - prov
+  - pyfive >=1.2.0
   - pyside6
-  - setuptools >80
+  - pystac-client
+  - rdflib
+  - s3fs
+  - seaweedfs=4.48
+  - setuptools >80  # cf-plot imports distutils
   - superqt
+  - udunits2  # no pip wheel; required by cf-python/cf-units
+  - umfive >=0.2.2
   - zarr
   - pytest
-  - seaweedfs=4.48
-  - pip
   - pip:
+      - p5rem
       - "git+https://github.com/ncas-cms/cfdm.git@main"
       - "git+https://github.com/ncas-cms/cf-python.git@main"
       - "-e .[test]"  # xconv2 is not yet on conda-forge
