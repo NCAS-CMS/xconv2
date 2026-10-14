@@ -683,7 +683,7 @@ def test_request_coordinates_can_skip_status_message(monkeypatch) -> None:
 
     monkeypatch.setattr(
         "xconv2.main_window.coordinate_list",
-        lambda index: f"TASK_FOR_{index}",
+        lambda index, *, request_id: f"TASK_FOR_{index}",
     )
 
     CFVMain._request_coordinates_for_field(dummy, 4, show_status=False)
@@ -731,10 +731,53 @@ def test_coordinate_request_does_not_restore_previous_plot_from_worker(monkeypat
 
     worker.main()
 
-    assert ("COORD", coords) in messages
+    request_id, field_index = host._pending_coordinate_request
+    assert ("COORD", {"request_id": request_id, "field_index": field_index, "coords": coords}) in messages
     assert ("STATUS:Task Complete", None) in messages
     assert not any(prefix == "IMG_READY" for prefix, _ in messages)
     assert worker._extract_task_headers(payload).emit_image is False
+
+
+def test_rapid_field_switch_applies_only_latest_coordinate_response() -> None:
+    from xconv2.worker_message_router import WorkerMessageRouter
+
+    host = _DummyCoordRequestMain()
+    built = []
+    plotted = []
+    host._normalize_coordinate_metadata = lambda coords: {"time": {"values": coords}}
+    host.build_dynamic_sliders = built.append
+    host._auto_plot_initial_field_selection = lambda: plotted.append("plot")
+    responses = []
+    request_ids = []
+
+    # A -> B -> A before any worker responses reach the GUI.
+    for index in (0, 1, 0):
+        CFVMain._request_coordinates_for_field(host, index)
+        request_ids.append(host._pending_coordinate_request[0])
+        field = types.SimpleNamespace(squeeze=lambda: object())
+        namespace = {
+            "f": [field, field],
+            "coordinate_info": lambda fld: [0, 1, 2],
+            "send_to_gui": lambda prefix, payload: responses.append((prefix, payload)),
+        }
+        exec(host.sent_tasks[-1], namespace)
+
+    assert len(set(request_ids)) == 3
+    host._pending_initial_autoplot_field_index = 0
+    router = WorkerMessageRouter(host)
+    for prefix, payload in responses[:-1]:
+        encoded = base64.b64encode(pickle.dumps(payload)).decode()
+        router.handle_line(f"{prefix}:{encoded}")
+        assert built == []
+        assert plotted == []
+        assert host._pending_initial_autoplot_field_index == 0
+    prefix, payload = responses[-1]
+    encoded = base64.b64encode(pickle.dumps(payload)).decode()
+    router.handle_line(f"{prefix}:{encoded}")
+    assert built == [{"time": {"values": [0, 1, 2]}}]
+    assert plotted == ["plot"]
+    assert host._pending_coordinate_request is None
+    assert all(flag is False for flag in host.image_flags)
 
 
 def test_request_plot_options_shows_lineplot_dialog_when_lineplot_selected() -> None:
@@ -915,6 +958,7 @@ def test_on_field_clicked_resets_ui_then_requests_coordinates() -> None:
 
 def test_field_selection_change_clears_plot_before_loading_field_details() -> None:
     window = CFVMain.__new__(CFVMain)
+    window._pending_coordinate_request = ("old-request", 0)
     item = object()
     window.field_list_widget = _DummyContextFieldListWidget(selected=[item], current=item)
     window.field_list_widget.row = lambda selected: 1
@@ -933,6 +977,7 @@ def test_field_selection_change_clears_plot_before_loading_field_details() -> No
         ("details", item),
     ]
     assert window._selected_field_indices == [1]
+    assert window._pending_coordinate_request is None
 
 
 def test_clear_plot_canvas_discards_previous_image_and_repaints_immediately() -> None:
@@ -1025,21 +1070,27 @@ def test_switching_fields_autoplots_first_slice_of_each_selected_field() -> None
 
     window.build_dynamic_sliders = build_sliders
     requested_coordinates = []
-    window._request_coordinates_for_field = (
-        lambda index, show_status=True: requested_coordinates.append(index)
-    )
+    def request_coordinates(index, show_status=True):
+        requested_coordinates.append(index)
+        window._pending_coordinate_request = (str(len(requested_coordinates)), index)
+
+    window._request_coordinates_for_field = request_coordinates
     plots = []
     window._request_plot_update = lambda: plots.append((
         window._selected_field_index_for_operation("Plot"),
         {name: control["range_slider"].value() for name, control in window.controls.items()},
     ))
-    payload = [(name, entry["values"]) for name, entry in metadata.items()]
-    encoded = base64.b64encode(pickle.dumps(payload)).decode()
-
     for item in [items[0], items[1], items[0]]:
         field_list.selected = [item]
         field_list.current = item
         CFVMain.on_field_clicked(window, item)
+        request_id, field_index = window._pending_coordinate_request
+        payload = {
+            "request_id": request_id,
+            "field_index": field_index,
+            "coords": [(name, entry["values"]) for name, entry in metadata.items()],
+        }
+        encoded = base64.b64encode(pickle.dumps(payload)).decode()
         window.worker = _FakeWorker([f"COORD:{encoded}\n"])
         CFVMain.handle_worker_output(window)
         assert window._pending_initial_autoplot_field_index is None

@@ -314,6 +314,17 @@ class WorkerMessageRouter:
 
     def _handle_coord(self, line: str) -> None:
         coords = self._decode_payload(line)
+        pending = getattr(self._host, "_pending_coordinate_request", None)
+        if isinstance(coords, dict):
+            response = (coords.get("request_id"), coords.get("field_index"))
+            if pending is None or response != pending:
+                logger.debug("Ignoring stale coordinate response: %r (pending %r)", response, pending)
+                return
+            self._host._pending_coordinate_request = None
+            coords = coords.get("coords")
+        elif hasattr(self._host, "_pending_coordinate_request"):
+            logger.warning("Ignoring coordinate response without a request identifier")
+            return
         metadata = self._host._normalize_coordinate_metadata(coords)
         if metadata:
             set_mode = getattr(self._host, "_set_selection_panel_mode", None)

@@ -67,6 +67,10 @@ Changing the field selection immediately clears and repaints the previous plot
 before field details, coordinates, or the replacement plot are prepared.
 Coordinate requests disable worker image emission so they cannot resend the
 previous matplotlib figure while the new field's plot is being rendered.
+Each GUI coordinate request also carries a unique request ID and field index.
+Responses are applied only if both match the current pending request; selection
+changes and replacement file loads invalidate pending requests. Late responses
+cannot rebuild sliders or consume the newly selected field's automatic plot.
 
 #### Upstream Branches
 

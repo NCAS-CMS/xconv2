@@ -168,6 +168,7 @@ class CFVMain(CFVCore):
         self._pending_field_op_source: str | None = None
         self._pending_binary_operation_name: str | None = None
         self._pending_initial_autoplot_field_index: int | None = None
+        self._pending_coordinate_request: tuple[str, int] | None = None
         self._shutting_down: bool = False
         self._replay_session_id: str = str(uuid.uuid4())
         self._animation_session_controller = AnimationSessionController()
@@ -265,6 +266,7 @@ class CFVMain(CFVCore):
 
     def on_field_clicked(self, item: QListWidgetItem) -> None:
         """Show selection details and request slider coordinates for the field."""
+        self._pending_coordinate_request = None
         super().on_field_clicked(item)
 
         selected_items: list[QListWidgetItem] = []
@@ -298,6 +300,7 @@ class CFVMain(CFVCore):
 
     def on_field_selection_changed(self) -> None:
         """Track selected field indices to support mode-specific selection behavior."""
+        self._pending_coordinate_request = None
         self._set_plot_loading(False)
         self._clear_plot_canvas("Waiting for data...")
         super().on_field_selection_changed()
@@ -764,6 +767,7 @@ class CFVMain(CFVCore):
     ) -> None:
         """Load selected file in worker and publish field metadata."""
         if clear_existing:
+            self._pending_coordinate_request = None
             self._clear_loaded_data_views()
             self._pending_initial_autoplot_field_index = None
         self._pending_metadata_append = append_metadata
@@ -800,6 +804,7 @@ class CFVMain(CFVCore):
             return
 
         expanded_paths = [_normalize_source_path_or_uri(path) for path in file_paths]
+        self._pending_coordinate_request = None
         self._clear_loaded_data_views()
         self._pending_initial_autoplot_field_index = None
         self._pending_metadata_append = False
@@ -830,6 +835,7 @@ class CFVMain(CFVCore):
             return
 
         if not append_metadata:
+            self._pending_coordinate_request = None
             self._clear_loaded_data_views()
             self._pending_initial_autoplot_field_index = None
         self._pending_metadata_append = append_metadata
@@ -1075,9 +1081,11 @@ class CFVMain(CFVCore):
 
     def _request_coordinates_for_field(self, index: int, show_status: bool = True) -> None:
         """Request coordinate arrays for a selected field index."""
+        request_id = str(uuid.uuid4())
+        self._pending_coordinate_request = (request_id, index)
         if show_status:
             self._show_status_message(f"Loading coordinates for field index {index}...")
-        self._send_worker_task(coordinate_list(index), emit_image=False)
+        self._send_worker_task(coordinate_list(index, request_id=request_id), emit_image=False)
 
     @staticmethod
     def _json_safe_operation_payload(value: object) -> object:
