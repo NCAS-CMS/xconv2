@@ -10,10 +10,10 @@ dependencies:
   - cartopy  # no pip wheel
   - cf-plot >=3.5.0
   - cf-python >=3.21.0
+  - cryptography
   - esmpy
   - fsspec
   - numpy
-  #  - p5rem  # waiting on: needs to be on conda-forge
   - pandas
   - paramiko
   - pillow
