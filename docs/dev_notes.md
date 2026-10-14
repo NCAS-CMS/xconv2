@@ -53,6 +53,10 @@ this file format does not require a MinIO server.
 
 #### Field Selection Defaults
 
+Source-tinted field rows use explicit black text on their light backgrounds,
+independent of the system's light/dark palette. Unsaved generated fields retain
+their red italic text; saving them switches to black text on the source tint.
+
 Each single-field selection uses the same initial contour selection: the last
 two varying coordinates retain their full range, and additional varying
 coordinates (such as time and level) start at index zero. Once the worker
