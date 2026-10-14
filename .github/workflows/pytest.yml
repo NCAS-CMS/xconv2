@@ -43,7 +43,7 @@ jobs:
           miniforge-version: "latest"
           use-mamba: true
       - name: Install xconv2
-        run: pip install -e .
+        run: pip install -e ".[test]"
       - name: Run pip check
         run: pip check
       # - name: Run pre-commit with mypy
@@ -57,5 +57,11 @@ jobs:
       - name: Test xconv2
         run: |
           which xconv2
-      - name: Test with pytest
-        run: pytest
+      - name: Test without external services
+        run: pytest -m "not integration"
+      - name: Install SeaweedFS from conda-forge (no Docker)
+        run: conda install --yes --freeze-installed -c conda-forge seaweedfs=4.48
+      - name: Test local HTTPS and SeaweedFS S3 integration
+        run: |
+          weed version
+          pytest -m integration -ra --durations=10

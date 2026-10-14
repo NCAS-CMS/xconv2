@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import base64
+import logging
 import pickle
 
 from xconv2.worker_message_router import WorkerMessageRouter, WorkerStatusHandler
@@ -55,6 +56,34 @@ class _DummyRouterHost(_DummyStatusHost):
     _pending_filter_axes_result: list[str] | None = None
     _pending_filter_axes_loop: _DummyLoop | None = None
     pass
+
+
+def test_router_delivers_science_stack_report() -> None:
+    class _Host:
+        report = ""
+
+        def _receive_science_stack_report(self, report: str) -> None:
+            self.report = report
+
+    host = _Host()
+    encoded = base64.b64encode(pickle.dumps("cf: 3.21.0\ncommit: abc")).decode("ascii")
+    WorkerMessageRouter(host).handle_line(f"SCIENCE_STACK_RESULT:{encoded}")
+    assert host.report == "cf: 3.21.0\ncommit: abc"
+
+
+def test_router_reports_invalid_science_stack_payload(caplog) -> None:
+    caplog.set_level(logging.WARNING, logger="xconv2.worker_message_router")
+    class _Host:
+        report = ""
+
+        def _receive_science_stack_report(self, report: str) -> None:
+            self.report = report
+
+    host = _Host()
+    encoded = base64.b64encode(pickle.dumps({"unexpected": True})).decode("ascii")
+    WorkerMessageRouter(host).handle_line(f"SCIENCE_STACK_RESULT:{encoded}")
+    assert "Unable to decode" in host.report
+    assert "Unexpected SCIENCE_STACK_RESULT" in caplog.text
 
 
 def test_status_handler_formats_task_complete_with_elapsed_time() -> None:

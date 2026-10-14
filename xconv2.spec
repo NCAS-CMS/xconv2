@@ -50,6 +50,8 @@ worker_datas += collect_data_files("p5rem", include_py_files=True)
 # import time. Include dist-info metadata so this works in frozen builds.
 worker_datas += copy_metadata("pyfive")
 worker_datas += copy_metadata("p5rem")
+worker_datas += copy_metadata("cf-python", recursive=True)
+worker_datas += copy_metadata("cf-plot", recursive=True)
 
 # UDUNITS database XML — cfunits requires it at runtime in frozen mode.
 # udunits2.xml uses <import href="udunits2-base.xml"> etc., so we must bundle

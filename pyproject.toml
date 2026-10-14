@@ -8,9 +8,8 @@ version = "0.3.0b2"
 description = "High-performance data viewer and simple data converter"
 requires-python = ">=3.12"
 dependencies = [
-    "cfdm @ https://github.com/davidhassell/cfdm/archive/refs/heads/pyfive-netcdf.tar.gz",
-    "cf-python @ https://github.com/davidhassell/cf-python/archive/refs/heads/kerchunk-read.tar.gz",
-    "cf-plot @git+https://github.com/bnlawrence/cf-plot.git@main",
+    "cf-python>=3.21.0",
+    "cf-plot>=3.5.0",
     "fsspec",
     "numpy",
     "pandas",
@@ -31,8 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = [
-    "docker",
-    "minio",
+    "cryptography",
     "pytest",
 ]
 
@@ -53,6 +51,9 @@ xconv2 = ["assets/*.svg", "assets/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: tests exercising local HTTPS or native SeaweedFS S3 services (no Docker)",
+]
 filterwarnings = [
     "ignore:distutils Version classes are deprecated. Use packaging.version instead.:DeprecationWarning:cfplot.cfplot",
     "ignore:'maxsplit' is passed as positional argument:DeprecationWarning:cf.functions",
