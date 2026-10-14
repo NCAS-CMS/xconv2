@@ -23,7 +23,7 @@ dependencies:
   - pystac-client
   - rdflib
   - s3fs
-  - seaweedfs=4.48
+  - seaweedfs >=4.48
   - setuptools >80  # cf-plot imports distutils
   - superqt
   - udunits2  # no pip wheel; required by cf-python/cf-units
