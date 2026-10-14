@@ -445,6 +445,7 @@ class PlotViewController:
         self.host._plot_pixmap_original = None
         self.host.plot_frame.setPixmap(QPixmap())
         self.host.plot_frame.setText(message)
+        self.host.plot_frame.repaint()
 
     def on_plot_button_clicked(self) -> None:
         """Request a plot refresh when the current selection is plottable."""

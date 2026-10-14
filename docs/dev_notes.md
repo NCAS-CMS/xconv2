@@ -51,6 +51,19 @@ normally so a broken installation fails visibly. MinIO-style `~/.mc/config.json`
 credential files remain supported for compatibility with existing S3 settings;
 this file format does not require a MinIO server.
 
+#### Field Selection Defaults
+
+Each single-field selection uses the same initial contour selection: the last
+two varying coordinates retain their full range, and additional varying
+coordinates (such as time and level) start at index zero. Once the worker
+returns coordinates, the selected field is plotted automatically. This also
+applies when switching between fields in the same file or returning to a
+previously selected field. Multi-field selection does not trigger this plot.
+Changing the field selection immediately clears and repaints the previous plot
+before field details, coordinates, or the replacement plot are prepared.
+Coordinate requests disable worker image emission so they cannot resend the
+previous matplotlib figure while the new field's plot is being rendered.
+
 #### Upstream Branches
 
 From time to time we need to update from the branches into your working develolpment python. This is how I do that:

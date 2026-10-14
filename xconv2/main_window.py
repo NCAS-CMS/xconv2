@@ -168,7 +168,6 @@ class CFVMain(CFVCore):
         self._pending_field_op_source: str | None = None
         self._pending_binary_operation_name: str | None = None
         self._pending_initial_autoplot_field_index: int | None = None
-        self._allow_initial_autoplot_on_next_field_click: bool = True
         self._shutting_down: bool = False
         self._replay_session_id: str = str(uuid.uuid4())
         self._animation_session_controller = AnimationSessionController()
@@ -294,15 +293,13 @@ class CFVMain(CFVCore):
             return
 
         self._selected_field_indices = [field_index]
-        if self._allow_initial_autoplot_on_next_field_click:
-            self._pending_initial_autoplot_field_index = field_index
-            self._allow_initial_autoplot_on_next_field_click = False
-        else:
-            self._pending_initial_autoplot_field_index = None
+        self._pending_initial_autoplot_field_index = field_index
         self._request_coordinates_for_field(field_index, show_status=False)
 
     def on_field_selection_changed(self) -> None:
         """Track selected field indices to support mode-specific selection behavior."""
+        self._set_plot_loading(False)
+        self._clear_plot_canvas("Waiting for data...")
         super().on_field_selection_changed()
         selected_items = self.field_list_widget.selectedItems()
         self._selected_field_indices = [
@@ -314,11 +311,11 @@ class CFVMain(CFVCore):
             self._set_selection_panel_mode("multi")
 
     def _clear_pending_initial_autoplot(self) -> None:
-        """Clear one-shot auto-plot intent for first field-click handling."""
+        """Clear pending first-slice plotting for the selected field."""
         self._pending_initial_autoplot_field_index = None
 
     def _auto_plot_initial_field_selection(self) -> None:
-        """Auto-plot contour on first field click, collapsing extra dimensions to index 0."""
+        """Auto-plot each selected field with extra dimensions fixed at index 0."""
         pending_index = self._pending_initial_autoplot_field_index
         self._pending_initial_autoplot_field_index = None
         if not isinstance(pending_index, int) or pending_index < 0:
@@ -768,7 +765,6 @@ class CFVMain(CFVCore):
         """Load selected file in worker and publish field metadata."""
         if clear_existing:
             self._clear_loaded_data_views()
-            self._allow_initial_autoplot_on_next_field_click = True
             self._pending_initial_autoplot_field_index = None
         self._pending_metadata_append = append_metadata
         self._pending_metadata_source = file_path
@@ -805,7 +801,6 @@ class CFVMain(CFVCore):
 
         expanded_paths = [_normalize_source_path_or_uri(path) for path in file_paths]
         self._clear_loaded_data_views()
-        self._allow_initial_autoplot_on_next_field_click = True
         self._pending_initial_autoplot_field_index = None
         self._pending_metadata_append = False
         self._pending_metadata_source = None
@@ -836,7 +831,6 @@ class CFVMain(CFVCore):
 
         if not append_metadata:
             self._clear_loaded_data_views()
-            self._allow_initial_autoplot_on_next_field_click = True
             self._pending_initial_autoplot_field_index = None
         self._pending_metadata_append = append_metadata
         self._pending_metadata_source = uri
@@ -1083,7 +1077,7 @@ class CFVMain(CFVCore):
         """Request coordinate arrays for a selected field index."""
         if show_status:
             self._show_status_message(f"Loading coordinates for field index {index}...")
-        self._send_worker_task(coordinate_list(index))
+        self._send_worker_task(coordinate_list(index), emit_image=False)
 
     @staticmethod
     def _json_safe_operation_payload(value: object) -> object:
