@@ -16,8 +16,9 @@ dependencies:
   - superqt
   - zarr
   - pytest
+  - seaweedfs=4.48
   - pip
   - pip:
       - "git+https://github.com/ncas-cms/cfdm.git@main"
       - "git+https://github.com/ncas-cms/cf-python.git@main"
-      - "-e .[test]"  # Native SeaweedFS 'weed' is installed separately; no Docker.
+      - "-e .[test]"  # xconv2 is not yet on conda-forge

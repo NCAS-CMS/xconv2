@@ -18,9 +18,17 @@ self-signed certificate, HTTP range support, and directory listing disabled.
 They require `cryptography`, included in the test extra.
 
 S3 integration tests run a native [SeaweedFS](https://github.com/seaweedfs/seaweedfs)
-`weed mini` process. Download the release binary for your platform, extract it,
-and put `weed` on `PATH`; CI currently uses version **4.48**. No running service,
-root privileges, container runtime, or MinIO installation is needed. The fixture
+`weed mini` process. The integration conda environment and CI install version
+**4.48** from conda-forge, which puts `weed` on the environment's `PATH`.
+To add it to an existing conda environment, activate that environment and run:
+
+```bash
+conda install -c conda-forge seaweedfs=4.48
+weed version
+```
+
+SeaweedFS is only a test dependency, not an application/runtime requirement.
+No running service, root privileges, container runtime, or MinIO installation is needed. The fixture
 uses temporary storage and randomly allocated loopback ports for all components,
 then stops the process after the tests. SeaweedFS's usual S3 port is **8333**,
 not MinIO's 9000; tests discover their allocated endpoint automatically.

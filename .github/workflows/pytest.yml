@@ -59,14 +59,8 @@ jobs:
           which xconv2
       - name: Test without external services
         run: pytest -m "not integration"
-      - name: Install native SeaweedFS (no Docker)
-        run: |
-          mkdir -p "$RUNNER_TEMP/seaweedfs"
-          curl --fail --location --retry 3 \
-            https://github.com/seaweedfs/seaweedfs/releases/download/4.48/linux_amd64.tar.gz \
-            -o "$RUNNER_TEMP/seaweedfs.tar.gz"
-          tar -xzf "$RUNNER_TEMP/seaweedfs.tar.gz" -C "$RUNNER_TEMP/seaweedfs" weed
-          echo "$RUNNER_TEMP/seaweedfs" >> "$GITHUB_PATH"
+      - name: Install SeaweedFS from conda-forge (no Docker)
+        run: conda install --yes --freeze-installed -c conda-forge seaweedfs=4.48
       - name: Test local HTTPS and SeaweedFS S3 integration
         run: |
           weed version
