@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from collections import deque
+from io import StringIO
 import tempfile
 import pickle
 from dataclasses import dataclass, field
@@ -9,8 +10,8 @@ import types
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QMessageBox, QStyle
+from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QStyle
 
 from xconv2.cache_utils import prune_disk_cache
 from xconv2.main_window import CFVMain
@@ -137,13 +138,15 @@ class _DummyResetMain:
 class _DummyCoordRequestMain:
     status_messages: list[str] = field(default_factory=list)
     sent_tasks: list[str] = field(default_factory=list)
+    image_flags: list[bool] = field(default_factory=list)
 
     def _show_status_message(self, message: str, is_error: bool = False) -> None:
         _ = is_error
         self.status_messages.append(message)
 
-    def _send_worker_task(self, code: str) -> None:
+    def _send_worker_task(self, code: str, emit_image: bool = True) -> None:
         self.sent_tasks.append(code)
+        self.image_flags.append(emit_image)
 
 
 @dataclass
@@ -680,13 +683,101 @@ def test_request_coordinates_can_skip_status_message(monkeypatch) -> None:
 
     monkeypatch.setattr(
         "xconv2.main_window.coordinate_list",
-        lambda index: f"TASK_FOR_{index}",
+        lambda index, *, request_id: f"TASK_FOR_{index}",
     )
 
     CFVMain._request_coordinates_for_field(dummy, 4, show_status=False)
 
     assert dummy.status_messages == []
     assert dummy.sent_tasks == ["TASK_FOR_4"]
+    assert dummy.image_flags == [False]
+
+
+def test_coordinate_request_does_not_restore_previous_plot_from_worker(monkeypatch) -> None:
+    import xconv2.worker as worker
+
+    payloads = []
+    host = types.SimpleNamespace(
+        worker=types.SimpleNamespace(write=payloads.append),
+        _pending_worker_task_starts=deque(),
+        _show_status_message=lambda message: None,
+    )
+    host._send_worker_task = lambda code, **kwargs: CFVMain._send_worker_task(host, code, **kwargs)
+    CFVMain._request_coordinates_for_field(host, 1)
+    payload = payloads[0].decode()
+
+    coords = [("time", [0, 1, 2]), ("latitude", [-30, 0, 30]), ("longitude", [0, 90, 180])]
+    fields = [
+        types.SimpleNamespace(squeeze=lambda: "old-field"),
+        types.SimpleNamespace(squeeze=lambda: "new-field"),
+    ]
+    messages = []
+    monkeypatch.setattr(worker, "worker_globals", {
+        "f": fields,
+        "coordinate_info": lambda fld: coords if fld == "new-field" else [],
+    })
+    monkeypatch.setattr(worker.sys, "stdin", StringIO(payload))
+    monkeypatch.setattr(worker, "configure_logging", lambda: None)
+    monkeypatch.setattr(worker, "_apply_worker_logging_configuration", lambda **kwargs: None)
+    monkeypatch.setattr(worker, "_ensure_worker_runtime_loaded", lambda: None)
+    monkeypatch.setattr(worker, "_worker_rss_mb", lambda: 0.0)
+    monkeypatch.setattr(worker, "_log_task_memory", lambda *args, **kwargs: None)
+    monkeypatch.setattr(worker, "matplotlib", types.SimpleNamespace(get_backend=lambda: "Agg"), raising=False)
+    monkeypatch.setattr(worker, "send_to_gui", lambda prefix, data=None: messages.append((prefix, data)))
+    monkeypatch.setattr(
+        worker, "_emit_latest_plot_image",
+        lambda: worker.send_to_gui("IMG_READY", b"previous-field-image"),
+    )
+
+    worker.main()
+
+    request_id, field_index = host._pending_coordinate_request
+    assert ("COORD", {"request_id": request_id, "field_index": field_index, "coords": coords}) in messages
+    assert ("STATUS:Task Complete", None) in messages
+    assert not any(prefix == "IMG_READY" for prefix, _ in messages)
+    assert worker._extract_task_headers(payload).emit_image is False
+
+
+def test_rapid_field_switch_applies_only_latest_coordinate_response() -> None:
+    from xconv2.worker_message_router import WorkerMessageRouter
+
+    host = _DummyCoordRequestMain()
+    built = []
+    plotted = []
+    host._normalize_coordinate_metadata = lambda coords: {"time": {"values": coords}}
+    host.build_dynamic_sliders = built.append
+    host._auto_plot_initial_field_selection = lambda: plotted.append("plot")
+    responses = []
+    request_ids = []
+
+    # A -> B -> A before any worker responses reach the GUI.
+    for index in (0, 1, 0):
+        CFVMain._request_coordinates_for_field(host, index)
+        request_ids.append(host._pending_coordinate_request[0])
+        field = types.SimpleNamespace(squeeze=lambda: object())
+        namespace = {
+            "f": [field, field],
+            "coordinate_info": lambda fld: [0, 1, 2],
+            "send_to_gui": lambda prefix, payload: responses.append((prefix, payload)),
+        }
+        exec(host.sent_tasks[-1], namespace)
+
+    assert len(set(request_ids)) == 3
+    host._pending_initial_autoplot_field_index = 0
+    router = WorkerMessageRouter(host)
+    for prefix, payload in responses[:-1]:
+        encoded = base64.b64encode(pickle.dumps(payload)).decode()
+        router.handle_line(f"{prefix}:{encoded}")
+        assert built == []
+        assert plotted == []
+        assert host._pending_initial_autoplot_field_index == 0
+    prefix, payload = responses[-1]
+    encoded = base64.b64encode(pickle.dumps(payload)).decode()
+    router.handle_line(f"{prefix}:{encoded}")
+    assert built == [{"time": {"values": [0, 1, 2]}}]
+    assert plotted == ["plot"]
+    assert host._pending_coordinate_request is None
+    assert all(flag is False for flag in host.image_flags)
 
 
 def test_request_plot_options_shows_lineplot_dialog_when_lineplot_selected() -> None:
@@ -840,7 +931,6 @@ def test_on_field_clicked_resets_ui_then_requests_coordinates() -> None:
     field_controller = _DummyFieldMetadataController()
     window.field_metadata_controller = field_controller
     window.field_list_widget = _DummyFieldListWidget(index_to_return=7)
-    window._allow_initial_autoplot_on_next_field_click = True
 
     call_order: list[tuple[str, object]] = []
 
@@ -864,15 +954,65 @@ def test_on_field_clicked_resets_ui_then_requests_coordinates() -> None:
         ("request", (7, False)),
     ]
     assert window._pending_initial_autoplot_field_index == 7
-    assert window._allow_initial_autoplot_on_next_field_click is False
 
 
-def test_on_field_clicked_after_first_click_does_not_set_initial_autoplot_pending() -> None:
+def test_field_selection_change_clears_plot_before_loading_field_details() -> None:
+    window = CFVMain.__new__(CFVMain)
+    window._pending_coordinate_request = ("old-request", 0)
+    item = object()
+    window.field_list_widget = _DummyContextFieldListWidget(selected=[item], current=item)
+    window.field_list_widget.row = lambda selected: 1
+    calls = []
+    window._set_plot_loading = lambda loading: calls.append(("loading", loading))
+    window._clear_plot_canvas = lambda message: calls.append(("clear", message))
+    window.field_metadata_controller = types.SimpleNamespace(
+        on_field_clicked=lambda selected: calls.append(("details", selected)),
+    )
+
+    CFVMain.on_field_selection_changed(window)
+
+    assert calls == [
+        ("loading", False),
+        ("clear", "Waiting for data..."),
+        ("details", item),
+    ]
+    assert window._selected_field_indices == [1]
+    assert window._pending_coordinate_request is None
+
+
+def test_clear_plot_canvas_discards_previous_image_and_repaints_immediately() -> None:
+    app = QApplication.instance() or QApplication([])
+    painted = []
+
+    class PlotLabel(QLabel):
+        def paintEvent(self, event):
+            painted.append(self.text())
+            super().paintEvent(event)
+
+    frame = PlotLabel()
+    old_plot = QPixmap(20, 20)
+    old_plot.fill(Qt.red)
+    frame.setPixmap(old_plot)
+    frame.show()
+    app.processEvents()
+    painted.clear()
+    host = types.SimpleNamespace(plot_frame=frame, _plot_pixmap_original=old_plot)
+    controller = PlotViewController(host)
+    try:
+        controller.clear_plot_canvas("Waiting for data...")
+        assert host._plot_pixmap_original is None
+        assert frame.pixmap().isNull()
+        assert frame.text() == "Waiting for data..."
+        assert painted == ["Waiting for data..."]
+    finally:
+        frame.close()
+
+
+def test_on_field_clicked_after_first_click_sets_initial_autoplot_pending() -> None:
     window = CFVMain.__new__(CFVMain)
     field_controller = _DummyFieldMetadataController()
     window.field_metadata_controller = field_controller
     window.field_list_widget = _DummyFieldListWidget(index_to_return=3)
-    window._allow_initial_autoplot_on_next_field_click = False
 
     call_order: list[tuple[str, object]] = []
     window._reset_ui_for_new_field_selection = types.MethodType(
@@ -891,7 +1031,78 @@ def test_on_field_clicked_after_first_click_does_not_set_initial_autoplot_pendin
         ("reset", None),
         ("request", (3, False)),
     ]
-    assert window._pending_initial_autoplot_field_index is None
+    assert window._pending_initial_autoplot_field_index == 3
+
+
+def test_switching_fields_autoplots_first_slice_of_each_selected_field() -> None:
+    window = CFVMain.__new__(CFVMain)
+    window.field_metadata_controller = _DummyFieldMetadataController()
+    items = [object(), object()]
+    field_list = _DummyContextFieldListWidget()
+    field_list.row = items.index
+    window.field_list_widget = field_list
+    window._pending_initial_autoplot_field_index = None
+    window._reset_ui_for_new_field_selection = lambda: None
+    window.plot_button = types.SimpleNamespace(isEnabled=lambda: True)
+    window.plot_view_controller = types.SimpleNamespace(
+        set_plot_type_options=lambda *args: None,
+    )
+    window._update_range_labels = lambda name: None
+    window._refresh_plot_summary = lambda: None
+    window._show_status_message = lambda *args, **kwargs: None
+
+    metadata = {
+        "time": {"values": [0, 1, 2]},
+        "level": {"values": [1000, 850, 500]},
+        "latitude": {"values": [-30, -10, 10, 30]},
+        "longitude": {"values": [0, 90, 180, 270, 360]},
+    }
+
+    def build_sliders(payload):
+        window.controls = {
+            name: {
+                "values": entry["values"],
+                "range_slider": _FakeRangeSlider((0, len(entry["values"]) - 1)),
+            }
+            for name, entry in payload.items()
+        }
+        window.available_plot_kinds = ["contour"]
+
+    window.build_dynamic_sliders = build_sliders
+    requested_coordinates = []
+    def request_coordinates(index, show_status=True):
+        requested_coordinates.append(index)
+        window._pending_coordinate_request = (str(len(requested_coordinates)), index)
+
+    window._request_coordinates_for_field = request_coordinates
+    plots = []
+    window._request_plot_update = lambda: plots.append((
+        window._selected_field_index_for_operation("Plot"),
+        {name: control["range_slider"].value() for name, control in window.controls.items()},
+    ))
+    for item in [items[0], items[1], items[0]]:
+        field_list.selected = [item]
+        field_list.current = item
+        CFVMain.on_field_clicked(window, item)
+        request_id, field_index = window._pending_coordinate_request
+        payload = {
+            "request_id": request_id,
+            "field_index": field_index,
+            "coords": [(name, entry["values"]) for name, entry in metadata.items()],
+        }
+        encoded = base64.b64encode(pickle.dumps(payload)).decode()
+        window.worker = _FakeWorker([f"COORD:{encoded}\n"])
+        CFVMain.handle_worker_output(window)
+        assert window._pending_initial_autoplot_field_index is None
+
+    assert requested_coordinates == [0, 1, 0]
+    first_slice = {
+        "time": (0, 0),
+        "level": (0, 0),
+        "latitude": (0, 3),
+        "longitude": (0, 4),
+    }
+    assert plots == [(0, first_slice), (1, first_slice), (0, first_slice)]
 
 
 def test_auto_plot_initial_field_selection_collapses_extra_dims_and_requests_contour() -> None:

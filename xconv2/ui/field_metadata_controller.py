@@ -260,6 +260,8 @@ class FieldMetadataController:
                 item.setBackground(row_color)
             if row_generated:
                 item.setForeground(QColor("#b00020"))
+            elif row_color is not None:
+                item.setForeground(QColor("#000000"))
             font = item.font()
             font.setItalic(row_generated)
             item.setFont(font)

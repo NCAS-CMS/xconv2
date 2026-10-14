@@ -59,15 +59,19 @@ map_resolution_options = (
 )
 use_lon_0 = ('npstere', 'spstere', 'ortho', 'merc', 'moll', 'robin', 'lcc')
 
-def coordinate_list(index: int) -> str:
+def coordinate_list(index: int, *, request_id: str | None = None) -> str:
     """Generate worker code that emits 1D dimension-coordinate values for a field."""
+    payload = (
+        "coords" if request_id is None else
+        f"{{'request_id': {request_id!r}, 'field_index': {index}, 'coords': coords}}"
+    )
     return textwrap.dedent(
         f"""
         _cfview_field_index = {index}
         fld = f[{index}]
         fld = fld.squeeze() # make it easier for the GUI to handle coordinates with length 1
         coords = coordinate_info(fld)
-        send_to_gui('COORD', coords) #omit4save
+        send_to_gui('COORD', {payload}) #omit4save
         """
     ).lstrip()
 
@@ -505,4 +509,3 @@ def _save_data_code(save_data_path: str) -> str:
         """
     ).lstrip()
     return payload_code
-

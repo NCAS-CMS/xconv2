@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -39,6 +40,40 @@ class _DummyHost(QWidget):
         super().__init__()
         self.field_list_widget = QListWidget(self)
         self.status = _DummyStatus()
+
+    def _field_list_rows(self) -> int:
+        return 12
+
+
+@pytest.mark.parametrize("dark_mode", [False, True], ids=["light", "dark"])
+def test_source_tinted_fields_have_explicit_dark_text(dark_mode: bool) -> None:
+    _ensure_qapp()
+    host = _DummyHost()
+    palette = host.field_list_widget.palette()
+    palette.setColor(QPalette.Text, QColor("#ffffff" if dark_mode else "#000000"))
+    host.field_list_widget.setPalette(palette)
+    controller = FieldMetadataController(host)
+    metadata = [{"identity": "temperature", "detail": "temperature", "properties": {}}]
+
+    controller.populate_field_list(metadata, source_file="/tmp/first.nc")
+    controller.populate_field_list(metadata, append=True, source_file="/tmp/second.nc")
+    controller.populate_field_list(metadata, append=True, generated=True)
+
+    first = host.field_list_widget.item(0)
+    second = host.field_list_widget.item(1)
+    generated = host.field_list_widget.item(2)
+    assert first.background().color() == QColor("#f6f8d7")
+    assert second.background().color() == QColor("#d9f0ff")
+    for item in (first, second):
+        assert item.foreground().style() == Qt.SolidPattern
+        assert item.foreground().color() == QColor("#000000")
+    assert generated.foreground().color() == QColor("#b00020")
+    assert generated.font().italic()
+
+    host.field_list_widget.setCurrentItem(generated)
+    assert controller.mark_selected_items_saved("/tmp/saved.nc") == 1
+    assert generated.foreground().color() == QColor("#000000")
+    assert not generated.font().italic()
 
 
 def test_show_selection_properties_clicking_key_and_value_exposes_full_text(

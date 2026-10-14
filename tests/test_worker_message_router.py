@@ -4,8 +4,74 @@ from dataclasses import dataclass, field
 import base64
 import logging
 import pickle
+from types import SimpleNamespace
 
 from xconv2.worker_message_router import WorkerMessageRouter, WorkerStatusHandler
+
+
+def test_coordinate_router_ignores_stale_requests_without_consuming_autoplot() -> None:
+    built = []
+    plotted = []
+    modes = []
+    host = SimpleNamespace(
+        _pending_coordinate_request=("request-b", 1),
+        _pending_initial_autoplot_field_index=1,
+        _normalize_coordinate_metadata=lambda coords: {"coords": coords},
+        build_dynamic_sliders=built.append,
+        _set_selection_panel_mode=modes.append,
+        _auto_plot_initial_field_selection=lambda: plotted.append("plot"),
+    )
+    router = WorkerMessageRouter(host)
+
+    def deliver(request_id, index, coords):
+        payload = {"request_id": request_id, "field_index": index, "coords": coords}
+        encoded = base64.b64encode(pickle.dumps(payload)).decode("ascii")
+        router.handle_line(f"COORD:{encoded}")
+
+    deliver("request-a", 0, ["old coordinates"])
+    deliver("request-a", 0, [])
+    deliver("request-b", 0, ["wrong field"])
+    assert built == []
+    assert plotted == []
+    assert modes == []
+    assert host._pending_coordinate_request == ("request-b", 1)
+    assert host._pending_initial_autoplot_field_index == 1
+
+    deliver("request-b", 1, ["new coordinates"])
+    assert built == [{"coords": ["new coordinates"]}]
+    assert plotted == ["plot"]
+    assert host._pending_coordinate_request is None
+
+    # A repeated response, or an old request for the same field, is still stale.
+    host._pending_coordinate_request = ("request-b-again", 1)
+    deliver("request-b", 1, ["old coordinates for same field"])
+    assert len(built) == 1
+    assert host._pending_coordinate_request == ("request-b-again", 1)
+    host._pending_coordinate_request = None
+    deliver("request-b-again", 1, ["deselected field"])
+    assert len(built) == 1
+
+
+def test_current_empty_coordinate_response_clears_only_its_pending_plot() -> None:
+    cleared = []
+    messages = []
+    modes = []
+    host = SimpleNamespace(
+        _pending_coordinate_request=("current", 2),
+        _normalize_coordinate_metadata=lambda coords: {},
+        _set_selection_panel_mode=modes.append,
+        _clear_pending_initial_autoplot=lambda: cleared.append(True),
+        _show_status_message=messages.append,
+    )
+    payload = {"request_id": "current", "field_index": 2, "coords": []}
+    encoded = base64.b64encode(pickle.dumps(payload)).decode("ascii")
+
+    WorkerMessageRouter(host).handle_line(f"COORD:{encoded}")
+
+    assert host._pending_coordinate_request is None
+    assert cleared == [True]
+    assert modes == ["multi"]
+    assert messages == ["No slider-friendly coordinates were found. Use coordinate bounds commands."]
 
 
 @dataclass
