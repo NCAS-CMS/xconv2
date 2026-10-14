@@ -4,9 +4,11 @@ from io import BytesIO
 import json
 import logging
 from pathlib import Path
+import shutil
 
 import cf
 import pytest
+from service_helpers import S3_ACCESS_KEY, S3_SECRET_KEY
 
 import xconv2.worker as worker
 
@@ -306,23 +308,26 @@ def test_read_remote_fields_supports_multiple_paths(tmp_path: Path) -> None:
     ]
 
 
-@pytest.mark.skip(reason="S3/minio integration tests hanging temporarily")
+@pytest.mark.skipif(
+    shutil.which("weed") is None,
+    reason="S3 integration requires the native SeaweedFS 'weed' binary on PATH; no Docker is used.",
+)
 @pytest.mark.integration
-def test_read_remote_fields_from_s3_via_minio(minio_service, temp_bucket) -> None:
-    """_read_remote_fields returns real cf fields when given a live MinIO S3 filesystem."""
+def test_read_remote_fields_from_s3_via_seaweedfs(s3_service, temp_bucket) -> None:
+    """_read_remote_fields returns real cf fields when given a live SeaweedFS S3 filesystem."""
     sample_file = Path(__file__).resolve().parents[1] / "data" / "test1.nc"
     object_name = "test1.nc"
-    minio_service.fput_object(temp_bucket, object_name, str(sample_file))
+    s3_service.upload_file(temp_bucket, object_name, str(sample_file))
 
     descriptor = {
         "protocol": "s3",
         "storage_options": {
-            "key": "minioadmin",
-            "secret": "minioadmin",
-            "client_kwargs": {"endpoint_url": minio_service.endpoint_url},
+            "key": S3_ACCESS_KEY,
+            "secret": S3_SECRET_KEY,
+            "client_kwargs": {"endpoint_url": s3_service.endpoint_url},
         },
         "root_path": "",
-        "display_name": "minio-test",
+        "display_name": "seaweedfs-test",
         "uri_scheme": "s3",
         "uri_authority": "",
         "proxy_jump": None,

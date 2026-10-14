@@ -20,6 +20,4 @@ dependencies:
   - pip:
       - "git+https://github.com/ncas-cms/cfdm.git@main"
       - "git+https://github.com/ncas-cms/cf-python.git@main"
-      - "-e ."  # xconv2 is not yet on conda-forge
-      - docker
-      - minio
+      - "-e .[test]"  # Native SeaweedFS 'weed' is installed separately; no Docker.

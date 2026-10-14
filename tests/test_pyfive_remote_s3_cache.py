@@ -13,13 +13,30 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import shutil
 
 import pytest
+import pyfive
+from service_helpers import S3_ACCESS_KEY, S3_SECRET_KEY
 
 from xconv2.remote_access import RemoteFilesystemSpec, create_filesystem
 
 
+pytestmark = pytest.mark.skipif(
+    shutil.which("weed") is None,
+    reason="S3 integration requires the native SeaweedFS 'weed' binary on PATH; no Docker is used.",
+)
+SAMPLE_FILES = [
+    Path(__file__).resolve().parents[1] / "data" / name
+    for name in ("da193a_25_3hr__198808-198808.nc", "da193a_25_3hr__198807-198807.nc")
+]
+
+
 @pytest.mark.integration
+@pytest.mark.skipif(
+    not any(path.is_file() for path in SAMPLE_FILES),
+    reason="Large S3 cache test requires a full-month da193a sample in data/ (not distributed).",
+)
 @pytest.mark.parametrize(
     ("cat_range_allowed", "expected_strategy"),
     [
@@ -31,7 +48,7 @@ from xconv2.remote_access import RemoteFilesystemSpec, create_filesystem
 def test_pyfive_remote_s3_read_full_dataset_with_cache_and_cat_range_toggle(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
-    minio_service,
+    s3_service,
     temp_bucket: str,
     cat_range_allowed: bool,
     expected_strategy: str,
@@ -43,22 +60,14 @@ def test_pyfive_remote_s3_read_full_dataset_with_cache_and_cat_range_toggle(
     2. cat_ranges path (cat_ranges=True) should also cache but currently fails
        due to BlocksizeMismatchError in fsspec's CachingFileSystem.cat_ranges()
     """
-    pyfive = pytest.importorskip("pyfive")
-
-    sample_candidates = [
-        Path(__file__).resolve().parents[1] / "data" / "da193a_25_3hr__198808-198808.nc",
-        Path(__file__).resolve().parents[1] / "data" / "da193a_25_3hr__198807-198807.nc",
-    ]
-    sample_file = next((path for path in sample_candidates if path.is_file()), None)
-    if sample_file is None:
-        pytest.skip("S3 integration test requires da193a sample data in data/")
+    sample_file = next(path for path in SAMPLE_FILES if path.is_file())
 
     object_name = sample_file.name
-    minio_service.fput_object(temp_bucket, object_name, str(sample_file))
+    s3_service.upload_file(temp_bucket, object_name, str(sample_file))
 
-    endpoint_url = str(getattr(minio_service, "endpoint_url", "")).strip()
-    access_key = "minioadmin"
-    secret_key = "minioadmin"
+    endpoint_url = s3_service.endpoint_url
+    access_key = S3_ACCESS_KEY
+    secret_key = S3_SECRET_KEY
 
     dataset_path = f"{temp_bucket}/{object_name}"
     spec = RemoteFilesystemSpec(
@@ -69,7 +78,7 @@ def test_pyfive_remote_s3_read_full_dataset_with_cache_and_cat_range_toggle(
             "client_kwargs": {"endpoint_url": endpoint_url},
         },
         root_path="",
-        display_name="minio-s3",
+        display_name="seaweedfs-s3",
         uri_scheme="s3",
         uri_authority="",
     )

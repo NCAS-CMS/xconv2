@@ -43,7 +43,7 @@ jobs:
           miniforge-version: "latest"
           use-mamba: true
       - name: Install xconv2
-        run: pip install -e .
+        run: pip install -e ".[test]"
       - name: Run pip check
         run: pip check
       # - name: Run pre-commit with mypy
@@ -57,5 +57,17 @@ jobs:
       - name: Test xconv2
         run: |
           which xconv2
-      - name: Test with pytest
-        run: pytest
+      - name: Test without external services
+        run: pytest -m "not integration"
+      - name: Install native SeaweedFS (no Docker)
+        run: |
+          mkdir -p "$RUNNER_TEMP/seaweedfs"
+          curl --fail --location --retry 3 \
+            https://github.com/seaweedfs/seaweedfs/releases/download/4.48/linux_amd64.tar.gz \
+            -o "$RUNNER_TEMP/seaweedfs.tar.gz"
+          tar -xzf "$RUNNER_TEMP/seaweedfs.tar.gz" -C "$RUNNER_TEMP/seaweedfs" weed
+          echo "$RUNNER_TEMP/seaweedfs" >> "$GITHUB_PATH"
+      - name: Test local HTTPS and SeaweedFS S3 integration
+        run: |
+          weed version
+          pytest -m integration -ra --durations=10

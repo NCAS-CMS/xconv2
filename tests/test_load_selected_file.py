@@ -8,6 +8,7 @@ from pathlib import Path
 import types
 
 import pytest
+import cf
 from PySide6.QtCore import Qt
 
 from xconv2.cf_templates import coordinate_list
@@ -124,8 +125,6 @@ def test_load_selected_file_task_executes_with_mock_cf_example_fields() -> None:
     """
     The generated worker code should emit field metadata when executed.
     """
-    cf = pytest.importorskip("cf")
-
     window = _DummyWindow()
     file_path = "/tmp/mock-data.nc"
     CFVMain._load_selected_file(window, file_path)
@@ -309,8 +308,6 @@ def test_load_selected_file_does_not_release_remote_session() -> None:
 
 def test_coordinate_list_emits_coordinates_for_example_field() -> None:
     """Coordinate template should emit a non-empty coordinate payload for a sample field."""
-    cf = pytest.importorskip("cf")
-
     messages: list[tuple[str, object]] = []
     namespace = {
         "cf": cf,

@@ -30,8 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = [
-    "docker",
-    "minio",
+    "cryptography",
     "pytest",
 ]
 
@@ -52,6 +51,9 @@ xconv2 = ["assets/*.svg", "assets/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: tests exercising local HTTPS or native SeaweedFS S3 services (no Docker)",
+]
 filterwarnings = [
     "ignore:distutils Version classes are deprecated. Use packaging.version instead.:DeprecationWarning:cfplot.cfplot",
     "ignore:'maxsplit' is passed as positional argument:DeprecationWarning:cf.functions",
