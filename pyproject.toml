@@ -4,7 +4,6 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xconv2"
-version = "0.3.0b2"
 description = "High-performance data viewer and simple data converter"
 requires-python = ">=3.12"
 dependencies = [
@@ -25,6 +24,10 @@ dependencies = [
     "superqt",
     "umfive>=0.2.2",
     "zarr",
+]
+dynamic = [
+    "readme",
+    "version",
 ]
 
 [project.optional-dependencies]
@@ -47,6 +50,12 @@ include = ["xconv2*"]
 
 [tool.setuptools.package-data]
 xconv2 = ["assets/*.svg", "assets/*.png"]
+
+[tool.setuptools.dynamic]
+readme = {file = "README.md", content-type = "text/markdown"}
+
+[tool.setuptools_scm]
+version_scheme = "release-branch-semver"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
