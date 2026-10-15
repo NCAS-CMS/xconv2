@@ -13,6 +13,7 @@ dependencies:
   - cryptography
   - esmpy
   - fsspec
+  - jsonschema  # missing in pystac-client github.com/conda-forge/pystac-client-feedstock/issues/34
   - numpy
   - pandas
   - paramiko
