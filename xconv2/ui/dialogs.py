@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+from importlib.util import find_spec
 from pathlib import Path
 import shlex
 from typing import Any, Callable
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QIcon, QMouseEvent, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QAbstractItemView,
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTabBar,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -735,6 +737,31 @@ class OpenURIDialog(QDialog):
         return uri, bool(uri), False
 
 
+class _RemoteProtocolTabBar(QTabBar):
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        index = self.tabAt(event.position().toPoint())
+        if index >= 0 and self.tabText(index) == "SSH" and not self.isTabEnabled(index):
+            QMessageBox.information(
+                self,
+                "SSH support unavailable",
+                "SSH support requires the p5rem package, which can be pip installed with pip install p5rem.",
+            )
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+def _remote_protocol_tabs(s3: QWidget, https: QWidget, ssh: QWidget) -> QTabWidget:
+    tabs = QTabWidget()
+    tabs.setTabBar(_RemoteProtocolTabBar(tabs))
+    tabs.addTab(s3, "S3")
+    tabs.addTab(https, "HTTPS")
+    ssh_index = tabs.addTab(ssh, "SSH")
+    # Check without importing p5rem/paramiko on the GUI thread.
+    tabs.setTabEnabled(ssh_index, find_spec("p5rem") is not None)
+    return tabs
+
+
 class RemoteConfigurationDialog(QDialog):
     """Collect remote configuration details before opening a remote navigator."""
 
@@ -774,10 +801,9 @@ class RemoteConfigurationDialog(QDialog):
         intro_row.addStretch(1)
         layout.addLayout(intro_row)
 
-        self.protocol_tabs = QTabWidget()
-        self.protocol_tabs.addTab(self._build_s3_tab(), "S3")
-        self.protocol_tabs.addTab(self._build_http_tab(), "HTTPS")
-        self.protocol_tabs.addTab(self._build_ssh_tab(), "SSH")
+        self.protocol_tabs = _remote_protocol_tabs(
+            self._build_s3_tab(), self._build_http_tab(), self._build_ssh_tab()
+        )
         layout.addWidget(self.protocol_tabs)
 
         layout.addWidget(self._build_cache_group())
@@ -1968,7 +1994,11 @@ class RemoteConfigurationDialog(QDialog):
             return
 
         protocol_index = state.get("protocol_index")
-        if isinstance(protocol_index, int) and 0 <= protocol_index < self.protocol_tabs.count():
+        if (
+            isinstance(protocol_index, int)
+            and 0 <= protocol_index < self.protocol_tabs.count()
+            and self.protocol_tabs.isTabEnabled(protocol_index)
+        ):
             self.protocol_tabs.setCurrentIndex(protocol_index)
 
         s3_mode = state.get("s3_mode")
@@ -2269,10 +2299,9 @@ class RemoteOpenDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Choose a saved remote short name to open"))
 
-        self.protocol_tabs = QTabWidget()
-        self.protocol_tabs.addTab(self._build_s3_tab(), "S3")
-        self.protocol_tabs.addTab(self._build_http_tab(), "HTTPS")
-        self.protocol_tabs.addTab(self._build_ssh_tab(), "SSH")
+        self.protocol_tabs = _remote_protocol_tabs(
+            self._build_s3_tab(), self._build_http_tab(), self._build_ssh_tab()
+        )
         layout.addWidget(self.protocol_tabs)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
@@ -2360,7 +2389,7 @@ class RemoteOpenDialog(QDialog):
         protocol = state.get("protocol")
         if isinstance(protocol, str):
             for index in range(self.protocol_tabs.count()):
-                if self.protocol_tabs.tabText(index) == protocol:
+                if self.protocol_tabs.tabText(index) == protocol and self.protocol_tabs.isTabEnabled(index):
                     self.protocol_tabs.setCurrentIndex(index)
                     break
 
@@ -2960,4 +2989,3 @@ class FilterDialog(QDialog):
 
         QMessageBox.information(self, "Filter configuration", json.dumps(config, indent=2))
         self.accept()
-

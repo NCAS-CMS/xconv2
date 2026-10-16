@@ -4,9 +4,72 @@ import json
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from xconv2.ui.dialogs import RemoteConfigurationDialog, RemoteOpenDialog
+
+
+@pytest.mark.parametrize("dialog_cls", [RemoteConfigurationDialog, RemoteOpenDialog])
+@pytest.mark.parametrize("available", [False, True])
+def test_ssh_tab_availability_and_click_message(monkeypatch, dialog_cls, available) -> None:
+    app = _ensure_qapp()
+    monkeypatch.setattr(
+        "xconv2.ui.dialogs.find_spec",
+        lambda name: object() if available else None,
+    )
+    messages = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        lambda parent, title, text: messages.append((title, text)),
+    )
+    dialog = dialog_cls(None)
+    try:
+        assert dialog.protocol_tabs.isTabEnabled(0)
+        assert dialog.protocol_tabs.isTabEnabled(1)
+        assert dialog.protocol_tabs.isTabEnabled(2) is available
+        dialog.show()
+        app.processEvents()
+        bar = dialog.protocol_tabs.tabBar()
+
+        QTest.mouseClick(bar, Qt.MouseButton.LeftButton, pos=bar.tabRect(2).center())
+
+        if available:
+            assert dialog.protocol_tabs.currentIndex() == 2
+            assert messages == []
+        else:
+            assert dialog.protocol_tabs.currentIndex() == 0
+            assert messages == [
+                (
+                    "SSH support unavailable",
+                    "SSH support requires the p5rem package, which can be pip installed with pip install p5rem.",
+                )
+            ]
+            QTest.mouseClick(bar, Qt.MouseButton.LeftButton, pos=bar.tabRect(1).center())
+            assert dialog.protocol_tabs.currentIndex() == 1
+            assert len(messages) == 1
+    finally:
+        dialog.close()
+
+
+@pytest.mark.parametrize("dialog_cls", [RemoteConfigurationDialog, RemoteOpenDialog])
+@pytest.mark.parametrize("available", [False, True])
+def test_restore_ssh_tab_respects_package_availability(monkeypatch, dialog_cls, available) -> None:
+    _ensure_qapp()
+    monkeypatch.setattr(
+        "xconv2.ui.dialogs.find_spec",
+        lambda name: object() if available else None,
+    )
+    messages = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *args: messages.append(args))
+    dialog = dialog_cls(None, state={"protocol_index": 2, "protocol": "SSH"})
+    try:
+        assert dialog.protocol_tabs.currentIndex() == (2 if available else 0)
+        assert messages == []
+    finally:
+        dialog.close()
 
 
 def _ensure_qapp() -> QApplication:
