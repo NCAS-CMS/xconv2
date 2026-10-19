@@ -43,6 +43,20 @@ and then you should have `xconv2` available on your command line in that environ
 
 See [Running tests](docs/dev_notes.md#running-tests) for setup and skip conditions.
 
+### Optional SSH support
+
+SSH browsing requires the optional `p5rem` package. It is not a dependency of
+the PyPI package or the base Conda environment. Install it explicitly into the
+environment used to run xconv2:
+
+```bash
+pip install p5rem
+```
+
+Without `p5rem`, the SSH tab is greyed out in the remote browsing and
+configuration dialogs. Clicking it displays installation guidance; S3 and
+HTTPS remain available.
+
 ## Documentation
 
 No user documentation is yet available, but it is designed to be intuitive
