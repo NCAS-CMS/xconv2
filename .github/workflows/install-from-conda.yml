@@ -1,0 +1,59 @@
+name: Install from conda-forge
+permissions: {}
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "0 4 * * *"
+
+# Required shell entrypoint to have properly configured bash shell
+defaults:
+  run:
+    shell: bash -l {0}
+
+jobs:
+  linux:
+    runs-on: "ubuntu-latest"
+    env:
+      DISPLAY: ':99.0'
+    if: github.repository == 'NCAS-CMS/xconv2' # avoid GAs in forks
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+      # fail-fast set to False allows all other tests
+      # in the workflow to run regardless of any fail
+      fail-fast: false
+    name: Linux Python ${{ matrix.python-version }}
+    steps:
+      - uses: tlambert03/setup-qt-libs@v1
+      - name: build "display"
+        run: |
+          /sbin/start-stop-daemon --start --quiet --pidfile /tmp/custom_xvfb_99.pid --make-pidfile --background --exec /usr/bin/Xvfb -- :99 -screen 0 1920x1200x24 -ac +extension GLX
+      - uses: conda-incubator/setup-miniconda@be893c923ea9cf1cf7cd510fbdde27c7e18cbdcb # v4.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          miniforge-version: "latest"
+          use-mamba: true
+      - name: Record versions
+        run: |
+          mamba --version
+          which conda
+          which mamba
+          python -V
+      - name: Install xconv2
+        run: mamba install xconv2
+      - name: Verify installation
+        run: |
+          python -c "import xconv2"
+          which xconv2
+      - name: Check environment contents
+        run: |
+          conda list
+          pip list
+      - name: Clone xconv2 source and run fast tests
+        run: |
+          mamba install pytest
+          git clone https://github.com/NCAS-CMS/xconv2.git
+          cd xconv2
+          pytest -m "not integration"
