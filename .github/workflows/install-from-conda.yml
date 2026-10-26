@@ -47,8 +47,13 @@ jobs:
       - name: Verify installation
         run: |
           python -c "import xconv2"
-          xconv2 --help
+          which xconv2
       - name: Check environment contents
         run: |
           conda list
-          pip list 
+          pip list
+      - name: Clone xconv2 source and run fast tests
+        run: |
+          git clone https://github.com/NCAS-CMS/xconv2.git
+          cd xconv2
+          pytest -m "not integration"
