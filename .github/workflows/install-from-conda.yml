@@ -16,6 +16,8 @@ defaults:
 jobs:
   linux:
     runs-on: "ubuntu-latest"
+    env:
+      DISPLAY: ':99.0'
     if: github.repository == 'NCAS-CMS/xconv2' # avoid GAs in forks
     strategy:
       matrix:
@@ -25,6 +27,10 @@ jobs:
       fail-fast: false
     name: Linux Python ${{ matrix.python-version }}
     steps:
+      - uses: tlambert03/setup-qt-libs@v1
+      - name: build "display"
+        run: |
+          /sbin/start-stop-daemon --start --quiet --pidfile /tmp/custom_xvfb_99.pid --make-pidfile --background --exec /usr/bin/Xvfb -- :99 -screen 0 1920x1200x24 -ac +extension GLX
       - uses: conda-incubator/setup-miniconda@be893c923ea9cf1cf7cd510fbdde27c7e18cbdcb # v4.1.0
         with:
           python-version: ${{ matrix.python-version }}
