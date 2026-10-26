@@ -54,6 +54,7 @@ jobs:
           pip list
       - name: Clone xconv2 source and run fast tests
         run: |
+          mamba install pytest
           git clone https://github.com/NCAS-CMS/xconv2.git
           cd xconv2
           pytest -m "not integration"
