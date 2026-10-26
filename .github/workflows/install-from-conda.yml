@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - add_conda_install_gha
   schedule:
     - cron: "0 4 * * *"
 
