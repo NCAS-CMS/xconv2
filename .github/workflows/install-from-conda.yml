@@ -1,0 +1,48 @@
+name: Install from conda-forge
+permissions: {}
+on:
+  push:
+    branches:
+      - main
+      - add_conda_install_gha
+  schedule:
+    - cron: "0 4 * * *"
+
+# Required shell entrypoint to have properly configured bash shell
+defaults:
+  run:
+    shell: bash -l {0}
+
+jobs:
+  linux:
+    runs-on: "ubuntu-latest"
+    if: github.repository == 'NCAS-CMS/xconv2' # avoid GAs in forks
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+      # fail-fast set to False allows all other tests
+      # in the workflow to run regardless of any fail
+      fail-fast: false
+    name: Linux Python ${{ matrix.python-version }}
+    steps:
+      - uses: conda-incubator/setup-miniconda@be893c923ea9cf1cf7cd510fbdde27c7e18cbdcb # v4.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          miniforge-version: "latest"
+          use-mamba: true
+      - name: Record versions
+        run: |
+          mamba --version
+          which conda
+          which mamba
+          python -V
+      - name: Install xconv2
+        run: mamba install xconv2
+      - name: Verify installation
+        run: |
+          python -c "import xconv2"
+          xconv2 --help
+      - name: Check environment contents
+        run: |
+          conda list
+          pip list 
