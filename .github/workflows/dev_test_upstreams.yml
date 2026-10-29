@@ -68,9 +68,14 @@ jobs:
         run: |
           conda list
           pip list
-          python -c "import cf;print(cf.__file__)"
-          python -c "import pyfive;print(pyfive.__file__)"
-          python -c "import umfive;print(umfive.__file__)"
+      - name: Install path cf-python
+        run: python -c "import cf;print(cf.__file__)"
+      - name: Install path cf-plot
+        run: "import cf_plot;print(cf_plot.__file__)"
+      - name: Install path pyfive
+        run: python -c "import pyfive;print(pyfive.__file__)"
+      - name: Install path umfive
+        run: python -c "import umfive;print(umfive.__file__)"
       - name: Test xconv2
         run: |
           which xconv2
