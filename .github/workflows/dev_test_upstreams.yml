@@ -73,9 +73,9 @@ jobs:
       - name: Install path cf-plot
         run: python -c "import cfplot;print(cfplot.__file__)"
       - name: Install path pyfive
-        run: python -c "import pyfive;print(pyfive.__file__)"
+        run: python -c "import pyfive;print(pyfive.__version__)"
       - name: Install path umfive
-        run: python -c "import umfive;print(umfive.__file__)"
+        run: python -c "import umfive;print(umfive.__version__)"
       - name: Test xconv2
         run: |
           which xconv2
