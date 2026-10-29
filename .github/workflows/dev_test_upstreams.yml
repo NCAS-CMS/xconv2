@@ -71,7 +71,7 @@ jobs:
       - name: Install path cf-python
         run: python -c "import cf;print(cf.__file__)"
       - name: Install path cf-plot
-        run: "import cf_plot;print(cf_plot.__file__)"
+        run: "import cfplot;print(cfplot.__file__)"
       - name: Install path pyfive
         run: python -c "import pyfive;print(pyfive.__file__)"
       - name: Install path umfive
