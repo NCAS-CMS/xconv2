@@ -1,0 +1,81 @@
+name: Test dev upstream dependencies
+
+on:
+  push:
+    branches:
+      - main
+      - test_upsteam_dependencies
+  schedule:
+    - cron: '0 0 * * *'  # nightly
+
+# Required shell entrypoint to have properly configured bash shell
+defaults:
+  run:
+    shell: bash -l {0}
+
+jobs:
+  build:
+
+    name: Test Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    env:
+      DISPLAY: ':99.0'
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.14"]  # add more if any issues
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: tlambert03/setup-qt-libs@v1
+      - name: build "display"
+        run: |
+          /sbin/start-stop-daemon --start --quiet --pidfile /tmp/custom_xvfb_99.pid --make-pidfile --background --exec /usr/bin/Xvfb -- :99 -screen 0 1920x1200x24 -ac +extension GLX
+      - uses: conda-incubator/setup-miniconda@v4
+        with:
+          activate-environment: xconv2
+          environment-file: environment.yml
+          python-version: ${{ matrix.python-version }}
+          miniforge-version: "latest"
+          use-mamba: true
+      # install cf-plot, cf-python, pyfive, umfive from source: dev/main
+      - name: Install cf-plot from source
+        run: |
+          git clone https://github.com/NCAS-CMS/cf-plot.git
+          cd cf-plot
+          pip install -e .
+      - name: Install cf-python from source
+        run: |
+          git clone https://github.com/NCAS-CMS/cf-python.git
+          cd cf-python
+          pip install -e .
+      - name: Install pyfive from source
+        run: |
+          git clone https://github.com/NCAS-CMS/pyfive.git
+          cd pyfive
+          pip install -e .
+      - name: Install umfive from source
+        run: |
+          git clone https://github.com/NCAS-CMS/umfive.git
+          cd umfive
+          pip install -e .
+      # install xconv2 and run all needed tests
+      - name: Install xconv2
+        run: pip install -e ".[test]"
+      - name: Check environment contents
+        run: |
+          conda list
+          pip list
+      - name: Test xconv2
+        run: |
+          which xconv2
+      - name: Test without external services
+        run: pytest -m "not integration"
+      - name: Install SeaweedFS from conda-forge (no Docker)
+        run: conda install --yes --freeze-installed -c conda-forge seaweedfs=4.48
+      - name: Test local HTTPS and SeaweedFS S3 integration
+        run: |
+          weed version
+          pytest -m integration -ra --durations=10
