@@ -25,7 +25,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.14"]  # add more if any issues
+        python-version: ["3.15"]  # always latest supported
 
     steps:
       - uses: actions/checkout@v7.0.1
