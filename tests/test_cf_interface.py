@@ -1290,7 +1290,7 @@ def test_run_contour_plot_applies_levels_annotations_and_save(
     )
 
     assert cfp.cscale_calls == [{"scale": "magma"}]
-    assert cfp.gopen_calls == [{"file": "cfplot.png", "user_plot": 1}]
+    assert cfp.gopen_calls == [{"file": "cfplot.png", "_user_plot": 1}]
     assert cfp.levs_calls == [{"manual": [-1.0, 0.0, 1.0]}]
     assert cfp.setvars_calls == [{"title_fontsize": 10.5, "viewer": None}]
     assert cfp.con_calls
@@ -1349,7 +1349,7 @@ def test_run_contour_plot_sets_title_from_singleton_selection(
         collapse_by_coord={},
     )
 
-    assert cfp.gopen_calls == [{"file": "cfplot.png", "user_plot": 1}]
+    assert cfp.gopen_calls == [{"file": "cfplot.png", "_user_plot": 1}]
     assert cfp.con_calls
     assert cfp.con_calls[-1]["title"] == "time=2000-01-01"
 

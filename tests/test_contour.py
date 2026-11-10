@@ -272,7 +272,7 @@ def test_plot_from_selection_contour_auto_options_executes_and_calls_con() -> No
     assert fld.collapse_calls == [("time: mean", True)]
     assert cfp.levs_calls
     assert cfp.cscale_calls == [{"scale": "magma"}]
-    assert cfp.gopen_calls == [{"file": "cfplot.png", "user_plot": 1}]
+    assert cfp.gopen_calls == [{"file": "cfplot.png", "_user_plot": 1}]
     assert cfp.con_calls
 
 
@@ -302,7 +302,7 @@ def test_plot_from_selection_contour_explicit_levels_and_save_file() -> None:
     fake_plt = _FakePlt()
     messages = _run_generated(code, fld, cfp, plt_obj=fake_plt)
 
-    assert cfp.gopen_calls == [{"file": "cfplot.png", "user_plot": 1}]
+    assert cfp.gopen_calls == [{"file": "cfplot.png", "_user_plot": 1}]
     assert cfp.gclose_calls == 0
     assert cfp.cscale_calls == [{}]
     assert cfp.con_calls
