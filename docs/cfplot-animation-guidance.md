@@ -50,7 +50,7 @@ Recommended usage shape:
 ```python
 cfp.gopen(
     file="cfplot.png",
-    user_plot=1,
+    _user_plot=1,
     animation_session_id=session_id,
     animation_frame_callback=on_frame,
     animation_meta_callback=on_meta,

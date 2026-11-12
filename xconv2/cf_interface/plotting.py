@@ -331,7 +331,7 @@ def run_contour_plot(
     bottom_padding += page_margin_bottom
 
     if normalized_action != "overplot" or not has_existing_figure:
-        cfp.gopen(user_plot=1)
+        cfp.gopen(_user_plot=1)
 
     _apply_levels()
 
@@ -496,7 +496,7 @@ def run_vector_plot(
         vecs_kwargs["title"] = title
 
     if normalized_action != "overplot" or not has_existing_figure:
-        cfp.gopen(user_plot=1)
+        cfp.gopen(_user_plot=1)
 
     cfp.vect(pfld_u, pfld_v, **vecs_kwargs)
 
