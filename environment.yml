@@ -20,7 +20,7 @@ dependencies:
   - pillow
   - prov
   - pyfive >=1.2.0
-  - pyside6
+  - pyside6 >=6.11,<6.12  # https://github.com/NCAS-CMS/xconv2/pull/116
   - pystac-client
   - rdflib
   - s3fs
