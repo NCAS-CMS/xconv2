@@ -19,7 +19,7 @@ dependencies = [
     "pillow",
     "prov",
     "pyfive>=1.2.0",
-    "PySide6",
+    "PySide6>=6.11,<6.12",
     "pystac-client",
     "rdflib",
     "s3fs",
